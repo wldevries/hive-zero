@@ -11,12 +11,23 @@ from typing import Optional
 from .model import HiveNet, create_model, save_model
 from ..encoding.board_encoder import NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE
 from ..encoding.move_encoder import POLICY_SIZE
+from ..encoding.symmetry import apply_symmetry
 
 
 class HiveDataset(Dataset):
-    """Dataset of (board_tensor, reserve_vector, policy_target, value_target) tuples."""
+    """Dataset of (board_tensor, reserve_vector, policy_target, value_target) tuples.
 
-    def __init__(self):
+    Acts as a replay buffer with a max capacity. When full, oldest samples
+    are discarded.
+    """
+
+    def __init__(self, max_size: int = 0, augment: bool = True):
+        """Args:
+            max_size: Maximum number of samples to keep. 0 = unlimited.
+            augment: Apply random symmetry augmentation (12 hex symmetries).
+        """
+        self.max_size = max_size
+        self.augment = augment
         self.board_tensors: list[np.ndarray] = []
         self.reserve_vectors: list[np.ndarray] = []
         self.policy_targets: list[np.ndarray] = []
@@ -29,14 +40,28 @@ class HiveDataset(Dataset):
         self.policy_targets.append(policy_target)
         self.value_targets.append(value_target)
 
+        # Evict oldest if over capacity
+        if self.max_size > 0 and len(self.board_tensors) > self.max_size:
+            self.board_tensors.pop(0)
+            self.reserve_vectors.pop(0)
+            self.policy_targets.pop(0)
+            self.value_targets.pop(0)
+
     def __len__(self):
         return len(self.board_tensors)
 
     def __getitem__(self, idx):
+        board = self.board_tensors[idx]
+        policy = self.policy_targets[idx]
+
+        if self.augment:
+            sym_idx = np.random.randint(0, 12)
+            board, policy = apply_symmetry(board, policy, sym_idx)
+
         return (
-            torch.tensor(self.board_tensors[idx]),
+            torch.tensor(board),
             torch.tensor(self.reserve_vectors[idx]),
-            torch.tensor(self.policy_targets[idx]),
+            torch.tensor(policy),
             torch.tensor(self.value_targets[idx], dtype=torch.float32),
         )
 
@@ -44,7 +69,7 @@ class HiveDataset(Dataset):
 class Trainer:
     """Trains the HiveNet model on self-play data."""
 
-    def __init__(self, model: Optional[HiveNet] = None, lr: float = 0.001,
+    def __init__(self, model: Optional[HiveNet] = None, lr: float = 0.0005,
                  weight_decay: float = 1e-4, device: str = "cpu"):
         self.device = torch.device(device)
         self.model = model or create_model()

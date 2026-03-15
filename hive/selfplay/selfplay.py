@@ -72,6 +72,7 @@ class FastSelfPlay:
         histories = [[] for _ in range(num_games)]
         active = list(range(num_games))
         move_counts = [0] * num_games
+        recent_positions = [[] for _ in range(num_games)]  # track for repetition detection
 
         while active:
             # Batch encode all active positions
@@ -115,20 +116,44 @@ class FastSelfPlay:
                 if total > 0:
                     policy /= total
                 else:
-                    # Uniform over legal moves
                     policy = mask / mask.sum()
 
-                # Build training policy vector
+                # Add Dirichlet noise for exploration (like AlphaZero)
+                num_legal = len(indexed_moves)
+                noise = np.random.dirichlet([0.3] * num_legal)
+                noise_full = np.zeros(POLICY_SIZE, dtype=np.float32)
+                for j, (idx, _, _, _) in enumerate(indexed_moves):
+                    noise_full[idx] = noise[j]
+                policy = 0.75 * policy + 0.25 * noise_full
+
+                # Build training policy vector (store the clean policy, not noised)
+                policy_clean = policies[i] * mask
+                total_clean = policy_clean.sum()
+                if total_clean > 0:
+                    policy_clean /= total_clean
                 policy_vector = np.zeros(POLICY_SIZE, dtype=np.float32)
                 legal_probs = []
                 legal_moves = []
                 for idx, piece, from_pos, to_pos in indexed_moves:
-                    policy_vector[idx] = policy[idx]
-                    legal_probs.append(policy[idx])
+                    policy_vector[idx] = policy_clean[idx]
+                    legal_probs.append(policy[idx])  # use noised policy for sampling
                     legal_moves.append((piece, from_pos, to_pos))
 
-                # Record position
+                # Repetition detection: hash position by piece positions
+                pos_key = frozenset(
+                    (str(p), h) for h, p in game.board.all_top_pieces()
+                )
+                recent = recent_positions[gi]
+                if recent.count(pos_key) >= 3:
+                    # Threefold repetition → draw
+                    newly_finished.append(gi)
+                    continue
+                recent.append(pos_key)
+
+                # Record position (after repetition check so we don't store dead-end states)
                 histories[gi].append((boards[i], reserves[i], policy_vector, game.turn_color))
+                if len(recent) > 20:
+                    recent.pop(0)
 
                 # Sample move
                 legal_probs = np.array(legal_probs, dtype=np.float32)
@@ -519,6 +544,9 @@ class SelfPlayTrainer:
 
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
+        # Replay buffer: keep last ~50k positions across iterations
+        replay_buffer = HiveDataset(max_size=50_000)
+
         for i in range(num_iterations):
             iteration = self.start_iteration + i + 1
 
@@ -530,11 +558,13 @@ class SelfPlayTrainer:
 
             elapsed_str = f" [{(time.time() - start_time) / 60:.1f}m]" if time_limit_minutes else ""
             use_mcts = iteration > mcts_after
+            if use_mcts and iteration == mcts_after + 1 and len(replay_buffer) > 0:
+                replay_buffer = HiveDataset(max_size=50_000)
+                print("  Cleared replay buffer for MCTS transition")
             mode = "MCTS" if use_mcts else "fast"
             print(f"\n=== Iteration {iteration} ({mode}){elapsed_str} ===")
 
             # Generate self-play games
-            dataset = HiveDataset()
             iter_start = time.time()
 
             if use_mcts:
@@ -554,16 +584,17 @@ class SelfPlayTrainer:
             total_positions = 0
             for gi, samples in enumerate(all_game_samples):
                 for bt, rv, pv, vt in samples:
-                    dataset.add_sample(bt, rv, pv, vt)
+                    replay_buffer.add_sample(bt, rv, pv, vt)
                 total_positions += len(samples)
 
             game_time = time.time() - iter_start
-            print(f"  {games_per_iter} games: {total_positions} positions "
-                  f"({game_time:.1f}s, {total_positions / max(game_time, 0.1):.0f} pos/s)")
+            print(f"  {games_per_iter} games: {total_positions} new positions "
+                  f"({game_time:.1f}s, {total_positions / max(game_time, 0.1):.0f} pos/s), "
+                  f"buffer: {len(replay_buffer)}")
 
-            # Train on collected data
+            # Train on replay buffer
             for epoch in range(epochs_per_iter):
-                losses = self.trainer.train_epoch(dataset, batch_size=batch_size)
+                losses = self.trainer.train_epoch(replay_buffer, batch_size=batch_size)
                 print(f"  Epoch {epoch + 1}: loss={losses['total_loss']:.4f} "
                       f"(policy={losses['policy_loss']:.4f}, value={losses['value_loss']:.4f})")
 
@@ -572,7 +603,7 @@ class SelfPlayTrainer:
                 "total_loss": losses["total_loss"],
                 "policy_loss": losses["policy_loss"],
                 "value_loss": losses["value_loss"],
-                "samples": len(dataset),
+                "samples": len(replay_buffer),
             }
             save_checkpoint(self.model, self.model_path, iteration, metadata)
 
