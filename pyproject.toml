@@ -1,9 +1,17 @@
 [project]
-name = "hive-engine"
+name = "hive-zero"
 version = "0.1.0"
-description = "Add your description here"
+description = "Hive AI engine with AlphaZero-style MCTS"
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.4.3",
     "pytest>=9.0.2",
 ]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "rust/Cargo.toml"
+module-name = "hive_engine"

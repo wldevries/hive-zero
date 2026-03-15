@@ -1,0 +1,63 @@
+/// Arena-based node allocation for MCTS.
+/// Pre-allocates a pool of nodes to avoid per-node heap allocation.
+
+use super::node::MctsNode;
+use crate::game::{Game, Move};
+
+/// Opaque node identifier.
+pub type NodeId = u32;
+
+/// Pre-allocated node pool.
+pub struct NodeArena {
+    nodes: Vec<MctsNode>,
+    free_list: Vec<u32>,
+}
+
+impl NodeArena {
+    pub fn new(capacity: usize) -> Self {
+        let mut nodes = Vec::with_capacity(capacity);
+        // Node 0 is reserved as "null"
+        nodes.push(MctsNode::default());
+        let _ = capacity;
+        NodeArena {
+            nodes,
+            free_list: Vec::new(),
+        }
+    }
+
+    /// Allocate a new node. Returns its ID.
+    pub fn alloc(&mut self, game: Game, parent: Option<NodeId>, mv: Move, prior: f32) -> NodeId {
+        let node = MctsNode::new(game, parent, mv, prior);
+        if let Some(id) = self.free_list.pop() {
+            self.nodes[id as usize] = node;
+            id
+        } else {
+            let id = self.nodes.len() as u32;
+            self.nodes.push(node);
+            id
+        }
+    }
+
+    /// Get a reference to a node.
+    #[inline]
+    pub fn get(&self, id: NodeId) -> &MctsNode {
+        &self.nodes[id as usize]
+    }
+
+    /// Get a mutable reference to a node.
+    #[inline]
+    pub fn get_mut(&mut self, id: NodeId) -> &mut MctsNode {
+        &mut self.nodes[id as usize]
+    }
+
+    /// Reset the arena for reuse (keeps allocated memory).
+    pub fn reset(&mut self) {
+        self.nodes.truncate(1); // keep the null node
+        self.free_list.clear();
+    }
+
+    /// Number of active nodes.
+    pub fn len(&self) -> usize {
+        self.nodes.len() - 1 // exclude null node
+    }
+}

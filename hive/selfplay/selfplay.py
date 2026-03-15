@@ -584,17 +584,36 @@ class SelfPlayTrainer:
             # Generate self-play games
             iter_start = time.time()
 
+            # Prefer Rust-accelerated self-play if available
+            try:
+                from .rust_selfplay import RustFastSelfPlay, RustParallelSelfPlay, HAS_RUST
+            except ImportError:
+                HAS_RUST = False
+
             if use_mcts:
-                sp = ParallelSelfPlay(
-                    model=self.model, device=self.device,
-                    num_parallel=num_parallel, simulations=simulations,
-                    max_moves=max_moves,
-                )
+                if HAS_RUST:
+                    sp = RustParallelSelfPlay(
+                        model=self.model, device=self.device,
+                        num_parallel=num_parallel, simulations=simulations,
+                        max_moves=max_moves,
+                    )
+                else:
+                    sp = ParallelSelfPlay(
+                        model=self.model, device=self.device,
+                        num_parallel=num_parallel, simulations=simulations,
+                        max_moves=max_moves,
+                    )
             else:
-                sp = FastSelfPlay(
-                    model=self.model, device=self.device,
-                    max_moves=max_moves,
-                )
+                if HAS_RUST:
+                    sp = RustFastSelfPlay(
+                        model=self.model, device=self.device,
+                        max_moves=max_moves,
+                    )
+                else:
+                    sp = FastSelfPlay(
+                        model=self.model, device=self.device,
+                        max_moves=max_moves,
+                    )
 
             all_game_samples, finished_games = sp.play_games(games_per_iter)
 

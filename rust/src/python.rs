@@ -1,0 +1,350 @@
+/// PyO3 Python bindings for hive_engine.
+
+use pyo3::prelude::*;
+use pyo3::types::PyTuple;
+use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+
+use crate::board::GRID_SIZE;
+use crate::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
+use crate::game;
+use crate::mcts::search::MctsSearch;
+use crate::move_encoding::{self, POLICY_SIZE};
+use crate::piece::{Piece, PieceColor, PieceType};
+
+/// Create a 1D numpy array from a slice.
+fn make_array1<'py>(py: Python<'py>, data: &[f32]) -> Bound<'py, PyArray1<f32>> {
+    let arr = numpy::ndarray::Array1::from(data.to_vec());
+    PyArray1::from_owned_array_bound(py, arr)
+}
+
+/// Create a 2D numpy array from a flat slice with shape.
+fn make_array2<'py>(py: Python<'py>, data: &[f32], rows: usize, cols: usize) -> Bound<'py, PyArray2<f32>> {
+    let arr = numpy::ndarray::Array2::from_shape_vec((rows, cols), data.to_vec()).unwrap();
+    PyArray2::from_owned_array_bound(py, arr)
+}
+
+/// Create a 3D numpy array from a flat slice with shape.
+fn make_array3<'py>(py: Python<'py>, data: &[f32], d0: usize, d1: usize, d2: usize) -> Bound<'py, PyArray3<f32>> {
+    let arr = numpy::ndarray::Array3::from_shape_vec((d0, d1, d2), data.to_vec()).unwrap();
+    PyArray3::from_owned_array_bound(py, arr)
+}
+
+/// Rust Game exposed to Python.
+#[pyclass(name = "RustGame")]
+pub struct PyGame {
+    pub game: game::Game,
+}
+
+#[pymethods]
+impl PyGame {
+    #[new]
+    fn new() -> Self {
+        PyGame { game: game::Game::new() }
+    }
+
+    /// Deep copy.
+    fn copy(&self) -> PyGame {
+        PyGame { game: self.game.clone() }
+    }
+
+    /// Game state as string.
+    #[getter]
+    fn state(&self) -> &str {
+        self.game.state.as_str()
+    }
+
+    #[getter]
+    fn is_game_over(&self) -> bool {
+        self.game.is_game_over()
+    }
+
+    #[getter]
+    fn turn_color(&self) -> &str {
+        match self.game.turn_color {
+            PieceColor::White => "w",
+            PieceColor::Black => "b",
+        }
+    }
+
+    #[getter]
+    fn turn_number(&self) -> u16 {
+        self.game.turn_number
+    }
+
+    #[getter]
+    fn move_count(&self) -> u16 {
+        self.game.move_count
+    }
+
+    /// Get all valid moves as list of (piece_str, from_pos_or_None, to_pos).
+    fn valid_moves(&self) -> Vec<(String, Option<(i8, i8)>, (i8, i8))> {
+        self.game.valid_moves().iter().map(|mv| {
+            let piece_str = mv.piece.unwrap().to_string();
+            let from = mv.from;
+            let to = mv.to.unwrap();
+            (piece_str, from, to)
+        }).collect()
+    }
+
+    /// Play a move.
+    #[pyo3(signature = (piece_str, from_pos, to_pos))]
+    fn play_move(&mut self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) {
+        let piece = Piece::from_str(piece_str).expect("invalid piece string");
+        let mv = match from_pos {
+            None => game::Move::placement(piece, to_pos),
+            Some(f) => game::Move::movement(piece, f, to_pos),
+        };
+        self.game.play_move(&mv);
+    }
+
+    /// Play a pass.
+    fn play_pass(&mut self) {
+        self.game.play_pass();
+    }
+
+    /// Undo last move.
+    fn undo(&mut self) {
+        self.game.undo();
+    }
+
+    /// Encode board state as numpy arrays.
+    /// Returns (board_tensor[23,23,23], reserve_vector[10]).
+    fn encode_board<'py>(&self, py: Python<'py>) -> (Bound<'py, PyArray3<f32>>, Bound<'py, PyArray1<f32>>) {
+        let mut board_data = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
+        let mut reserve_data = vec![0.0f32; RESERVE_SIZE];
+        crate::board_encoding::encode_board(&self.game, &mut board_data, &mut reserve_data);
+
+        let board_tensor = make_array3(py, &board_data, NUM_CHANNELS, GRID_SIZE, GRID_SIZE);
+        let reserve_vec = make_array1(py, &reserve_data);
+        (board_tensor, reserve_vec)
+    }
+
+    /// Get legal move mask and indexed moves.
+    fn get_legal_move_mask<'py>(
+        &self, py: Python<'py>
+    ) -> (Bound<'py, PyArray1<f32>>, Vec<(usize, String, Option<(i8, i8)>, (i8, i8))>) {
+        let (mask, indexed_moves) = move_encoding::get_legal_move_mask(&self.game);
+        let mask_array = make_array1(py, &mask);
+        let moves_list: Vec<_> = indexed_moves.iter().map(|(idx, mv)| {
+            let piece_str = mv.piece.unwrap().to_string();
+            (*idx, piece_str, mv.from, mv.to.unwrap())
+        }).collect();
+        (mask_array, moves_list)
+    }
+
+    /// Encode a specific move as policy index.
+    #[pyo3(signature = (piece_str, from_pos, to_pos))]
+    fn encode_move(&self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) -> usize {
+        let piece = Piece::from_str(piece_str).expect("invalid piece string");
+        move_encoding::encode_move(piece, from_pos, to_pos)
+    }
+
+    /// Check if piece is in reserve.
+    fn reserve_has(&self, piece_str: &str) -> bool {
+        let piece = Piece::from_str(piece_str).expect("invalid piece string");
+        self.game.reserve_has(piece)
+    }
+
+    /// Get reserve count for a piece type.
+    fn reserve_count(&self, color: &str, piece_type: &str) -> u8 {
+        let c = match color {
+            "w" => PieceColor::White,
+            "b" => PieceColor::Black,
+            _ => panic!("invalid color"),
+        };
+        let pt = PieceType::from_char(piece_type.chars().next().unwrap()).expect("invalid piece type");
+        self.game.reserve_count(c, pt)
+    }
+
+    /// Get turn string like "White[1]".
+    fn turn_string(&self) -> String {
+        self.game.turn_string()
+    }
+}
+
+/// Rust MCTS search exposed to Python.
+#[pyclass(name = "RustMCTS")]
+pub struct PyMCTS {
+    search: MctsSearch,
+    c_puct: f32,
+    batch_size: usize,
+}
+
+#[pymethods]
+impl PyMCTS {
+    #[new]
+    #[pyo3(signature = (c_puct=1.5, batch_size=8, capacity=100000))]
+    fn new(c_puct: f32, batch_size: usize, capacity: usize) -> Self {
+        PyMCTS {
+            search: MctsSearch::new(capacity),
+            c_puct,
+            batch_size,
+        }
+    }
+
+    /// Run full MCTS search with callback for NN evaluation.
+    fn search(
+        &mut self,
+        py: Python<'_>,
+        game: &PyGame,
+        eval_fn: &Bound<'_, PyAny>,
+        max_simulations: usize,
+    ) -> Option<(String, Option<(i8, i8)>, (i8, i8))> {
+        self.search.c_puct = self.c_puct;
+
+        let initial_policy = self.eval_single(py, &game.game, eval_fn);
+        self.search.init(&game.game, &initial_policy);
+
+        let root_children = self.search.arena.get(self.search.root).child_count;
+        if root_children == 0 {
+            return None;
+        }
+
+        let mut sims_done = 0;
+        while sims_done < max_simulations {
+            let batch = std::cmp::min(self.batch_size, max_simulations - sims_done);
+            let leaves = self.search.select_leaves(batch);
+
+            if !leaves.is_empty() {
+                let (policies, values) = self.eval_batch(py, &leaves, eval_fn);
+                self.search.expand_and_backprop(&leaves, &policies, &values);
+            }
+
+            sims_done += batch;
+        }
+
+        self.search.best_move().map(|mv| {
+            let piece_str = mv.piece.unwrap().to_string();
+            (piece_str, mv.from, mv.to.unwrap())
+        })
+    }
+
+    /// Run MCTS and return policy distribution.
+    fn get_policy(
+        &mut self,
+        py: Python<'_>,
+        game: &PyGame,
+        eval_fn: &Bound<'_, PyAny>,
+        max_simulations: usize,
+        temperature: f32,
+    ) -> (Vec<(String, Option<(i8, i8)>, (i8, i8))>, Vec<f32>) {
+        self.search.c_puct = self.c_puct;
+
+        let initial_policy = self.eval_single(py, &game.game, eval_fn);
+        self.search.init(&game.game, &initial_policy);
+
+        let root_children = self.search.arena.get(self.search.root).child_count;
+        if root_children == 0 {
+            return (Vec::new(), Vec::new());
+        }
+
+        let mut sims_done = 0;
+        while sims_done < max_simulations {
+            let batch = std::cmp::min(self.batch_size, max_simulations - sims_done);
+            let leaves = self.search.select_leaves(batch);
+
+            if !leaves.is_empty() {
+                let (policies, values) = self.eval_batch(py, &leaves, eval_fn);
+                self.search.expand_and_backprop(&leaves, &policies, &values);
+            }
+
+            sims_done += batch;
+        }
+
+        let dist = self.search.get_visit_distribution();
+
+        let moves: Vec<_> = dist.iter().map(|(mv, _)| {
+            match mv.piece {
+                Some(p) => (p.to_string(), mv.from, mv.to.unwrap()),
+                None => ("pass".to_string(), None, (0, 0)),
+            }
+        }).collect();
+
+        let visit_counts: Vec<f32> = dist.iter().map(|(_, v)| *v).collect();
+
+        let probs = if temperature == 0.0 {
+            let mut p = vec![0.0f32; visit_counts.len()];
+            if let Some(max_idx) = visit_counts.iter().enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+            {
+                p[max_idx] = 1.0;
+            }
+            p
+        } else {
+            let powered: Vec<f32> = visit_counts.iter().map(|&v| v.powf(1.0 / temperature)).collect();
+            let total: f32 = powered.iter().sum();
+            if total > 0.0 {
+                powered.iter().map(|v| v / total).collect()
+            } else {
+                let n = powered.len() as f32;
+                vec![1.0 / n; powered.len()]
+            }
+        };
+
+        (moves, probs)
+    }
+}
+
+impl PyMCTS {
+    fn eval_single(&self, py: Python<'_>, game: &game::Game, eval_fn: &Bound<'_, PyAny>) -> Vec<f32> {
+        let mut board_data = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
+        let mut reserve_data = vec![0.0f32; RESERVE_SIZE];
+        crate::board_encoding::encode_board(game, &mut board_data, &mut reserve_data);
+
+        let board_arr = make_array2(py, &board_data, 1, NUM_CHANNELS * GRID_SIZE * GRID_SIZE);
+        let board_4d = board_arr.reshape([1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+        let reserve_arr = make_array2(py, &reserve_data, 1, RESERVE_SIZE);
+
+        let result = eval_fn.call1((board_4d, reserve_arr)).expect("eval_fn call failed");
+        let tuple = result.downcast::<PyTuple>().expect("eval_fn must return tuple");
+
+        let policy_arr: PyReadonlyArray2<f32> = tuple.get_item(0).unwrap().extract().unwrap();
+        policy_arr.as_slice().unwrap().to_vec()
+    }
+
+    fn eval_batch(
+        &self,
+        py: Python<'_>,
+        leaves: &[u32],
+        eval_fn: &Bound<'_, PyAny>,
+    ) -> (Vec<Vec<f32>>, Vec<f32>) {
+        let n = leaves.len();
+        let board_size = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
+        let mut all_boards = vec![0.0f32; n * board_size];
+        let mut all_reserves = vec![0.0f32; n * RESERVE_SIZE];
+
+        for (i, &leaf) in leaves.iter().enumerate() {
+            let game = &self.search.arena.get(leaf).game;
+            crate::board_encoding::encode_board(
+                game,
+                &mut all_boards[i * board_size..(i + 1) * board_size],
+                &mut all_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
+            );
+        }
+
+        let board_arr = make_array2(py, &all_boards, n, board_size);
+        let board_4d = board_arr.reshape([n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+        let reserve_arr = make_array2(py, &all_reserves, n, RESERVE_SIZE);
+
+        let result = eval_fn.call1((board_4d, reserve_arr)).expect("eval_fn call failed");
+        let tuple = result.downcast::<PyTuple>().expect("eval_fn must return tuple");
+
+        let policy_arr: PyReadonlyArray2<f32> = tuple.get_item(0).unwrap().extract().unwrap();
+        let value_arr: PyReadonlyArray1<f32> = tuple.get_item(1).unwrap().extract().unwrap();
+
+        let policies: Vec<Vec<f32>> = (0..n).map(|i| {
+            policy_arr.as_slice().unwrap()[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].to_vec()
+        }).collect();
+        let values: Vec<f32> = value_arr.as_slice().unwrap().to_vec();
+
+        (policies, values)
+    }
+}
+
+/// Register Python module.
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyGame>()?;
+    m.add_class::<PyMCTS>()?;
+    Ok(())
+}

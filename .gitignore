@@ -7,3 +7,9 @@ __pycache__/
 *.pt
 *.pth
 checkpoints/
+
+# Rust
+rust/target/
+*.so
+*.pyd
+*.dll

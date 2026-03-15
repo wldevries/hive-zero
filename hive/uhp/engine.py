@@ -187,16 +187,53 @@ class UHPEngine:
             self._respond("pass")
             return
 
-        # Try to use MCTS if available
+        # Determine simulations count
+        if constraint_type == "depth":
+            max_sims = int(constraint_value) * 100
+        else:
+            max_sims = 800
+
+        # Try Rust MCTS first, then Python MCTS, then fallback
+        try:
+            from hive_engine import RustGame, RustMCTS
+            # Convert current game state to RustGame by replaying moves
+            rust_game = RustGame()
+            for hist_piece, hist_from, hist_to in self.game.move_history:
+                if hist_piece is None:
+                    rust_game.play_pass()
+                else:
+                    p_str = str(hist_piece)
+                    f = (hist_from.q, hist_from.r) if hist_from is not None else None
+                    t = (hist_to.q, hist_to.r)
+                    rust_game.play_move(p_str, f, t)
+
+            mcts = RustMCTS()
+            # Uniform policy eval (no model loaded in UHP engine)
+            import numpy as np
+            from ..encoding.move_encoder import POLICY_SIZE
+            def uniform_eval(board_batch, reserve_batch):
+                n = board_batch.shape[0]
+                policy = np.ones((n, POLICY_SIZE), dtype=np.float32) / POLICY_SIZE
+                value = np.zeros(n, dtype=np.float32)
+                return policy, value
+
+            result = mcts.search(rust_game, uniform_eval, max_sims)
+            if result is None:
+                self._respond("pass")
+            else:
+                piece_str, from_pos, to_pos = result
+                piece = Piece.from_str(piece_str)
+                fp = Hex(*from_pos) if from_pos is not None else None
+                tp = Hex(*to_pos)
+                self._respond(self._format_move(piece, fp, tp))
+            return
+        except ImportError:
+            pass
+
         try:
             from ..mcts.mcts import MCTS
             mcts = MCTS()
-            if constraint_type == "depth":
-                depth = int(constraint_value)
-                move = mcts.search(self.game, max_simulations=depth * 100)
-            else:
-                # Time-based: parse hh:mm:ss
-                move = mcts.search(self.game, max_simulations=800)
+            move = mcts.search(self.game, max_simulations=max_sims)
 
             if move is None:
                 self._respond("pass")
