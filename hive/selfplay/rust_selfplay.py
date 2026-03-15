@@ -17,6 +17,9 @@ except ImportError:
 from ..encoding.move_encoder import POLICY_SIZE
 
 
+DRAW_PENALTY = -0.2  # both sides penalized for not finishing
+
+
 def _rust_heuristic_value(game: RustGame) -> dict[str, float]:
     """Heuristic value for unfinished games using RustGame."""
     state = game.state
@@ -25,10 +28,13 @@ def _rust_heuristic_value(game: RustGame) -> dict[str, float]:
     elif state == "BlackWins":
         return {"w": -1.0, "b": 1.0}
     elif state == "Draw":
-        return {"w": 0.0, "b": 0.0}
+        return {"w": DRAW_PENALTY, "b": DRAW_PENALTY}
 
     # Heuristic based on queen neighbor pressure + beetle-on-queen
+    # Plus draw penalty to incentivize decisive play
     w_score, b_score = game.heuristic_value()
+    w_score = max(w_score + DRAW_PENALTY, -1.0)
+    b_score = max(b_score + DRAW_PENALTY, -1.0)
     return {"w": w_score, "b": b_score}
 
 
