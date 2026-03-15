@@ -121,9 +121,11 @@ class Game:
 
         # Movement moves (only if queen is placed)
         if not must_queen and self._queen_placed(color):
+            # Compute articulation points once for all pieces (O(V+E))
+            articulation_pts = self.board.articulation_points()
             on_board = self.board.pieces_on_board(color)
             for piece in sorted(on_board, key=str):
-                destinations = get_moves(piece, self.board)
+                destinations = get_moves(piece, self.board, articulation_pts)
                 for dest in sorted(destinations):
                     pos = self.board.piece_position(piece)
                     moves.append((piece, pos, dest))

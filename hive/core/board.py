@@ -142,3 +142,50 @@ class Board:
     def all_top_pieces(self) -> list[tuple[Hex, Piece]]:
         """Return (position, top_piece) for all occupied positions."""
         return [(pos, stack[-1]) for pos, stack in self._stacks.items()]
+
+    def articulation_points(self) -> set[Hex]:
+        """Find all articulation points (positions whose removal disconnects the hive).
+
+        Uses Tarjan's algorithm in O(V+E) instead of BFS per piece.
+        Only considers positions with stack height 1 (pieces on stacks can
+        always move without breaking connectivity).
+        """
+        positions = set(self._stacks.keys())
+        if len(positions) <= 2:
+            return set()
+
+        disc: dict[Hex, int] = {}
+        low: dict[Hex, int] = {}
+        parent: dict[Hex, Optional[Hex]] = {}
+        aps: set[Hex] = set()
+        timer = [0]
+
+        def dfs(u: Hex):
+            disc[u] = low[u] = timer[0]
+            timer[0] += 1
+            children = 0
+
+            for v in u.neighbors():
+                if v not in positions:
+                    continue
+                if v not in disc:
+                    children += 1
+                    parent[v] = u
+                    dfs(v)
+                    low[u] = min(low[u], low[v])
+
+                    # u is an articulation point if:
+                    # 1) u is root and has 2+ children
+                    # 2) u is not root and low[v] >= disc[u]
+                    if parent[u] is None and children > 1:
+                        aps.add(u)
+                    if parent[u] is not None and low[v] >= disc[u]:
+                        aps.add(u)
+                elif v != parent.get(u):
+                    low[u] = min(low[u], disc[v])
+
+        start = next(iter(positions))
+        parent[start] = None
+        dfs(start)
+
+        return aps

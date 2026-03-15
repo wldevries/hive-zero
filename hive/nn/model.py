@@ -47,10 +47,14 @@ class HiveNet(nn.Module):
         # Residual tower
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
 
-        # Policy head
-        self.policy_conv = nn.Conv2d(channels, 32, 1, bias=False)
-        self.policy_bn = nn.BatchNorm2d(32)
-        self.policy_fc = nn.Linear(32 * GRID_SIZE * GRID_SIZE, POLICY_SIZE)
+        # Policy head - convolutional to avoid giant linear layer
+        # Outputs per-cell logits: one channel per "move direction" plus placement slots
+        # 6 directions (slide/jump to neighbor offset) + 1 stay (beetle stack) = 7 movement
+        # + 5 placement types = 12 total policy channels per cell
+        self.num_policy_channels = 12
+        self.policy_conv = nn.Conv2d(channels, channels, 1, bias=False)
+        self.policy_bn = nn.BatchNorm2d(channels)
+        self.policy_out = nn.Conv2d(channels, self.num_policy_channels, 1)
 
         # Value head
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
@@ -74,10 +78,11 @@ class HiveNet(nn.Module):
         for block in self.res_blocks:
             x = block(x)
 
-        # Policy head
+        # Policy head - outputs (batch, num_policy_channels, GRID_SIZE, GRID_SIZE)
+        # Then flattened to (batch, num_policy_channels * GRID_SIZE * GRID_SIZE)
         p = F.relu(self.policy_bn(self.policy_conv(x)))
-        p = p.view(p.size(0), -1)
-        policy_logits = self.policy_fc(p)
+        p = self.policy_out(p)
+        policy_logits = p.view(p.size(0), -1)
 
         # Value head
         v = F.relu(self.value_bn(self.value_conv(x)))
@@ -94,12 +99,42 @@ def create_model(num_blocks: int = 10, channels: int = 128) -> HiveNet:
     return HiveNet(num_blocks=num_blocks, channels=channels)
 
 
+def save_checkpoint(model: HiveNet, path: str, iteration: int = 0,
+                    metadata: dict | None = None):
+    """Save model with training metadata."""
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "num_blocks": model.res_blocks.__len__(),
+        "channels": model.input_conv.out_channels,
+        "iteration": iteration,
+        "metadata": metadata or {},
+    }
+    torch.save(checkpoint, path)
+
+
+def load_checkpoint(path: str) -> tuple[HiveNet, dict]:
+    """Load model from checkpoint. Returns (model, checkpoint_dict)."""
+    checkpoint = torch.load(path, weights_only=False)
+    num_blocks = checkpoint.get("num_blocks", 10)
+    channels = checkpoint.get("channels", 128)
+    model = HiveNet(num_blocks=num_blocks, channels=channels)
+
+    # Support both checkpoint format and raw state_dict
+    if "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
+        checkpoint = {"iteration": 0, "metadata": {}}
+
+    model.eval()
+    return model, checkpoint
+
+
+# Keep simple aliases for backward compat
 def save_model(model: HiveNet, path: str):
-    torch.save(model.state_dict(), path)
+    save_checkpoint(model, path)
 
 
 def load_model(path: str, num_blocks: int = 10, channels: int = 128) -> HiveNet:
-    model = HiveNet(num_blocks=num_blocks, channels=channels)
-    model.load_state_dict(torch.load(path, weights_only=True))
-    model.eval()
+    model, _ = load_checkpoint(path)
     return model

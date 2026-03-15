@@ -9,7 +9,7 @@ from ..core.game import Game, GameState
 from ..core.pieces import PieceColor
 from ..encoding.board_encoder import encode_board
 from ..encoding.move_encoder import encode_move, POLICY_SIZE
-from ..nn.model import HiveNet, create_model, save_model, load_model
+from ..nn.model import HiveNet, create_model, save_checkpoint, load_checkpoint
 from ..nn.training import HiveDataset, Trainer
 from ..mcts.mcts import MCTS
 
@@ -83,26 +83,57 @@ class SelfPlayTrainer:
     """Full self-play training pipeline."""
 
     def __init__(self, model_path: str = "model.pt", device: str = "cpu",
-                 num_blocks: int = 6, channels: int = 64):
+                 num_blocks: int = 6, channels: int = 64,
+                 checkpoint_dir: str = "checkpoints"):
         self.model_path = model_path
+        self.checkpoint_dir = checkpoint_dir
         self.device = device
         self.num_blocks = num_blocks
         self.channels = channels
+        self.start_iteration = 0
 
         if os.path.exists(model_path):
-            self.model = load_model(model_path, num_blocks, channels)
+            self.model, ckpt = load_checkpoint(model_path)
+            self.start_iteration = ckpt.get("iteration", 0)
+            print(f"Resumed from {model_path} (iteration {self.start_iteration})")
         else:
             self.model = create_model(num_blocks, channels)
+            print(f"Created new model ({num_blocks} blocks, {channels} channels)")
 
         self.model.to(device)
         self.trainer = Trainer(self.model, device=device)
 
+        # Save initial model immediately so it exists on disk
+        if not os.path.exists(model_path):
+            save_checkpoint(self.model, model_path, self.start_iteration)
+            print(f"  Saved initial model to {model_path}")
+
     def run(self, num_iterations: int = 100, games_per_iter: int = 10,
             simulations: int = 100, epochs_per_iter: int = 5,
-            batch_size: int = 64):
-        """Run the full training loop."""
-        for iteration in range(num_iterations):
-            print(f"\n=== Iteration {iteration + 1}/{num_iterations} ===")
+            batch_size: int = 64, max_moves: int = 200,
+            time_limit_minutes: float | None = None):
+        """Run the full training loop.
+
+        Args:
+            time_limit_minutes: If set, stop after this many minutes
+                (finishes the current iteration first).
+        """
+        import time
+        start_time = time.time()
+
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        for i in range(num_iterations):
+            iteration = self.start_iteration + i + 1
+
+            if time_limit_minutes is not None:
+                elapsed = (time.time() - start_time) / 60.0
+                if elapsed >= time_limit_minutes:
+                    print(f"\nTime limit reached ({elapsed:.1f}m / {time_limit_minutes}m)")
+                    break
+
+            elapsed_str = f" [{(time.time() - start_time) / 60:.1f}m]" if time_limit_minutes else ""
+            print(f"\n=== Iteration {iteration}{elapsed_str} ===")
 
             # Generate self-play games
             dataset = HiveDataset()
@@ -111,7 +142,7 @@ class SelfPlayTrainer:
 
             for g in range(games_per_iter):
                 print(f"  Game {g + 1}/{games_per_iter}...", end=" ", flush=True)
-                samples = sp.play(simulations=simulations)
+                samples = sp.play(max_moves=max_moves, simulations=simulations)
                 for bt, rv, pv, vt in samples:
                     dataset.add_sample(bt, rv, pv, vt)
                 print(f"{len(samples)} positions")
@@ -124,9 +155,21 @@ class SelfPlayTrainer:
                 print(f"  Epoch {epoch + 1}: loss={losses['total_loss']:.4f} "
                       f"(policy={losses['policy_loss']:.4f}, value={losses['value_loss']:.4f})")
 
-            # Save model
-            save_model(self.model, self.model_path)
-            print(f"  Model saved to {self.model_path}")
+            # Save latest model + periodic checkpoint
+            metadata = {
+                "total_loss": losses["total_loss"],
+                "policy_loss": losses["policy_loss"],
+                "value_loss": losses["value_loss"],
+                "samples": len(dataset),
+            }
+            save_checkpoint(self.model, self.model_path, iteration, metadata)
+
+            if iteration % 10 == 0:
+                ckpt_path = os.path.join(self.checkpoint_dir, f"model_iter{iteration:04d}.pt")
+                save_checkpoint(self.model, ckpt_path, iteration, metadata)
+                print(f"  Checkpoint saved to {ckpt_path}")
+
+            print(f"  Model saved to {self.model_path} (iteration {iteration})")
 
 
 def main():

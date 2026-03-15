@@ -6,8 +6,14 @@ from .board import Board
 from .pieces import Piece, PieceType, PieceColor
 
 
-def get_moves(piece: Piece, board: Board) -> set[Hex]:
-    """Get all legal destination hexes for a piece already on the board."""
+def get_moves(piece: Piece, board: Board,
+              articulation_points: set[Hex] | None = None) -> set[Hex]:
+    """Get all legal destination hexes for a piece already on the board.
+
+    Args:
+        articulation_points: Precomputed articulation points for the board.
+            If None, will compute connectivity per-piece (slower).
+    """
     pos = board.piece_position(piece)
     if pos is None:
         return set()
@@ -19,8 +25,12 @@ def get_moves(piece: Piece, board: Board) -> set[Hex]:
     # One Hive Rule: removing this piece must not disconnect the hive
     # (Beetles on top of stacks don't break connectivity when they move)
     if board.stack_height(pos) == 1:
-        if not board.is_connected(exclude=piece):
-            return set()
+        if articulation_points is not None:
+            if pos in articulation_points:
+                return set()
+        else:
+            if not board.is_connected(exclude=piece):
+                return set()
 
     move_fn = _MOVE_FUNCTIONS.get(piece.piece_type)
     if move_fn is None:
