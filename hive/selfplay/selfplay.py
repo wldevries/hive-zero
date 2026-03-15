@@ -36,17 +36,13 @@ class SelfPlayTrainer:
         self.model.to(device)
         self.trainer = Trainer(self.model, device=device)
 
-        # Save initial model immediately so it exists on disk
-        if not os.path.exists(model_path):
-            save_checkpoint(self.model, model_path, self.start_iteration)
-            print(f"  Saved initial model to {model_path}")
-
     def run(self, num_iterations: int = 100, games_per_iter: int = 10,
-            simulations: int = 100, epochs_per_iter: int = 5,
+            simulations: int = 100, epochs_per_iter: int = 1,
             batch_size: int = 64, max_moves: int = 200,
             time_limit_minutes: float | None = None,
             mcts_after: int = 0,
-            fast_iters: int = 10, full_iters: int = 2):
+            fast_iters: int = 10, full_iters: int = 2,
+            warmup_positions: int = 10_000):
         """Run the full training loop.
 
         Args:
@@ -54,6 +50,8 @@ class SelfPlayTrainer:
                 iteration (backward compat). 0 = disabled (use cycling).
             fast_iters: Number of fast iterations per cycle.
             full_iters: Number of full MCTS iterations per cycle.
+            warmup_positions: Fill buffer to this many positions before
+                training begins. 0 = no warmup.
         """
         import time
         start_time = time.time()
@@ -62,6 +60,24 @@ class SelfPlayTrainer:
 
         # Replay buffer: keep last ~50k positions across iterations
         replay_buffer = HiveDataset(max_size=50_000)
+
+        # Warmup: fill buffer before training starts
+        if warmup_positions > 0 and self.start_iteration == 0:
+            from .rust_selfplay import RustFastSelfPlay
+            print(f"=== Warmup: filling buffer to {warmup_positions} positions ===")
+            while len(replay_buffer) < warmup_positions:
+                sp = RustFastSelfPlay(
+                    model=self.model, device=self.device,
+                    max_moves=max_moves,
+                )
+                all_game_samples, _ = sp.play_games(games_per_iter)
+                for samples in all_game_samples:
+                    for bt, rv, pv, vt in samples:
+                        replay_buffer.add_sample(bt, rv, pv, vt)
+                print(f"  Buffer: {len(replay_buffer)}/{warmup_positions}")
+            print(f"=== Warmup complete: {len(replay_buffer)} positions ===\n")
+
+        prev_was_mcts = False
 
         for i in range(num_iterations):
             iteration = self.start_iteration + i + 1
@@ -95,6 +111,13 @@ class SelfPlayTrainer:
                     mode_label = f"fast {cycle_pos + 1}/{fast_iters}"
 
             from .rust_selfplay import RustFastSelfPlay, RustParallelSelfPlay
+
+            # Clear buffer on first MCTS iteration of each cycle
+            # so fast-mode uniform policy targets don't dilute MCTS data
+            if use_mcts and not prev_was_mcts:
+                replay_buffer.clear()
+                print(f"\n  Buffer cleared for MCTS phase")
+            prev_was_mcts = use_mcts
 
             print(f"\n=== Iteration {iteration} [{mode_label}] [Rust]{elapsed_str} ===")
 
@@ -137,11 +160,15 @@ class SelfPlayTrainer:
                     print(render_board(g))
                     break
 
+            # Update learning rate based on schedule
+            self.trainer.update_lr(iteration)
+
             # Train on replay buffer
             for epoch in range(epochs_per_iter):
                 losses = self.trainer.train_epoch(replay_buffer, batch_size=batch_size)
+                lr = self.trainer._current_lr
                 print(f"  Epoch {epoch + 1}: loss={losses['total_loss']:.4f} "
-                      f"(policy={losses['policy_loss']:.4f}, value={losses['value_loss']:.4f})")
+                      f"(policy={losses['policy_loss']:.4f}, value={losses['value_loss']:.4f}, lr={lr})")
 
             # Save latest model + periodic checkpoint
             metadata = {

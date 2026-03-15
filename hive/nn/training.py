@@ -26,12 +26,14 @@ class HiveDataset(Dataset):
             max_size: Maximum number of samples to keep. 0 = unlimited.
             augment: Apply random symmetry augmentation (12 hex symmetries).
         """
+        from collections import deque
         self.max_size = max_size
         self.augment = augment
-        self.board_tensors: list[np.ndarray] = []
-        self.reserve_vectors: list[np.ndarray] = []
-        self.policy_targets: list[np.ndarray] = []
-        self.value_targets: list[float] = []
+        maxlen = max_size if max_size > 0 else None
+        self.board_tensors: deque[np.ndarray] = deque(maxlen=maxlen)
+        self.reserve_vectors: deque[np.ndarray] = deque(maxlen=maxlen)
+        self.policy_targets: deque[np.ndarray] = deque(maxlen=maxlen)
+        self.value_targets: deque[float] = deque(maxlen=maxlen)
 
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
                    policy_target: np.ndarray, value_target: float):
@@ -40,12 +42,11 @@ class HiveDataset(Dataset):
         self.policy_targets.append(policy_target)
         self.value_targets.append(value_target)
 
-        # Evict oldest if over capacity
-        if self.max_size > 0 and len(self.board_tensors) > self.max_size:
-            self.board_tensors.pop(0)
-            self.reserve_vectors.pop(0)
-            self.policy_targets.pop(0)
-            self.value_targets.pop(0)
+    def clear(self):
+        self.board_tensors.clear()
+        self.reserve_vectors.clear()
+        self.policy_targets.clear()
+        self.value_targets.clear()
 
     def __len__(self):
         return len(self.board_tensors)
@@ -67,16 +68,46 @@ class HiveDataset(Dataset):
 
 
 class Trainer:
-    """Trains the HiveNet model on self-play data."""
+    """Trains the HiveNet model on self-play data.
 
-    def __init__(self, model: Optional[HiveNet] = None, lr: float = 0.0005,
-                 weight_decay: float = 1e-4, device: str = "cpu"):
+    Uses SGD with momentum and a stepped LR schedule following AlphaZero:
+      - Start at lr=0.05
+      - Drop by 10x at iteration milestones (default: 30, 60, 90)
+    """
+
+    # Default LR schedule: (iteration_threshold, lr)
+    # Applied in order — last matching threshold wins.
+    DEFAULT_LR_SCHEDULE = [
+        (0, 0.05),
+        (30, 0.005),
+        (60, 0.0005),
+        (90, 0.00005),
+    ]
+
+    def __init__(self, model: Optional[HiveNet] = None,
+                 weight_decay: float = 1e-4, device: str = "cpu",
+                 lr_schedule: list[tuple[int, float]] | None = None):
         self.device = torch.device(device)
         self.model = model or create_model()
         self.model.to(self.device)
-        self.optimizer = optim.Adam(
-            self.model.parameters(), lr=lr, weight_decay=weight_decay
+        self.lr_schedule = lr_schedule or self.DEFAULT_LR_SCHEDULE
+        self.optimizer = optim.SGD(
+            self.model.parameters(), lr=self.lr_schedule[0][1],
+            momentum=0.9, weight_decay=weight_decay,
         )
+        self._current_lr = self.lr_schedule[0][1]
+
+    def update_lr(self, iteration: int):
+        """Update learning rate based on iteration and schedule."""
+        target_lr = self.lr_schedule[0][1]
+        for threshold, lr in self.lr_schedule:
+            if iteration >= threshold:
+                target_lr = lr
+        if target_lr != self._current_lr:
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = target_lr
+            print(f"  LR updated: {self._current_lr} -> {target_lr}")
+            self._current_lr = target_lr
 
     def train_epoch(self, dataset: HiveDataset, batch_size: int = 64) -> dict:
         """Train one epoch. Returns loss dict."""

@@ -137,6 +137,8 @@ pub struct MctsSearch {
     pub arena: NodeArena,
     pub c_puct: f32,
     pub root: NodeId,
+    /// Temporary storage for leaf IDs between select and expand calls.
+    pub stashed_leaves: Vec<NodeId>,
 }
 
 impl MctsSearch {
@@ -145,6 +147,7 @@ impl MctsSearch {
             arena: NodeArena::new(capacity),
             c_puct: DEFAULT_C_PUCT,
             root: 0, // will be set in init
+            stashed_leaves: Vec::new(),
         }
     }
 

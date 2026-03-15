@@ -111,16 +111,14 @@ class RustFastSelfPlay:
                     noise_full[idx] = noise[j]
                 policy = 0.75 * policy + 0.25 * noise_full
 
-                # Clean policy for training
-                policy_clean = policies[i] * mask
-                total_clean = policy_clean.sum()
-                if total_clean > 0:
-                    policy_clean /= total_clean
+                # Policy target for training: uniform over legal moves
+                # (using the model's own output would be circular)
                 policy_vector = np.zeros(POLICY_SIZE, dtype=np.float32)
                 legal_probs = []
                 legal_moves = []
+                uniform_prob = 1.0 / len(indexed_moves)
                 for idx, piece_str, from_pos, to_pos in indexed_moves:
-                    policy_vector[idx] = policy_clean[idx]
+                    policy_vector[idx] = uniform_prob
                     legal_probs.append(policy[idx])
                     legal_moves.append((piece_str, from_pos, to_pos))
 
@@ -199,14 +197,14 @@ class RustFastSelfPlay:
 
 
 class RustParallelSelfPlay:
-    """Batched MCTS self-play using Rust game engine.
+    """Batched MCTS self-play using Rust game engine with rayon parallelism.
 
-    Cross-game batching: leaf evaluations from all active games' MCTS trees
-    are combined into single GPU calls, maximizing throughput.
+    Cross-game batching: MCTS tree ops (select, encode, expand, backprop)
+    are parallelized across games with rayon, while NN inference is batched
+    into single GPU calls.
     """
 
-    # Number of MCTS leaf nodes to select per game per simulation round
-    LEAF_BATCH_SIZE = 16
+    LEAF_BATCH_SIZE = 512
 
     def __init__(self, model, device: str = "cpu",
                  simulations: int = 100, max_moves: int = 200,
@@ -235,10 +233,35 @@ class RustParallelSelfPlay:
         vals = values.cpu().numpy().flatten()
         return policy.astype(np.float32), vals.astype(np.float32)
 
+    def _eval_fn(self):
+        """Return a callable for Rust's run_simulations callback."""
+        import torch
+        model = self.model
+        device = self.device
+
+        def eval_fn(board_batch, reserve_batch):
+            board_4d = np.asarray(board_batch)
+            reserves = np.asarray(reserve_batch)
+            if model is None:
+                n = board_4d.shape[0]
+                return (np.ones((n, POLICY_SIZE), dtype=np.float32) / POLICY_SIZE,
+                        np.zeros(n, dtype=np.float32))
+            bt = torch.tensor(board_4d).to(device)
+            rv = torch.tensor(reserves).to(device)
+            with torch.no_grad():
+                policy_logits, values = model(bt, rv)
+            policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
+            vals = values.cpu().numpy().flatten()
+            return policy.astype(np.float32), vals.astype(np.float32)
+
+        return eval_fn
+
     def play_games(self, num_games: int) -> tuple[list[list[tuple]], list]:
-        """Play num_games with cross-game batched MCTS."""
-        NUM_CH = 23  # board encoding channels
-        GS = 23      # grid size
+        """Play num_games with cross-game batched MCTS + rayon parallelism."""
+        from hive_engine import RustBatchMCTS
+
+        NUM_CH = 23
+        GS = 23
 
         games = [RustGame() for _ in range(num_games)]
         histories = [[] for _ in range(num_games)]
@@ -248,7 +271,7 @@ class RustParallelSelfPlay:
 
         while active:
             # --- Handle passes ---
-            mcts_games = []  # games needing MCTS this round
+            mcts_games = []
             for gi in list(active):
                 if not games[gi].valid_moves():
                     games[gi].play_pass()
@@ -276,70 +299,50 @@ class RustParallelSelfPlay:
             reserve_batch = np.concatenate(reserve_list)
             init_policies, _ = self._eval_batch(board_batch, reserve_batch)
 
-            # --- Init MCTS trees ---
-            mcts_map = {}  # gi -> RustMCTS
-            searching = []  # games that have MCTS trees
-            for i, gi in enumerate(mcts_games):
-                mcts = RustMCTS(c_puct=1.5, batch_size=self.LEAF_BATCH_SIZE)
-                mcts.init_search(games[gi], init_policies[i])
-                if mcts.root_child_count() > 0:
-                    mcts_map[gi] = mcts
-                    searching.append(gi)
+            # --- Init batch MCTS (rayon-parallel) ---
+            batch_mcts = RustBatchMCTS(
+                num_games=len(mcts_games),
+                c_puct=1.5,
+                leaf_batch_size=self.LEAF_BATCH_SIZE,
+            )
+            game_refs = [games[gi] for gi in mcts_games]
+            batch_mcts.init_searches(game_refs, init_policies)
+
+            # Map from batch index to game index
+            batch_to_gi = list(mcts_games)
+            child_counts = batch_mcts.root_child_counts()
+
+            searching = []  # batch indices with valid trees
+            for bi, gi in enumerate(batch_to_gi):
+                if child_counts[bi] > 0:
+                    searching.append(bi)
                 else:
-                    # No encodable moves
                     games[gi].play_pass()
                     move_counts[gi] += 1
                     if games[gi].is_game_over or move_counts[gi] >= self.max_moves:
                         active.discard(gi)
                         finished_count += 1
 
-            # --- Run MCTS simulations with cross-game batching ---
-            sims_done = {gi: 0 for gi in searching}
+            # --- Run full simulation loop (rayon + single GPU callback) ---
+            if searching:
+                batch_mcts.run_simulations(
+                    searching, self.simulations, self._eval_fn(),
+                )
 
-            while searching:
-                all_boards = []
-                all_reserves = []
-                leaf_groups = []  # (gi, leaf_ids) pairs with leaves
+            # --- Collect results: visit distributions, play moves ---
+            all_bi = list(range(len(batch_to_gi)))
+            all_dists = batch_mcts.visit_distributions(all_bi)
 
-                for gi in searching:
-                    leaves = mcts_map[gi].select_leaves_batch(self.LEAF_BATCH_SIZE)
-                    sims_done[gi] += self.LEAF_BATCH_SIZE
-                    if leaves:
-                        boards, reserves = mcts_map[gi].encode_leaves(leaves)
-                        all_boards.append(np.asarray(boards))
-                        all_reserves.append(np.asarray(reserves))
-                        leaf_groups.append((gi, leaves))
+            for bi, gi in enumerate(batch_to_gi):
+                if child_counts[bi] == 0:
+                    continue
 
-                # Single GPU call for all leaves across all games
-                if all_boards:
-                    big_boards = np.concatenate(all_boards)
-                    big_reserves = np.concatenate(all_reserves)
-                    big_boards_4d = big_boards.reshape(-1, NUM_CH, GS, GS)
-                    policies, values = self._eval_batch(big_boards_4d, big_reserves)
-
-                    # Distribute results back to each game's MCTS tree
-                    offset = 0
-                    for gi, leaf_ids in leaf_groups:
-                        n = len(leaf_ids)
-                        mcts_map[gi].expand_and_backprop_batch(
-                            leaf_ids,
-                            policies[offset:offset + n],
-                            values[offset:offset + n],
-                        )
-                        offset += n
-
-                # Remove games that have enough simulations
-                searching = [gi for gi in searching
-                             if sims_done[gi] < self.simulations]
-
-            # --- Collect results: visit distributions, record samples, play ---
-            for gi in list(mcts_map.keys()):
                 game = games[gi]
                 move_num = move_counts[gi]
                 temp = self.temperature if move_num < self.temp_threshold else 0.0
                 bt, rv = positions[gi]
 
-                moves, visit_probs = mcts_map[gi].visit_distribution()
+                moves, visit_probs = all_dists[bi]
                 if not moves:
                     game.play_pass()
                     move_counts[gi] += 1

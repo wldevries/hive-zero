@@ -6,7 +6,7 @@ use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyRe
 
 use crate::board::GRID_SIZE;
 use crate::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
-use crate::game;
+use crate::game::{self, Game};
 use crate::mcts::search::MctsSearch;
 use crate::move_encoding::{self, POLICY_SIZE};
 use crate::piece::{Piece, PieceColor, PieceType};
@@ -436,9 +436,316 @@ impl PyMCTS {
     }
 }
 
+/// Batch MCTS: owns multiple search trees and parallelizes CPU work with rayon.
+#[pyclass(name = "RustBatchMCTS")]
+pub struct PyBatchMCTS {
+    searches: Vec<MctsSearch>,
+    c_puct: f32,
+    leaf_batch_size: usize,
+}
+
+#[pymethods]
+impl PyBatchMCTS {
+    #[new]
+    #[pyo3(signature = (num_games, c_puct=1.5, leaf_batch_size=16, capacity=100000))]
+    fn new(num_games: usize, c_puct: f32, leaf_batch_size: usize, capacity: usize) -> Self {
+        let searches: Vec<MctsSearch> = (0..num_games)
+            .map(|_| {
+                let mut s = MctsSearch::new(capacity);
+                s.c_puct = c_puct;
+                s
+            })
+            .collect();
+        PyBatchMCTS { searches, c_puct, leaf_batch_size }
+    }
+
+    /// Initialize MCTS trees for all games with pre-computed policies.
+    /// policies shape: [num_games, POLICY_SIZE]
+    fn init_searches(&mut self, games: Vec<PyRef<PyGame>>, policies: PyReadonlyArray2<f32>) {
+        use rayon::prelude::*;
+
+        let policy_data = policies.as_slice().unwrap();
+        // Collect game clones first (can't send PyRef across threads)
+        let game_clones: Vec<Game> = games.iter().map(|g| g.game.clone()).collect();
+
+        self.searches.par_iter_mut().enumerate().for_each(|(i, search)| {
+            search.c_puct = self.c_puct;
+            let policy = &policy_data[i * POLICY_SIZE..(i + 1) * POLICY_SIZE];
+            search.init(&game_clones[i], policy);
+        });
+    }
+
+    /// Get root child counts for all trees.
+    fn root_child_counts(&self) -> Vec<u16> {
+        self.searches.iter().map(|s| s.arena.get(s.root).child_count).collect()
+    }
+
+    /// Select leaves and encode them for all active games in parallel.
+    /// active_indices: which game indices to process.
+    /// Returns (all_boards [N, board_size], all_reserves [N, reserve_size],
+    ///          game_leaf_counts: list of how many leaves per game).
+    fn select_and_encode<'py>(
+        &mut self,
+        py: Python<'py>,
+        active_indices: Vec<usize>,
+    ) -> (Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>, Vec<usize>) {
+        use rayon::prelude::*;
+
+        let board_size = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
+        let leaf_batch_size = self.leaf_batch_size;
+        let searches = &mut self.searches;
+
+        // Collect mutable refs to only the active searches
+        // We gather (index_in_active, &mut MctsSearch) pairs
+        let mut active_searches: Vec<(usize, &mut MctsSearch)> = Vec::with_capacity(active_indices.len());
+        for (pos, &gi) in active_indices.iter().enumerate() {
+            // Split borrow: take a raw pointer, rebuild mutable ref.
+            // This is safe because active_indices contains unique indices.
+            let ptr = &mut searches[gi] as *mut MctsSearch;
+            active_searches.push((pos, unsafe { &mut *ptr }));
+        }
+
+        // Parallel: select leaves + encode for each active game
+        let results: Vec<(Vec<u32>, Vec<f32>, Vec<f32>)> = active_searches
+            .par_iter_mut()
+            .map(|(_pos, search)| {
+                let leaves = search.select_leaves(leaf_batch_size);
+
+                let mut boards = vec![0.0f32; leaves.len() * board_size];
+                let mut reserves = vec![0.0f32; leaves.len() * RESERVE_SIZE];
+
+                for (j, &leaf) in leaves.iter().enumerate() {
+                    let game_state = &search.arena.get(leaf).game;
+                    crate::board_encoding::encode_board(
+                        game_state,
+                        &mut boards[j * board_size..(j + 1) * board_size],
+                        &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
+                    );
+                }
+
+                // Stash leaf IDs for backprop
+                search.stashed_leaves = leaves.clone();
+
+                (leaves, boards, reserves)
+            })
+            .collect();
+
+        // Flatten boards/reserves into single arrays
+        let mut total_leaves = 0usize;
+        let mut game_leaf_counts = Vec::with_capacity(active_indices.len());
+        for (leaves, _, _) in &results {
+            game_leaf_counts.push(leaves.len());
+            total_leaves += leaves.len();
+        }
+
+        let mut all_boards = vec![0.0f32; total_leaves * board_size];
+        let mut all_reserves = vec![0.0f32; total_leaves * RESERVE_SIZE];
+
+        let mut offset = 0;
+        for (_, boards, reserves) in &results {
+            let n = boards.len() / board_size;
+            all_boards[offset * board_size..(offset + n) * board_size]
+                .copy_from_slice(boards);
+            all_reserves[offset * RESERVE_SIZE..(offset + n) * RESERVE_SIZE]
+                .copy_from_slice(reserves);
+            offset += n;
+        }
+
+        (
+            make_array2(py, &all_boards, total_leaves, board_size),
+            make_array2(py, &all_reserves, total_leaves, RESERVE_SIZE),
+            game_leaf_counts,
+        )
+    }
+
+    /// Expand leaves and backpropagate NN results, in parallel across games.
+    /// policies shape: [total_leaves, POLICY_SIZE], values shape: [total_leaves]
+    /// active_indices + game_leaf_counts must match what select_and_encode returned.
+    fn expand_and_backprop_all(
+        &mut self,
+        active_indices: Vec<usize>,
+        game_leaf_counts: Vec<usize>,
+        policies: PyReadonlyArray2<f32>,
+        values: PyReadonlyArray1<f32>,
+    ) {
+        use rayon::prelude::*;
+
+        let policy_data = policies.as_slice().unwrap();
+        let value_data = values.as_slice().unwrap();
+
+        // Build per-game offsets
+        let mut offsets = Vec::with_capacity(active_indices.len());
+        let mut offset = 0usize;
+        for &count in &game_leaf_counts {
+            offsets.push(offset);
+            offset += count;
+        }
+
+        let searches = &mut self.searches;
+
+        // Collect mutable refs to active searches
+        let mut active_searches: Vec<(usize, &mut MctsSearch)> = Vec::with_capacity(active_indices.len());
+        for (pos, &gi) in active_indices.iter().enumerate() {
+            let ptr = &mut searches[gi] as *mut MctsSearch;
+            active_searches.push((pos, unsafe { &mut *ptr }));
+        }
+
+        // Parallel expand + backprop
+        active_searches.par_iter_mut().for_each(|(pos, search)| {
+            let off = offsets[*pos];
+            let n = game_leaf_counts[*pos];
+            let leaf_ids = std::mem::take(&mut search.stashed_leaves);
+
+            let policies_vec: Vec<Vec<f32>> = (0..n).map(|j| {
+                policy_data[(off + j) * POLICY_SIZE..(off + j + 1) * POLICY_SIZE].to_vec()
+            }).collect();
+            let values_vec: Vec<f32> = value_data[off..off + n].to_vec();
+
+            search.expand_and_backprop(&leaf_ids, &policies_vec, &values_vec);
+        });
+    }
+
+    /// Run full simulation loop for active games, calling eval_fn for GPU batches.
+    /// eval_fn(boards_2d, reserves_2d) -> (policies_2d, values_1d)
+    /// This minimizes Python↔Rust round trips to one per simulation round.
+    fn run_simulations(
+        &mut self,
+        py: Python<'_>,
+        active_indices: Vec<usize>,
+        num_simulations: usize,
+        eval_fn: &Bound<'_, PyAny>,
+    ) {
+        use rayon::prelude::*;
+
+        let board_size = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
+        let leaf_batch_size = self.leaf_batch_size;
+        let mut sims_done: Vec<usize> = vec![0; active_indices.len()];
+        let mut searching: Vec<usize> = (0..active_indices.len()).collect();
+
+        while !searching.is_empty() {
+            // --- CPU (rayon): select leaves + encode ---
+            let active_gis: Vec<usize> = searching.iter().map(|&si| active_indices[si]).collect();
+            let searches = &mut self.searches;
+
+            let mut active_searches: Vec<&mut MctsSearch> = Vec::with_capacity(active_gis.len());
+            for &gi in &active_gis {
+                let ptr = &mut searches[gi] as *mut MctsSearch;
+                active_searches.push(unsafe { &mut *ptr });
+            }
+
+            let results: Vec<(Vec<u32>, Vec<f32>, Vec<f32>)> = active_searches
+                .par_iter_mut()
+                .map(|search| {
+                    let leaves = search.select_leaves(leaf_batch_size);
+                    let mut boards = vec![0.0f32; leaves.len() * board_size];
+                    let mut reserves = vec![0.0f32; leaves.len() * RESERVE_SIZE];
+                    for (j, &leaf) in leaves.iter().enumerate() {
+                        let game_state = &search.arena.get(leaf).game;
+                        crate::board_encoding::encode_board(
+                            game_state,
+                            &mut boards[j * board_size..(j + 1) * board_size],
+                            &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
+                        );
+                    }
+                    search.stashed_leaves = leaves.clone();
+                    (leaves, boards, reserves)
+                })
+                .collect();
+
+            // Track sims and count total leaves
+            let mut total_leaves = 0usize;
+            let mut leaf_counts = Vec::with_capacity(searching.len());
+            for (si_idx, &si) in searching.iter().enumerate() {
+                sims_done[si] += leaf_batch_size;
+                let n = results[si_idx].0.len();
+                leaf_counts.push(n);
+                total_leaves += n;
+            }
+
+            if total_leaves == 0 {
+                searching.retain(|&si| sims_done[si] < num_simulations);
+                continue;
+            }
+
+            // Flatten into contiguous arrays
+            let mut all_boards = vec![0.0f32; total_leaves * board_size];
+            let mut all_reserves = vec![0.0f32; total_leaves * RESERVE_SIZE];
+            let mut offset = 0;
+            for (_, boards, reserves) in &results {
+                let n = boards.len() / board_size;
+                if n > 0 {
+                    all_boards[offset * board_size..(offset + n) * board_size]
+                        .copy_from_slice(boards);
+                    all_reserves[offset * RESERVE_SIZE..(offset + n) * RESERVE_SIZE]
+                        .copy_from_slice(reserves);
+                    offset += n;
+                }
+            }
+
+            // --- GPU: single Python callback ---
+            let board_arr = make_array2(py, &all_boards, total_leaves, board_size);
+            let board_4d = board_arr.reshape([total_leaves, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+            let reserve_arr = make_array2(py, &all_reserves, total_leaves, RESERVE_SIZE);
+
+            let result = eval_fn.call1((board_4d, reserve_arr)).expect("eval_fn call failed");
+            let tuple = result.downcast::<PyTuple>().expect("eval_fn must return tuple");
+
+            let policy_arr: PyReadonlyArray2<f32> = tuple.get_item(0).unwrap().extract().unwrap();
+            let value_arr: PyReadonlyArray1<f32> = tuple.get_item(1).unwrap().extract().unwrap();
+            let policy_data = policy_arr.as_slice().unwrap();
+            let value_data = value_arr.as_slice().unwrap();
+
+            // --- CPU (rayon): expand + backprop ---
+            let mut offsets = Vec::with_capacity(active_gis.len());
+            let mut off = 0usize;
+            for &count in &leaf_counts {
+                offsets.push(off);
+                off += count;
+            }
+
+            let mut active_searches2: Vec<&mut MctsSearch> = Vec::with_capacity(active_gis.len());
+            for &gi in &active_gis {
+                let ptr = &mut searches[gi] as *mut MctsSearch;
+                active_searches2.push(unsafe { &mut *ptr });
+            }
+
+            active_searches2.par_iter_mut().enumerate().for_each(|(i, search)| {
+                let off = offsets[i];
+                let n = leaf_counts[i];
+                let leaf_ids = std::mem::take(&mut search.stashed_leaves);
+                let policies_vec: Vec<Vec<f32>> = (0..n).map(|j| {
+                    policy_data[(off + j) * POLICY_SIZE..(off + j + 1) * POLICY_SIZE].to_vec()
+                }).collect();
+                let values_vec: Vec<f32> = value_data[off..off + n].to_vec();
+                search.expand_and_backprop(&leaf_ids, &policies_vec, &values_vec);
+            });
+
+            searching.retain(|&si| sims_done[si] < num_simulations);
+        }
+    }
+
+    /// Get visit distributions for specified games.
+    fn visit_distributions(&self, game_indices: Vec<usize>)
+        -> Vec<(Vec<(String, Option<(i8, i8)>, (i8, i8))>, Vec<f32>)>
+    {
+        game_indices.iter().map(|&gi| {
+            let dist = self.searches[gi].get_visit_distribution();
+            let moves: Vec<_> = dist.iter().map(|(mv, _)| {
+                match mv.piece {
+                    Some(p) => (p.to_string(), mv.from, mv.to.unwrap()),
+                    None => ("pass".to_string(), None, (0, 0)),
+                }
+            }).collect();
+            let probs: Vec<f32> = dist.iter().map(|(_, v)| *v).collect();
+            (moves, probs)
+        }).collect()
+    }
+}
+
 /// Register Python module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGame>()?;
     m.add_class::<PyMCTS>()?;
+    m.add_class::<PyBatchMCTS>()?;
     Ok(())
 }

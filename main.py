@@ -19,7 +19,7 @@ def main():
                               help="Self-play games per iteration")
     train_parser.add_argument("--simulations", type=int, default=100,
                               help="MCTS simulations per move")
-    train_parser.add_argument("--epochs", type=int, default=5,
+    train_parser.add_argument("--epochs", type=int, default=1,
                               help="Training epochs per iteration")
     train_parser.add_argument("--batch-size", type=int, default=64)
     train_parser.add_argument("--model", type=str, default="model.pt",
@@ -40,6 +40,8 @@ def main():
                               help="Number of fast iterations per cycle (default: 10)")
     train_parser.add_argument("--full-iters", type=int, default=2,
                               help="Number of full MCTS iterations per cycle (default: 2)")
+    train_parser.add_argument("--warmup-positions", type=int, default=10_000,
+                              help="Fill buffer to this many positions before training (0=skip)")
 
     args = parser.parse_args()
 
@@ -56,7 +58,8 @@ def main():
             time_limit_minutes=args.time_limit,
             mcts_after=args.mcts_after,
             fast_iters=args.fast_iters,
-            full_iters=args.full_iters
+            full_iters=args.full_iters,
+            warmup_positions=args.warmup_positions,
         )
     else:
         # Default: UHP engine
