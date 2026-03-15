@@ -3,41 +3,52 @@
 ## Project Overview
 A Hive AI engine in Python + Rust implementing the Universal Hive Protocol (UHP) over stdin/stdout.
 Uses AlphaZero-style MCTS + neural network for move selection.
-The Rust extension (`hive_engine`) reimplements game logic, MCTS, and encoding for ~45x speedup.
+All game logic, MCTS, and encoding run in Rust (`hive_engine` via PyO3) for performance.
 
 ## Architecture
 ```
 hive/
   core/        - Game logic: hex coords, pieces, board, movement rules, game state, renderer
-  encoding/    - Board-to-tensor and move encoding for neural network I/O
-  nn/          - PyTorch AlphaZero-style model (policy + value heads)
-  mcts/        - Monte Carlo Tree Search with legal move masking
+  encoding/    - Board-to-tensor and move encoding for neural network I/O + symmetry augmentation
+  nn/          - PyTorch AlphaZero-style model (policy + value heads), training loop
   uhp/         - UHP stdin/stdout protocol engine
-  selfplay/    - Self-play training loop
-    selfplay.py       - SelfPlayTrainer orchestrator, fast/full MCTS scheduling
-    rust_selfplay.py  - RustFastSelfPlay: Rust-accelerated game + MCTS self-play
+  selfplay/    - Self-play training loop (Rust-only, no Python MCTS)
+    selfplay.py       - SelfPlayTrainer orchestrator, fast/full MCTS scheduling, warmup
+    rust_selfplay.py  - RustFastSelfPlay + RustParallelSelfPlay (rayon-parallel batched MCTS)
 rust/
   src/         - Rust game engine (PyO3 extension module `hive_engine`)
     board.rs          - Board state, 23x23 grid, hex-to-grid conversion
     board_encoding.rs - Board tensor encoding (mirrors hive/encoding/)
-    game.rs           - Game state, move application, undo
+    game.rs           - Game state, move application, undo, heuristic evaluation
     hex.rs            - Axial hex coordinates, directions
     move_encoding.rs  - Move-to-policy-index encoding (mirrors hive/encoding/)
     mcts/             - Rust MCTS (search, arena allocator, nodes)
     piece.rs          - Piece types and colors
-    python.rs         - PyO3 bindings exposing RustGame, RustMCTS to Python
+    python.rs         - PyO3 bindings: RustGame, RustMCTS, RustBatchMCTS
     rules.rs          - Movement rules per piece type
 ```
 
 ## Key Design Decisions
 - **Hex coordinates**: Axial (q, r) system. Flat-top hexagons.
-- **Board encoding**: 23x23 grid with ~30 channels (piece type x color, stack depths, reserves).
+- **Board encoding**: 23x23 grid with 23 channels (piece type x color, stack depths, reserves).
 - **Move encoding**: (source, destination) hex pairs in flat policy space (12 channels x 23 x 23 = 6348). Placement moves use fixed off-board source slots per piece type. Movement uses direction channels (6 directions + 1 stacking).
-- **Base game only**: Queen, Beetle, Grasshopper, Spider, Ant. No expansions (Mosquito/Ladybug/Pillbug) initially.
+- **Base game only**: Queen, Beetle, Grasshopper, Spider, Ant. No expansions.
 - **Beetle stacking**: Up to depth 7.
 - **One Hive Rule**: All pieces must remain connected after any move.
 - **Gate blocking**: Pieces cannot slide through gates (two adjacent occupied hexes).
-- **Dual implementation**: Python game logic in `hive/core/` and parallel Rust implementation in `rust/src/`. Both must produce identical encoding indices. When editing move encoding or board encoding, update both Python and Rust versions.
+- **Rust-only engine**: All game logic, MCTS, and encoding in Rust. Python handles NN inference and training only. When editing move encoding or board encoding, update both Python and Rust versions.
+
+## Training Pipeline
+- **SGD + momentum 0.9** with stepped LR schedule: 0.05 → 0.005 (iter 30) → 0.0005 (iter 60) → 0.00005 (iter 90)
+- **1 epoch** per iteration (avoids overfitting on stale replay buffer data)
+- **Warmup phase**: fills replay buffer (default 10k positions) before first training
+- **Buffer clears** on fast→MCTS transition to avoid diluting MCTS policy targets
+- **Symmetry augmentation** at buffer insertion time (12 hex symmetries), not during training
+- **Replay buffer**: 50k positions max, deque-based O(1) eviction
+- **Fast mode policy targets**: uniform over legal moves (not model output, which would be circular)
+- **Heuristic value** for unfinished games: queen neighbor pressure + beetle-on-queen bonus
+- **Rayon parallelism**: MCTS tree ops (select, encode, expand, backprop) parallelized across games
+- **RustBatchMCTS.run_simulations**: full simulation loop in Rust with single Python GPU callback per round
 
 ## Package Manager
 Use `uv` for all dependency management. Do NOT use pip directly.
@@ -53,14 +64,6 @@ but the module is imported as `hive_engine` (set via `[lib] name` in Cargo.toml)
 
 `uv run` automatically rebuilds when Rust source files change (via `cache-keys` in pyproject.toml).
 Just run `uv run python main.py ...` after editing — no manual rebuild needed.
-If the Rust extension is not available, self-play falls back to pure Python automatically.
-
-## Training CLI
-All commands go through `main.py`:
-```bash
-uv run python main.py train --iterations 50 --games 20 --simulations 100
-uv run python main.py train --mcts-after -1 --simulations 100  # Always use full MCTS
-```
 
 ## Testing
 ```bash
@@ -78,6 +81,7 @@ uv pip install torch==2.10.0+cu128 --index-url https://download.pytorch.org/whl/
 - PyTorch (CUDA 12.8)
 - numpy
 - Rust toolchain + maturin (for building the native extension)
+- rayon (Rust, for parallel MCTS)
 
 ## UHP Commands
 `info`, `newgame`, `play`, `validmoves`, `bestmove`, `undo`, `options`, `pass`
