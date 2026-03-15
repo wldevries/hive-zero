@@ -231,7 +231,6 @@ class ParallelSelfPlay:
         """Play num_games via parallel self-play. Returns (samples, games)."""
         all_samples = []
         all_games = []
-        # Run games in waves of num_parallel
         remaining = num_games
         while remaining > 0:
             wave_size = min(remaining, self.num_parallel)
@@ -564,7 +563,11 @@ class SelfPlayTrainer:
             elapsed_str = f" [{(time.time() - start_time) / 60:.1f}m]" if time_limit_minutes else ""
 
             # Determine whether to use fast or full MCTS
-            if mcts_after > 0:
+            if mcts_after < 0:
+                # Always MCTS
+                use_mcts = True
+                mode_label = "MCTS"
+            elif mcts_after > 0:
                 # Legacy mode: one-time switch
                 use_mcts = iteration > mcts_after
                 mode_label = "MCTS" if use_mcts else "fast"
@@ -579,23 +582,23 @@ class SelfPlayTrainer:
                 else:
                     mode_label = f"fast {cycle_pos + 1}/{fast_iters}"
 
-            print(f"\n=== Iteration {iteration} [{mode_label}]{elapsed_str} ===")
-
-            # Generate self-play games
-            iter_start = time.time()
-
             # Prefer Rust-accelerated self-play if available
             try:
                 from .rust_selfplay import RustFastSelfPlay, RustParallelSelfPlay, HAS_RUST
             except ImportError:
                 HAS_RUST = False
 
+            engine_label = "Rust" if HAS_RUST else "Python"
+            print(f"\n=== Iteration {iteration} [{mode_label}] [{engine_label}]{elapsed_str} ===")
+
+            # Generate self-play games
+            iter_start = time.time()
+
             if use_mcts:
                 if HAS_RUST:
                     sp = RustParallelSelfPlay(
                         model=self.model, device=self.device,
-                        num_parallel=num_parallel, simulations=simulations,
-                        max_moves=max_moves,
+                        simulations=simulations, max_moves=max_moves,
                     )
                 else:
                     sp = ParallelSelfPlay(
@@ -675,6 +678,12 @@ def main():
     parser.add_argument("--blocks", type=int, default=6)
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--parallel", type=int, default=8)
+    parser.add_argument("--mcts-after", type=int, default=0,
+                        help="Use MCTS after this iteration (0=cycling mode, -1=always MCTS)")
+    parser.add_argument("--fast-iters", type=int, default=10,
+                        help="Fast iterations per cycle (cycling mode only)")
+    parser.add_argument("--full-iters", type=int, default=2,
+                        help="Full MCTS iterations per cycle (cycling mode only)")
     args = parser.parse_args()
 
     trainer = SelfPlayTrainer(
@@ -685,6 +694,8 @@ def main():
         num_iterations=args.iterations, games_per_iter=args.games,
         simulations=args.simulations, epochs_per_iter=args.epochs,
         batch_size=args.batch_size, num_parallel=args.parallel,
+        mcts_after=args.mcts_after, fast_iters=args.fast_iters,
+        full_iters=args.full_iters,
     )
 
 

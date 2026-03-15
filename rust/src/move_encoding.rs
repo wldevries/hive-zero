@@ -20,9 +20,9 @@ fn policy_index(channel: usize, row: usize, col: usize) -> usize {
     channel * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col
 }
 
-/// Encode a move as a flat policy index.
-pub fn encode_move(piece: Piece, from: Option<Hex>, to: Hex) -> usize {
-    let (dest_row, dest_col) = hex_to_grid(to).expect("destination out of grid");
+/// Encode a move as a flat policy index. Returns None if out of grid bounds.
+pub fn encode_move_checked(piece: Piece, from: Option<Hex>, to: Hex) -> Option<usize> {
+    let (dest_row, dest_col) = hex_to_grid(to)?;
 
     let channel = if from.is_none() {
         // Placement move
@@ -40,7 +40,12 @@ pub fn encode_move(piece: Piece, from: Option<Hex>, to: Hex) -> usize {
         ch
     };
 
-    policy_index(channel, dest_row, dest_col)
+    Some(policy_index(channel, dest_row, dest_col))
+}
+
+/// Encode a move as a flat policy index. Panics if out of grid bounds.
+pub fn encode_move(piece: Piece, from: Option<Hex>, to: Hex) -> usize {
+    encode_move_checked(piece, from, to).expect("destination out of grid")
 }
 
 /// Decode a flat policy index into (channel, row, col).
@@ -52,11 +57,11 @@ pub fn decode_move(index: usize) -> (usize, usize, usize) {
     (channel, row, col)
 }
 
-/// Encode a Move struct as a policy index.
+/// Encode a Move struct as a policy index. Returns None if out of grid.
 pub fn encode_game_move(mv: &Move) -> Option<usize> {
     let piece = mv.piece?;
     let to = mv.to?;
-    Some(encode_move(piece, mv.from, to))
+    encode_move_checked(piece, mv.from, to)
 }
 
 /// Create a binary mask over the policy space for legal moves.

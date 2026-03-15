@@ -199,111 +199,168 @@ class RustFastSelfPlay:
 
 
 class RustParallelSelfPlay:
-    """Parallel MCTS self-play using Rust game engine and RustMCTS.
+    """Batched MCTS self-play using Rust game engine.
 
-    All tree search happens in Rust; only NN evaluation crosses to Python.
+    Cross-game batching: leaf evaluations from all active games' MCTS trees
+    are combined into single GPU calls, maximizing throughput.
     """
 
-    def __init__(self, model, device: str = "cpu", num_parallel: int = 8,
+    # Number of MCTS leaf nodes to select per game per simulation round
+    LEAF_BATCH_SIZE = 16
+
+    def __init__(self, model, device: str = "cpu",
                  simulations: int = 100, max_moves: int = 200,
-                 temperature: float = 1.0, temp_threshold: int = 30):
+                 temperature: float = 1.0, temp_threshold: int = 30,
+                 **kwargs):
         self.model = model
         self.device = device
-        self.num_parallel = num_parallel
         self.simulations = simulations
         self.max_moves = max_moves
         self.temperature = temperature
         self.temp_threshold = temp_threshold
 
-    def _make_eval_fn(self):
-        """Create a batch NN evaluation callback for RustMCTS."""
+    def _eval_batch(self, board_batch_4d, reserve_batch):
+        """Evaluate a batch of positions. Returns (policies, values)."""
         import torch
-        model = self.model
-        device = self.device
+        if self.model is None:
+            n = board_batch_4d.shape[0]
+            return (np.ones((n, POLICY_SIZE), dtype=np.float32) / POLICY_SIZE,
+                    np.zeros(n, dtype=np.float32))
 
-        def eval_fn(board_batch, reserve_batch):
-            if model is None:
-                n = board_batch.shape[0]
-                policy = np.ones((n, POLICY_SIZE), dtype=np.float32) / POLICY_SIZE
-                value = np.zeros(n, dtype=np.float32)
-                return policy, value
-
-            bt = torch.tensor(board_batch).to(device)
-            rv = torch.tensor(reserve_batch).to(device)
-            with torch.no_grad():
-                policy_logits, values = model(bt, rv)
-            policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
-            vals = values.cpu().numpy().flatten()
-            return policy.astype(np.float32), vals.astype(np.float32)
-
-        return eval_fn
+        bt = torch.tensor(board_batch_4d).to(self.device)
+        rv = torch.tensor(reserve_batch).to(self.device)
+        with torch.no_grad():
+            policy_logits, values = self.model(bt, rv)
+        policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
+        vals = values.cpu().numpy().flatten()
+        return policy.astype(np.float32), vals.astype(np.float32)
 
     def play_games(self, num_games: int) -> tuple[list[list[tuple]], list]:
-        """Play num_games via parallel MCTS self-play."""
-        all_samples = []
-        all_games = []
-        remaining = num_games
-        while remaining > 0:
-            wave_size = min(remaining, self.num_parallel)
-            wave_samples, wave_games = self._play_wave(wave_size)
-            all_samples.extend(wave_samples)
-            all_games.extend(wave_games)
-            remaining -= wave_size
-        return all_samples, all_games
+        """Play num_games with cross-game batched MCTS."""
+        NUM_CH = 23  # board encoding channels
+        GS = 23      # grid size
 
-    def _play_wave(self, wave_size: int) -> tuple[list[list[tuple]], list]:
-        """Play a wave of games using RustMCTS."""
-        import sys
-
-        games = [RustGame() for _ in range(wave_size)]
-        histories = [[] for _ in range(wave_size)]
-        move_counts = [0] * wave_size
-        active = list(range(wave_size))
+        games = [RustGame() for _ in range(num_games)]
+        histories = [[] for _ in range(num_games)]
+        move_counts = [0] * num_games
+        active = set(range(num_games))
         finished_count = 0
-        eval_fn = self._make_eval_fn()
 
         while active:
-            # For each active game, run RustMCTS search
+            # --- Handle passes ---
+            mcts_games = []  # games needing MCTS this round
             for gi in list(active):
+                if not games[gi].valid_moves():
+                    games[gi].play_pass()
+                    move_counts[gi] += 1
+                    if games[gi].is_game_over or move_counts[gi] >= self.max_moves:
+                        active.discard(gi)
+                        finished_count += 1
+                else:
+                    mcts_games.append(gi)
+
+            if not mcts_games:
+                continue
+
+            # --- Record positions & batch initial policy eval ---
+            positions = {}
+            board_list = []
+            reserve_list = []
+            for gi in mcts_games:
+                bt, rv = games[gi].encode_board()
+                positions[gi] = (bt, rv)
+                board_list.append(np.asarray(bt).reshape(1, NUM_CH, GS, GS))
+                reserve_list.append(np.asarray(rv).reshape(1, -1))
+
+            board_batch = np.concatenate(board_list)
+            reserve_batch = np.concatenate(reserve_list)
+            init_policies, _ = self._eval_batch(board_batch, reserve_batch)
+
+            # --- Init MCTS trees ---
+            mcts_map = {}  # gi -> RustMCTS
+            searching = []  # games that have MCTS trees
+            for i, gi in enumerate(mcts_games):
+                mcts = RustMCTS(c_puct=1.5, batch_size=self.LEAF_BATCH_SIZE)
+                mcts.init_search(games[gi], init_policies[i])
+                if mcts.root_child_count() > 0:
+                    mcts_map[gi] = mcts
+                    searching.append(gi)
+                else:
+                    # No encodable moves
+                    games[gi].play_pass()
+                    move_counts[gi] += 1
+                    if games[gi].is_game_over or move_counts[gi] >= self.max_moves:
+                        active.discard(gi)
+                        finished_count += 1
+
+            # --- Run MCTS simulations with cross-game batching ---
+            sims_done = {gi: 0 for gi in searching}
+
+            while searching:
+                all_boards = []
+                all_reserves = []
+                leaf_groups = []  # (gi, leaf_ids) pairs with leaves
+
+                for gi in searching:
+                    leaves = mcts_map[gi].select_leaves_batch(self.LEAF_BATCH_SIZE)
+                    sims_done[gi] += self.LEAF_BATCH_SIZE
+                    if leaves:
+                        boards, reserves = mcts_map[gi].encode_leaves(leaves)
+                        all_boards.append(np.asarray(boards))
+                        all_reserves.append(np.asarray(reserves))
+                        leaf_groups.append((gi, leaves))
+
+                # Single GPU call for all leaves across all games
+                if all_boards:
+                    big_boards = np.concatenate(all_boards)
+                    big_reserves = np.concatenate(all_reserves)
+                    big_boards_4d = big_boards.reshape(-1, NUM_CH, GS, GS)
+                    policies, values = self._eval_batch(big_boards_4d, big_reserves)
+
+                    # Distribute results back to each game's MCTS tree
+                    offset = 0
+                    for gi, leaf_ids in leaf_groups:
+                        n = len(leaf_ids)
+                        mcts_map[gi].expand_and_backprop_batch(
+                            leaf_ids,
+                            policies[offset:offset + n],
+                            values[offset:offset + n],
+                        )
+                        offset += n
+
+                # Remove games that have enough simulations
+                searching = [gi for gi in searching
+                             if sims_done[gi] < self.simulations]
+
+            # --- Collect results: visit distributions, record samples, play ---
+            for gi in list(mcts_map.keys()):
                 game = games[gi]
                 move_num = move_counts[gi]
                 temp = self.temperature if move_num < self.temp_threshold else 0.0
+                bt, rv = positions[gi]
 
-                # Record position before MCTS
-                bt, rv = game.encode_board()
-
-                # Check for valid moves
-                valid = game.valid_moves()
-                if not valid:
-                    # Must pass
-                    game.play_pass()
-                    move_counts[gi] += 1
-                    if game.is_game_over or move_counts[gi] >= self.max_moves:
-                        active.remove(gi)
-                        finished_count += 1
-                    continue
-
-                # Run RustMCTS
-                mcts = RustMCTS(c_puct=1.5, batch_size=16)
-                moves, probs = mcts.get_policy(game, eval_fn, self.simulations, temp if temp > 0 else 1.0)
-
+                moves, visit_probs = mcts_map[gi].visit_distribution()
                 if not moves:
                     game.play_pass()
                     move_counts[gi] += 1
                     if game.is_game_over or move_counts[gi] >= self.max_moves:
-                        active.remove(gi)
+                        active.discard(gi)
                         finished_count += 1
                     continue
 
-                # Apply temperature to visit distribution
-                probs = np.array(probs, dtype=np.float32)
+                # Apply temperature
+                probs = np.array(visit_probs, dtype=np.float32)
                 if temp == 0:
+                    best = np.argmax(probs)
                     probs = np.zeros_like(probs)
-                    probs[np.argmax(probs)] = 1.0
-                    # Fix: use original probs for argmax
-                    _, orig_probs = mcts.get_policy(game, eval_fn, 0, 1.0)
-                    probs = np.zeros(len(moves), dtype=np.float32)
-                    probs[np.argmax(orig_probs)] = 1.0
+                    probs[best] = 1.0
+                else:
+                    probs = probs ** (1.0 / temp)
+                    total = probs.sum()
+                    if total > 0:
+                        probs /= total
+                    else:
+                        probs = np.ones_like(probs) / len(probs)
 
                 # Build policy vector for training
                 policy_vector = np.zeros(POLICY_SIZE, dtype=np.float32)
@@ -325,11 +382,11 @@ class RustParallelSelfPlay:
 
                 move_counts[gi] += 1
                 if game.is_game_over or move_counts[gi] >= self.max_moves:
-                    active.remove(gi)
+                    active.discard(gi)
                     finished_count += 1
 
             total_moves = sum(move_counts)
-            print(f"\r  Games: {finished_count}/{wave_size} done, "
+            print(f"\r  Games: {finished_count}/{num_games} done, "
                   f"{len(active)} active, "
                   f"{total_moves} total moves", end="", flush=True)
 
@@ -338,7 +395,7 @@ class RustParallelSelfPlay:
         # Build samples with outcomes
         all_game_samples = []
         wins_w, wins_b, draws = 0, 0, 0
-        for gi in range(wave_size):
+        for gi in range(num_games):
             game = games[gi]
             state = game.state
             if state == "WhiteWins":

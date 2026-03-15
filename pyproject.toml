@@ -12,6 +12,10 @@ dependencies = [
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
+[tool.uv]
+# Rebuild Rust extension when source changes
+cache-keys = [{ file = "pyproject.toml" }, { file = "rust/Cargo.toml" }, { file = "rust/src/**/*.rs" }]
+
 [tool.maturin]
 manifest-path = "rust/Cargo.toml"
 module-name = "hive_engine"

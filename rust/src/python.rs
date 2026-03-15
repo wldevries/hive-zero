@@ -132,11 +132,14 @@ impl PyGame {
         (mask_array, moves_list)
     }
 
-    /// Encode a specific move as policy index.
+    /// Encode a specific move as policy index. Returns -1 if out of grid.
     #[pyo3(signature = (piece_str, from_pos, to_pos))]
-    fn encode_move(&self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) -> usize {
+    fn encode_move(&self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) -> i64 {
         let piece = Piece::from_str(piece_str).expect("invalid piece string");
-        move_encoding::encode_move(piece, from_pos, to_pos)
+        match move_encoding::encode_move_checked(piece, from_pos, to_pos) {
+            Some(idx) => idx as i64,
+            None => -1,
+        }
     }
 
     /// Check if piece is in reserve.
@@ -282,6 +285,82 @@ impl PyMCTS {
             }
         };
 
+        (moves, probs)
+    }
+    // --- Low-level API for cross-game batched evaluation ---
+
+    /// Initialize MCTS tree for a game position with a pre-computed initial policy.
+    fn init_search(&mut self, game: &PyGame, initial_policy: PyReadonlyArray1<f32>) {
+        self.search.c_puct = self.c_puct;
+        let policy = initial_policy.as_slice().unwrap();
+        self.search.init(&game.game, policy);
+    }
+
+    /// Number of children at root (0 = no encodable valid moves).
+    fn root_child_count(&self) -> u16 {
+        self.search.arena.get(self.search.root).child_count
+    }
+
+    /// Select leaf nodes needing NN eval. Terminal/duplicate nodes are handled
+    /// internally. Returns list of leaf node IDs.
+    #[pyo3(signature = (batch_size))]
+    fn select_leaves_batch(&mut self, batch_size: usize) -> Vec<u32> {
+        self.search.select_leaves(batch_size)
+    }
+
+    /// Encode leaf game states as numpy arrays for NN evaluation.
+    /// Returns (boards[N, C*H*W], reserves[N, R]).
+    fn encode_leaves<'py>(
+        &self, py: Python<'py>, leaf_ids: Vec<u32>,
+    ) -> (Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>) {
+        let n = leaf_ids.len();
+        let board_size = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
+        let mut all_boards = vec![0.0f32; n * board_size];
+        let mut all_reserves = vec![0.0f32; n * RESERVE_SIZE];
+
+        for (i, &leaf) in leaf_ids.iter().enumerate() {
+            let game_state = &self.search.arena.get(leaf).game;
+            crate::board_encoding::encode_board(
+                game_state,
+                &mut all_boards[i * board_size..(i + 1) * board_size],
+                &mut all_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
+            );
+        }
+
+        (make_array2(py, &all_boards, n, board_size),
+         make_array2(py, &all_reserves, n, RESERVE_SIZE))
+    }
+
+    /// Expand leaves with NN output and backpropagate values.
+    fn expand_and_backprop_batch(
+        &mut self,
+        leaf_ids: Vec<u32>,
+        policies: PyReadonlyArray2<f32>,
+        values: PyReadonlyArray1<f32>,
+    ) {
+        let policy_data = policies.as_slice().unwrap();
+        let value_data = values.as_slice().unwrap();
+        let n = leaf_ids.len();
+
+        let policies_vec: Vec<Vec<f32>> = (0..n).map(|i| {
+            policy_data[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].to_vec()
+        }).collect();
+        let values_vec: Vec<f32> = value_data[..n].to_vec();
+
+        self.search.expand_and_backprop(&leaf_ids, &policies_vec, &values_vec);
+    }
+
+    /// Get visit count distribution after search completes.
+    /// Returns (moves, visit_proportions).
+    fn visit_distribution(&self) -> (Vec<(String, Option<(i8, i8)>, (i8, i8))>, Vec<f32>) {
+        let dist = self.search.get_visit_distribution();
+        let moves: Vec<_> = dist.iter().map(|(mv, _)| {
+            match mv.piece {
+                Some(p) => (p.to_string(), mv.from, mv.to.unwrap()),
+                None => ("pass".to_string(), None, (0, 0)),
+            }
+        }).collect();
+        let probs: Vec<f32> = dist.iter().map(|(_, v)| *v).collect();
         (moves, probs)
     }
 }

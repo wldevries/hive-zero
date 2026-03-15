@@ -1,6 +1,6 @@
 # Hive AI Engine
 
-A Python AI engine for the [Hive](https://boardgamegeek.com/boardgame/2655/hive) board game, implementing the [Universal Hive Protocol (UHP)](https://github.com/jonthysell/Mzinga/wiki/UniversalHiveProtocol) for interoperability with UHP-compatible viewers.
+A Python + Rust AI engine for the [Hive](https://boardgamegeek.com/boardgame/2655/hive) board game, implementing the [Universal Hive Protocol (UHP)](https://github.com/jonthysell/Mzinga/wiki/UniversalHiveProtocol) for interoperability with UHP-compatible viewers.
 
 ## Features
 
@@ -8,26 +8,35 @@ A Python AI engine for the [Hive](https://boardgamegeek.com/boardgame/2655/hive)
 - **UHP compliant**: stdin/stdout protocol compatible with Mzinga and other UHP viewers
 - **AlphaZero-style AI**: Convolutional neural network with policy and value heads, trained via self-play
 - **MCTS**: Monte Carlo Tree Search with neural network evaluation and legal move masking
-- **Self-play training**: Automated training pipeline generating games and updating the network
+- **Rust game engine**: PyO3-based Rust extension (`hive_engine`) for fast game simulation and MCTS (~45x speedup over pure Python)
+- **Self-play training**: Automated training pipeline with configurable MCTS schedule
 
-## Quick Start
+## Requirements
 
-### Requirements
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) (package manager)
+- PyTorch (CUDA 12.8)
+- Rust toolchain (for building the native extension)
 
-- Python 3.10+
-- PyTorch >= 2.0
-- NumPy
-
-### Install
+## Setup
 
 ```bash
-pip install -r requirements.txt
+# Install Python dependencies
+uv sync
+
+# Install PyTorch with CUDA support
+uv pip install torch==2.10.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+
+# Build the Rust extension
+uv run maturin develop --release -m rust/Cargo.toml
 ```
+
+## Usage
 
 ### Run as UHP Engine
 
 ```bash
-python main.py
+uv run python main.py
 ```
 
 The engine communicates over stdin/stdout using UHP. Connect it to any UHP-compatible viewer (e.g., [MzingaViewer](https://github.com/jonthysell/Mzinga)).
@@ -35,7 +44,37 @@ The engine communicates over stdin/stdout using UHP. Connect it to any UHP-compa
 ### Train via Self-Play
 
 ```bash
-python -m hive.selfplay
+# Basic training run
+uv run python main.py train
+
+# With options
+uv run python main.py train --iterations 50 --games 20 --simulations 100 --device cuda
+```
+
+Key training flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--iterations` | 100 | Training iterations |
+| `--games` | 20 | Self-play games per iteration |
+| `--simulations` | 100 | MCTS simulations per move |
+| `--epochs` | 5 | Training epochs per iteration |
+| `--batch-size` | 64 | Training batch size |
+| `--model` | `model.pt` | Model file path |
+| `--device` | `cuda` | `cuda` or `cpu` |
+| `--blocks` | 6 | Residual blocks in network |
+| `--channels` | 64 | Channels in network |
+| `--max-moves` | 200 | Max moves per game |
+| `--parallel` | 8 | Parallel self-play games |
+| `--mcts-after` | 0 | Use full MCTS after this iteration (-1 = always MCTS) |
+| `--fast-iters` | 10 | Fast iterations per cycle |
+| `--full-iters` | 2 | Full MCTS iterations per cycle |
+| `--time-limit` | None | Stop after N minutes |
+
+### Run Tests
+
+```bash
+uv run python -m pytest tests/
 ```
 
 ## UHP Commands
@@ -56,12 +95,15 @@ python -m hive.selfplay
 
 ```
 hive/
-  core/        Game logic (hex coordinates, pieces, board, rules, game state)
+  core/        Game logic (hex coordinates, pieces, board, rules, game state, renderer)
   encoding/    Neural network I/O (board tensors, move encoding)
-  nn/          PyTorch model (AlphaZero-style conv net)
-  mcts/        Monte Carlo Tree Search
-  uhp/         UHP protocol engine
-  selfplay/    Self-play training loop
+  nn/          PyTorch model (AlphaZero-style conv net, policy + value heads)
+  mcts/        Monte Carlo Tree Search with legal move masking
+  uhp/         UHP protocol engine (stdin/stdout)
+  selfplay/    Self-play training loop + Rust-accelerated self-play
+rust/
+  src/         Rust game engine exposed via PyO3 as `hive_engine`
+               (board, game, rules, MCTS, move encoding, board encoding)
 ```
 
 ## Move Notation
