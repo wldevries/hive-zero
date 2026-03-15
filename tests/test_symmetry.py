@@ -34,7 +34,7 @@ class TestHexRotation:
 class TestHexMirror:
     """Verify the mirror transform."""
 
-    MIRROR_EXPECTED = [4, 3, 2, 1, 0, 5]  # E↔SW, NE↔W, NW stays, SE stays
+    MIRROR_EXPECTED = [5, 4, 3, 2, 1, 0]  # E↔SE, NE↔SW, NW↔W
 
     def test_mirror_maps_directions(self):
         for i, d in enumerate(DIRECTIONS):
@@ -78,14 +78,14 @@ class TestApplySymmetry:
         assert np_ is policy
 
     def test_rotation_moves_piece(self):
-        """A piece at E neighbor (hex 1,0) should rotate to NE (hex 0,-1)."""
+        """A piece at E neighbor (hex 1,0) should rotate to NE (hex 1,-1)."""
         board, policy = self._make_data()
         # Place piece at hex (1,0) = grid (11,12)
         board[0, 11, 12] = 1.0
         nb, _ = apply_symmetry(board, policy, 1)  # 1 rotation
 
-        # hex (1,0) -> rotated (0,-1) -> grid (10,11)
-        assert nb[0, 10, 11] == 1.0
+        # hex (1,0) -> rotated (1,-1) -> grid (10,12)
+        assert nb[0, 10, 12] == 1.0
         assert nb[0, 11, 12] == 0.0
 
     def test_rotation_permutes_direction_channels(self):
@@ -108,8 +108,8 @@ class TestApplySymmetry:
         policy[7 * gs2 + 11 * GRID_SIZE + 12] = 1.0
         _, np_ = apply_symmetry(board, policy, 1)
 
-        # Should still be channel 7, but at rotated position (10,11)
-        assert np_[7 * gs2 + 10 * GRID_SIZE + 11] == 1.0
+        # Should still be channel 7, but at rotated position (10,12)
+        assert np_[7 * gs2 + 10 * GRID_SIZE + 12] == 1.0
 
     def test_all_transforms_preserve_mass_near_center(self):
         """Policy mass near center is preserved (corners may clip off grid)."""

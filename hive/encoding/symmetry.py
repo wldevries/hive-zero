@@ -10,13 +10,13 @@ import numpy as np
 from .board_encoder import GRID_SIZE, GRID_CENTER
 
 # Rotation and mirror for THIS project's hex coord system.
-# Directions: E(1,0), NE(0,-1), NW(-1,-1), W(-1,0), SW(0,1), SE(1,1)
-# 60° rotation maps each direction to the next: (q,r) → (r, -q+r)
+# Directions: E(1,0), NE(1,-1), NW(0,-1), W(-1,0), SW(-1,1), SE(0,1)
+# 60° rotation maps each direction to the next: (q,r) → (q+r, -q)
 # Mirror swaps q and r: (q,r) → (r, q)
 
 def _hex_rotate60(q: int, r: int) -> tuple[int, int]:
-    """Rotate hex coord 60°: (q,r) → (r, -q+r)."""
-    return (r, -q + r)
+    """Rotate hex coord 60°: (q,r) → (q+r, -q)."""
+    return (q + r, -q)
 
 
 def _hex_mirror(q: int, r: int) -> tuple[int, int]:
@@ -59,11 +59,11 @@ def _compose_transform(n_rotations: int, mirror: bool):
 
 # Direction channel permutation under rotation:
 # Channels 0-5 are directions E, NE, NW, W, SW, SE.
-# Rotating 60° CW shifts each direction by +1 (mod 6).
+# Rotating 60° CCW shifts each direction by +1 (mod 6).
 # Mirror (swap q,r) maps direction i → MIRROR_DIR[i].
-#   E(1,0)→(0,1)=SW(4), NE(0,-1)→(-1,0)=W(3), NW(-1,-1)→(-1,-1)=NW(2),
-#   W(-1,0)→(0,-1)=NE(1), SW(0,1)→(1,0)=E(0), SE(1,1)→(1,1)=SE(5)
-MIRROR_DIR = [4, 3, 2, 1, 0, 5]
+#   E(1,0)→(0,1)=SE(5), NE(1,-1)→(-1,1)=SW(4), NW(0,-1)→(-1,0)=W(3),
+#   W(-1,0)→(0,-1)=NW(2), SW(-1,1)→(1,-1)=NE(1), SE(0,1)→(1,0)=E(0)
+MIRROR_DIR = [5, 4, 3, 2, 1, 0]
 
 def _direction_channel_perm(n_rotations: int, mirror: bool) -> list[int]:
     """Compute how direction channels 0-5 permute under the transform.

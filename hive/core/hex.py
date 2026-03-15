@@ -30,11 +30,11 @@ class Hex(NamedTuple):
 # Order: E, NE, NW, W, SW, SE (clockwise from right)
 DIRECTIONS = [
     Hex(1, 0),    # E  (right)          UHP: -
-    Hex(0, -1),   # NE (top-right)      UHP: /
-    Hex(-1, -1),  # NW (top-left)       UHP: \  (from target's perspective)
+    Hex(1, -1),   # NE (top-right)      UHP: /
+    Hex(0, -1),   # NW (top-left)       UHP: \  (from target's perspective)
     Hex(-1, 0),   # W  (left)
-    Hex(0, 1),    # SW (bottom-left)
-    Hex(1, 1),    # SE (bottom-right)
+    Hex(-1, 1),   # SW (bottom-left)
+    Hex(0, 1),    # SE (bottom-right)
 ]
 
 # Maps direction index to its opposite

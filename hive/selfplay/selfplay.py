@@ -63,8 +63,8 @@ class FastSelfPlay:
         self.temperature = temperature
         self.temp_threshold = temp_threshold
 
-    def play_games(self, num_games: int) -> list[list[tuple]]:
-        """Play num_games using raw policy. Returns list of game samples."""
+    def play_games(self, num_games: int) -> tuple[list[list[tuple]], list]:
+        """Play num_games using raw policy. Returns (samples, games)."""
         import torch
         import sys
 
@@ -209,7 +209,7 @@ class FastSelfPlay:
             all_game_samples.append(samples)
 
         print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}")
-        return all_game_samples
+        return all_game_samples, games
 
 
 class ParallelSelfPlay:
@@ -227,17 +227,19 @@ class ParallelSelfPlay:
         self.temperature = temperature
         self.temp_threshold = temp_threshold
 
-    def play_games(self, num_games: int) -> list[list[tuple]]:
-        """Play num_games via parallel self-play. Returns list of game samples."""
+    def play_games(self, num_games: int) -> tuple[list[list[tuple]], list]:
+        """Play num_games via parallel self-play. Returns (samples, games)."""
         all_samples = []
+        all_games = []
         # Run games in waves of num_parallel
         remaining = num_games
         while remaining > 0:
             wave_size = min(remaining, self.num_parallel)
-            wave_samples = self._play_wave(wave_size)
+            wave_samples, wave_games = self._play_wave(wave_size)
             all_samples.extend(wave_samples)
+            all_games.extend(wave_games)
             remaining -= wave_size
-        return all_samples
+        return all_samples, all_games
 
     def _play_wave(self, wave_size: int) -> list[list[tuple]]:
         """Play a wave of games simultaneously."""
@@ -382,7 +384,7 @@ class ParallelSelfPlay:
             all_game_samples.append(samples)
 
         print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}")
-        return all_game_samples
+        return all_game_samples, games
 
     def _finalize_move(self, gi, games, histories, move_counts, mcts_states):
         """Pick a move from completed MCTS, record training data, advance game."""
@@ -594,7 +596,7 @@ class SelfPlayTrainer:
                     max_moves=max_moves,
                 )
 
-            all_game_samples = sp.play_games(games_per_iter)
+            all_game_samples, finished_games = sp.play_games(games_per_iter)
 
             total_positions = 0
             for gi, samples in enumerate(all_game_samples):
@@ -606,6 +608,16 @@ class SelfPlayTrainer:
             print(f"  {games_per_iter} games: {total_positions} new positions "
                   f"({game_time:.1f}s, {total_positions / max(game_time, 0.1):.0f} pos/s), "
                   f"buffer: {len(replay_buffer)}")
+
+            # Show board of first decisive game (if any)
+            from ..core.render import render_board
+            from ..core.game import GameState
+            for g in finished_games:
+                if g.state in (GameState.WHITE_WINS, GameState.BLACK_WINS):
+                    winner = "White" if g.state == GameState.WHITE_WINS else "Black"
+                    print(f"  {winner} wins ({len(g.move_history)} moves):")
+                    print(render_board(g.board))
+                    break
 
             # Train on replay buffer
             for epoch in range(epochs_per_iter):
