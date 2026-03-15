@@ -232,9 +232,20 @@ impl Game {
         let placement_hexes = get_placements(color, &self.board);
         if !placement_hexes.is_empty() {
             let reserve = self.reserves.pieces_in_reserve(color);
+            // Tournament rule: cannot place queen on first move
+            let is_first_move = (color == PieceColor::White && self.move_count == 0)
+                || (color == PieceColor::Black && self.move_count == 1);
             let mut placeable: Vec<Piece> = reserve
                 .into_iter()
-                .filter(|p| !must_queen || p.piece_type() == PieceType::Queen)
+                .filter(|p| {
+                    if must_queen {
+                        p.piece_type() == PieceType::Queen
+                    } else if is_first_move {
+                        p.piece_type() != PieceType::Queen
+                    } else {
+                        true
+                    }
+                })
                 .collect();
             placeable.sort_by_key(|p| p.raw());
 
@@ -403,6 +414,94 @@ impl Game {
         &self.move_history
     }
 
+    /// Generate UHP GameString: "Base;State;Turn;move1;move2;..."
+    pub fn game_string(&self) -> String {
+        let mut parts = vec![
+            "Base".to_string(),
+            self.state.as_str().to_string(),
+            self.turn_string(),
+        ];
+        // Replay moves to format each in context
+        let mut replay = Game::new();
+        for mv in &self.move_history {
+            if mv.is_pass() {
+                parts.push("pass".to_string());
+                replay.play_pass();
+            } else {
+                let uhp = replay.format_move_uhp(mv);
+                parts.push(uhp);
+                replay.play_move(mv);
+            }
+        }
+        parts.join(";")
+    }
+
+    /// Format a move as UHP MoveString in the context of the current game state.
+    pub fn format_move_uhp(&self, mv: &Move) -> String {
+        use crate::hex::hex_neighbors;
+
+        let piece = mv.piece.unwrap();
+        let piece_str = piece.to_uhp_string();
+        let to_pos = mv.to.unwrap();
+
+        // First overall move: just piece name
+        if self.move_count == 0 && mv.from.is_none() {
+            return piece_str;
+        }
+
+        // Stacking (beetle on top of another piece)
+        if mv.from.is_some() {
+            if let Some(top) = self.board.top_piece(to_pos) {
+                return format!("{} {}", piece_str, top.to_uhp_string());
+            }
+        }
+
+        // Find an adjacent occupied hex to use as reference.
+        // Maps direction index (target relative to reference) to UHP notation:
+        //   UHP suffix '-' = E, suffix '/' = NE, suffix '\' = SE
+        //   UHP prefix '-' = W, prefix '/' = SW, prefix '\' = NW
+        let dir_to_uhp: [(char, bool); 6] = [
+            ('-', false),   // 0: E  -> suffix '-'
+            ('/', false),   // 1: NE -> suffix '/'
+            ('\\', true),   // 2: NW -> prefix '\'
+            ('-', true),    // 3: W  -> prefix '-'
+            ('/', true),    // 4: SW -> prefix '/'
+            ('\\', false),  // 5: SE -> suffix '\'
+        ];
+
+        let neighbors = hex_neighbors(to_pos);
+        for (i, &neighbor) in neighbors.iter().enumerate() {
+            if let Some(top) = self.board.top_piece(neighbor) {
+                if top.to_uhp_string() != piece_str || mv.from == Some(neighbor) {
+                    let opp = (i + 3) % 6;
+                    let (ch, is_prefix) = dir_to_uhp[opp];
+                    let ref_str = top.to_uhp_string();
+                    if is_prefix {
+                        return format!("{} {}{}", piece_str, ch, ref_str);
+                    } else {
+                        return format!("{} {}{}", piece_str, ref_str, ch);
+                    }
+                }
+            }
+        }
+
+        // Fallback: use any neighbor including the piece itself
+        for (i, &neighbor) in neighbors.iter().enumerate() {
+            if let Some(top) = self.board.top_piece(neighbor) {
+                let opp = (i + 3) % 6;
+                let (ch, is_prefix) = dir_to_uhp[opp];
+                let ref_str = top.to_uhp_string();
+                if is_prefix {
+                    return format!("{} {}{}", piece_str, ch, ref_str);
+                } else {
+                    return format!("{} {}{}", piece_str, ref_str, ch);
+                }
+            }
+        }
+
+        piece_str
+    }
+
     /// Turn string like "White[1]".
     pub fn turn_string(&self) -> String {
         let color_name = match self.turn_color {
@@ -429,11 +528,12 @@ mod tests {
     fn test_first_move() {
         let mut game = Game::new();
         let moves = game.valid_moves();
-        // First move: all 5 piece types (11 pieces) at origin
-        assert_eq!(moves.len(), 11);
+        // First move: 10 pieces at origin (queen excluded by tournament rule)
+        assert_eq!(moves.len(), 10);
         for mv in &moves {
             assert!(mv.from.is_none()); // all placements
             assert_eq!(mv.to, Some((0, 0)));
+            assert_ne!(mv.piece.unwrap().piece_type(), PieceType::Queen);
         }
 
         // Play first move
@@ -445,13 +545,13 @@ mod tests {
     #[test]
     fn test_second_move() {
         let mut game = Game::new();
-        // White places queen
-        let wq = Piece::new(PieceColor::White, PieceType::Queen, 1);
-        game.play_move(&Move::placement(wq, (0, 0)));
+        // White places spider (can't place queen on first turn)
+        let ws1 = Piece::new(PieceColor::White, PieceType::Spider, 1);
+        game.play_move(&Move::placement(ws1, (0, 0)));
 
-        // Black should have 11 pieces * 6 positions = 66 moves
+        // Black should have 10 pieces (no queen on first turn) * 6 positions = 60 moves
         let moves = game.valid_moves();
-        assert_eq!(moves.len(), 11 * 6);
+        assert_eq!(moves.len(), 10 * 6);
     }
 
     #[test]

@@ -330,24 +330,16 @@ class UHPEngine:
         if ref_pos is None:
             raise ValueError(f"Reference piece {ref_piece} not found on board")
 
-        # Determine direction
-        # UHP notation: suffix means the target position is in that direction from reference
-        # prefix means the target is in the opposite direction
-        #
-        # suffix '-' = target is to the right (E) of reference -> dir index 0
-        # suffix '/' = target is to the top-right (NE) of reference -> dir index 1
-        # suffix '\\' = target is to the top-left (NW) of reference -> dir index 2
-        # prefix '-' = target is to the left (W) of reference -> dir index 3
-        # prefix '/' = target is to the bottom-left (SW) of reference -> dir index 4
-        # prefix '\\' = target is to the bottom-right (SE) of reference -> dir index 5
-
+        # UHP direction notation (flat-top hexagons):
+        #   suffix '-' = E,  suffix '/' = NE,  suffix '\' = SE
+        #   prefix '-' = W,  prefix '/' = SW,  prefix '\' = NW
         dir_map = {
             ("", "-"): 0,   # E
             ("", "/"): 1,   # NE
-            ("", "\\"): 2,  # NW
+            ("\\", ""): 2,  # NW (prefix \)
             ("-", ""): 3,   # W
             ("/", ""): 4,   # SW
-            ("\\", ""): 5,  # SE
+            ("", "\\"): 5,  # SE (suffix \)
         }
 
         key = (prefix, suffix)
@@ -381,12 +373,12 @@ class UHPEngine:
     def _format_position(self, piece_str: str, pos: Hex) -> str:
         """Format destination as UHP relative position."""
         dir_to_uhp = {
-            0: ("", "-"),    # E
-            1: ("", "/"),    # NE
-            2: ("", "\\"),   # NW
-            3: ("-", ""),    # W
-            4: ("/", ""),    # SW
-            5: ("\\", ""),   # SE
+            0: ("", "-"),    # E  -> suffix '-'
+            1: ("", "/"),    # NE -> suffix '/'
+            2: ("\\", ""),   # NW -> prefix '\'
+            3: ("-", ""),    # W  -> prefix '-'
+            4: ("/", ""),    # SW -> prefix '/'
+            5: ("", "\\"),   # SE -> suffix '\'
         }
 
         # Find an adjacent occupied hex to use as reference

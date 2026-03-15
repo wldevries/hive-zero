@@ -42,15 +42,89 @@ def main():
                               help="Number of full MCTS iterations per cycle (default: 2)")
     train_parser.add_argument("--warmup-positions", type=int, default=10_000,
                               help="Fill buffer to this many positions before training (0=skip)")
+    train_parser.add_argument("--eval-every", type=int, default=0,
+                              help="Run evaluation vs Mzinga every N iterations (0=disabled)")
+    train_parser.add_argument("--eval-games", type=int, default=6,
+                              help="Number of evaluation games per eval round")
+    train_parser.add_argument("--eval-simulations", type=int, default=200,
+                              help="MCTS simulations per move during eval")
+    train_parser.add_argument("--mzinga-path", type=str, default="mzinga/MzingaEngine.exe",
+                              help="Path to MzingaEngine for evaluation")
+    train_parser.add_argument("--mzinga-time", type=int, default=2,
+                              help="Mzinga search time in seconds per move during eval")
+
+    # Evaluation
+    eval_parser = subparsers.add_parser("eval", help="Evaluate model against Mzinga")
+    eval_parser.add_argument("--model", type=str, default="model.pt",
+                             help="Model file path")
+    eval_parser.add_argument("--device", type=str, default="cuda",
+                             help="Device: cuda or cpu")
+    eval_parser.add_argument("--games", type=int, default=10,
+                             help="Number of games to play")
+    eval_parser.add_argument("--simulations", type=int, default=800,
+                             help="MCTS simulations per move for our engine")
+    eval_parser.add_argument("--mzinga-path", type=str, default="mzinga/MzingaEngine.exe",
+                             help="Path to MzingaEngine executable")
+    eval_parser.add_argument("--mzinga-time", type=int, default=5,
+                             help="Mzinga search time in seconds per move")
+    eval_parser.add_argument("--mzinga-depth", type=int, default=None,
+                             help="Mzinga search depth (overrides --mzinga-time)")
+    eval_parser.add_argument("--max-moves", type=int, default=200,
+                             help="Max moves per game")
+    eval_parser.add_argument("--verbose", action="store_true",
+                             help="Print each move")
 
     args = parser.parse_args()
 
-    if args.command == "train":
+    if args.command == "eval":
+        from hive.eval.engine_match import EngineConfig, UHPProcess, ModelEngine, run_match
+        from hive.nn.model import load_checkpoint
+
+        model, _ = load_checkpoint(args.model)
+        model.to(args.device)
+        model.eval()
+
+        our_engine = ModelEngine(
+            model=model, device=args.device,
+            simulations=args.simulations, name="HiveZero",
+        )
+
+        if args.mzinga_depth is not None:
+            bestmove_args = f"depth {args.mzinga_depth}"
+        else:
+            h = args.mzinga_time // 3600
+            m = (args.mzinga_time % 3600) // 60
+            s = args.mzinga_time % 60
+            bestmove_args = f"time {h:02d}:{m:02d}:{s:02d}"
+
+        import os
+        mzinga_path = args.mzinga_path
+        if not os.path.isabs(mzinga_path):
+            mzinga_path = os.path.join(os.path.dirname(__file__) or '.', mzinga_path)
+        mzinga_config = EngineConfig(
+            path=mzinga_path,
+            bestmove_args=bestmove_args,
+        )
+        mzinga = UHPProcess(mzinga_config)
+
+        run_match(our_engine, mzinga, num_games=args.games,
+                  max_moves=args.max_moves, verbose=args.verbose)
+
+    elif args.command == "train":
         from hive.selfplay.selfplay import SelfPlayTrainer
         trainer = SelfPlayTrainer(
             model_path=args.model, device=args.device,
             num_blocks=args.blocks, channels=args.channels
         )
+        eval_config = None
+        if args.eval_every > 0:
+            eval_config = {
+                "every": args.eval_every,
+                "games": args.eval_games,
+                "simulations": args.eval_simulations,
+                "mzinga_path": args.mzinga_path,
+                "mzinga_time": args.mzinga_time,
+            }
         trainer.run(
             num_iterations=args.iterations, games_per_iter=args.games,
             simulations=args.simulations, epochs_per_iter=args.epochs,
@@ -60,6 +134,7 @@ def main():
             fast_iters=args.fast_iters,
             full_iters=args.full_iters,
             warmup_positions=args.warmup_positions,
+            eval_config=eval_config,
         )
     else:
         # Default: UHP engine

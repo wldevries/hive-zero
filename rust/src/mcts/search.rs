@@ -265,10 +265,10 @@ mod tests {
         let mut search = MctsSearch::new(1000);
         search.init(&game, &uniform_policy);
 
-        // Root should be expanded with 11 children (all piece types at origin)
+        // Root should be expanded with 10 children (queen excluded by tournament rule)
         let root = search.arena.get(search.root);
         assert!(root.is_expanded);
-        assert_eq!(root.child_count, 11);
+        assert_eq!(root.child_count, 10);
     }
 
     #[test]

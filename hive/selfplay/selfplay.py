@@ -46,7 +46,8 @@ class SelfPlayTrainer:
             time_limit_minutes: float | None = None,
             mcts_after: int = 0,
             fast_iters: int = 10, full_iters: int = 2,
-            warmup_positions: int = 10_000):
+            warmup_positions: int = 10_000,
+            eval_config: dict | None = None):
         """Run the full training loop.
 
         Args:
@@ -56,6 +57,8 @@ class SelfPlayTrainer:
             full_iters: Number of full MCTS iterations per cycle.
             warmup_positions: Fill buffer to this many positions before
                 training begins. 0 = no warmup.
+            eval_config: If set, run evaluation vs Mzinga periodically.
+                Keys: every, games, simulations, mzinga_path, mzinga_time.
         """
         import time
         start_time = time.time()
@@ -218,6 +221,55 @@ class SelfPlayTrainer:
                 print(f"  Checkpoint saved to {ckpt_path}")
 
             print(f"  Model saved to {self.model_path} (iteration {iteration})")
+
+            # Periodic evaluation vs Mzinga
+            if eval_config and iteration % eval_config["every"] == 0:
+                self._run_eval(eval_config, iteration)
+
+
+    def _run_eval(self, eval_config: dict, iteration: int):
+        """Run evaluation games against Mzinga."""
+        from ..eval.engine_match import EngineConfig, UHPProcess, ModelEngine, run_match
+
+        print(f"\n--- Eval vs Mzinga (iter {iteration}) ---")
+        self.model.eval()
+
+        our_engine = ModelEngine(
+            model=self.model, device=self.device,
+            simulations=eval_config["simulations"],
+            name=f"HiveZero-i{iteration}",
+        )
+
+        t = eval_config["mzinga_time"]
+        h, m, s = t // 3600, (t % 3600) // 60, t % 60
+        mzinga_config = EngineConfig(
+            path=eval_config["mzinga_path"],
+            bestmove_args=f"time {h:02d}:{m:02d}:{s:02d}",
+        )
+        mzinga = UHPProcess(mzinga_config)
+
+        try:
+            summary = run_match(
+                our_engine, mzinga,
+                num_games=eval_config["games"],
+                max_moves=200,
+                verbose=False,
+            )
+            score = summary["engine1_score"]
+            w = summary["engine1_wins"]
+            d = summary["draws"]
+            l = summary["engine2_wins"]
+            print(f"  vs {summary['engine2']}: {w}W/{d}D/{l}L "
+                  f"(score: {score:.0%})")
+
+            # Log to TSV
+            self._log.write(f"{iteration}\teval\t{w}\t{l}\t{d}\t0\t0\t"
+                            f"{score:.6f}\t0\t0\t0\t0\n")
+            self._log.flush()
+        except Exception as e:
+            print(f"  Eval failed: {e}")
+        finally:
+            self.model.train()
 
 
 def main():

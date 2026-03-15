@@ -152,6 +152,15 @@ impl Piece {
         )
     }
 
+    /// UHP-compliant string: omit number for unique pieces (Queen).
+    pub fn to_uhp_string(self) -> String {
+        if PIECE_COUNTS[self.piece_type() as usize] == 1 {
+            format!("{}{}", self.color().as_char(), self.piece_type().as_char())
+        } else {
+            self.to_string()
+        }
+    }
+
     /// Unique index for this piece across all pieces (0..21).
     /// White pieces: 0..10, Black pieces: 11..21.
     #[inline]

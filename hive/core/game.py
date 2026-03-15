@@ -108,10 +108,16 @@ class Game:
         # Placement moves
         placement_hexes = get_placements(color, self.board)
         if placement_hexes:
+            # Tournament rule: cannot place queen on first move
+            is_first_move = (color == PieceColor.WHITE and self.move_count == 0) or \
+                            (color == PieceColor.BLACK and self.move_count == 1)
+
             # Determine which piece types can be placed
             placeable = set()
             for piece in reserve:
                 if must_queen and piece.piece_type != PieceType.QUEEN:
+                    continue
+                if is_first_move and piece.piece_type == PieceType.QUEEN:
                     continue
                 placeable.add(piece)
 

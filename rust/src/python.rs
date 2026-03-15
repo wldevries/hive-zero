@@ -184,6 +184,23 @@ impl PyGame {
     fn heuristic_value(&self) -> (f32, f32) {
         self.game.heuristic_value()
     }
+
+    /// UHP GameString: "Base;State;Turn;move1;move2;..."
+    #[getter]
+    fn game_string(&self) -> String {
+        self.game.game_string()
+    }
+
+    /// Format a move as UHP MoveString in the current game context.
+    #[pyo3(signature = (piece_str, from_pos, to_pos))]
+    fn format_move_uhp(&self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) -> String {
+        let piece = Piece::from_str(piece_str).expect("invalid piece string");
+        let mv = match from_pos {
+            None => game::Move::placement(piece, to_pos),
+            Some(f) => game::Move::movement(piece, f, to_pos),
+        };
+        self.game.format_move_uhp(&mv)
+    }
 }
 
 /// Rust MCTS search exposed to Python.

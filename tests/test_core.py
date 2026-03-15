@@ -205,8 +205,8 @@ class TestGame:
     def test_first_moves(self):
         game = Game()
         valid = game.valid_moves()
-        # First move: can place any white piece at origin
-        assert len(valid) == 11  # All 11 individual pieces at origin
+        # First move: can place any piece except queen at origin (tournament rule)
+        assert len(valid) == 10
 
     def test_game_string(self):
         game = Game()
