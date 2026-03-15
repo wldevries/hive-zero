@@ -532,12 +532,15 @@ class SelfPlayTrainer:
             simulations: int = 100, epochs_per_iter: int = 5,
             batch_size: int = 64, max_moves: int = 200,
             time_limit_minutes: float | None = None,
-            num_parallel: int = 8, mcts_after: int = 20):
+            num_parallel: int = 8, mcts_after: int = 0,
+            fast_iters: int = 10, full_iters: int = 2):
         """Run the full training loop.
 
         Args:
-            mcts_after: Use MCTS self-play after this many iterations.
-                Before that, use fast raw-policy self-play.
+            mcts_after: If >0, skip cycling and use full MCTS after this
+                iteration (backward compat). 0 = disabled (use cycling).
+            fast_iters: Number of fast iterations per cycle.
+            full_iters: Number of full MCTS iterations per cycle.
         """
         import time
         start_time = time.time()
@@ -557,12 +560,24 @@ class SelfPlayTrainer:
                     break
 
             elapsed_str = f" [{(time.time() - start_time) / 60:.1f}m]" if time_limit_minutes else ""
-            use_mcts = iteration > mcts_after
-            if use_mcts and iteration == mcts_after + 1 and len(replay_buffer) > 0:
-                replay_buffer = HiveDataset(max_size=50_000)
-                print("  Cleared replay buffer for MCTS transition")
-            mode = "MCTS" if use_mcts else "fast"
-            print(f"\n=== Iteration {iteration} ({mode}){elapsed_str} ===")
+
+            # Determine whether to use fast or full MCTS
+            if mcts_after > 0:
+                # Legacy mode: one-time switch
+                use_mcts = iteration > mcts_after
+                mode_label = "MCTS" if use_mcts else "fast"
+            else:
+                # Cycling mode
+                cycle_len = fast_iters + full_iters
+                cycle_pos = (iteration - 1) % cycle_len  # 0-based position in cycle
+                use_mcts = cycle_pos >= fast_iters
+                if use_mcts:
+                    full_pos = cycle_pos - fast_iters + 1
+                    mode_label = f"full {full_pos}/{full_iters}"
+                else:
+                    mode_label = f"fast {cycle_pos + 1}/{fast_iters}"
+
+            print(f"\n=== Iteration {iteration} [{mode_label}]{elapsed_str} ===")
 
             # Generate self-play games
             iter_start = time.time()
@@ -638,7 +653,7 @@ def main():
     trainer.run(
         num_iterations=args.iterations, games_per_iter=args.games,
         simulations=args.simulations, epochs_per_iter=args.epochs,
-        batch_size=args.batch_size, num_parallel=args.parallel
+        batch_size=args.batch_size, num_parallel=args.parallel,
     )
 
 

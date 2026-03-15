@@ -36,8 +36,12 @@ def main():
                               help="Training time limit in minutes (stops after current iteration)")
     train_parser.add_argument("--parallel", type=int, default=8,
                               help="Number of self-play games to run in parallel")
-    train_parser.add_argument("--mcts-after", type=int, default=20,
-                              help="Use MCTS after this many iterations (fast policy before)")
+    train_parser.add_argument("--mcts-after", type=int, default=0,
+                              help="Skip fast/full cycling and use full MCTS after this iteration (0=disabled)")
+    train_parser.add_argument("--fast-iters", type=int, default=10,
+                              help="Number of fast iterations per cycle (default: 10)")
+    train_parser.add_argument("--full-iters", type=int, default=2,
+                              help="Number of full MCTS iterations per cycle (default: 2)")
 
     args = parser.parse_args()
 
@@ -53,7 +57,9 @@ def main():
             batch_size=args.batch_size, max_moves=args.max_moves,
             time_limit_minutes=args.time_limit,
             num_parallel=args.parallel,
-            mcts_after=args.mcts_after
+            mcts_after=args.mcts_after,
+            fast_iters=args.fast_iters,
+            full_iters=args.full_iters
         )
     else:
         # Default: UHP engine
