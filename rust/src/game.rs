@@ -363,6 +363,42 @@ impl Game {
         }
     }
 
+    /// Heuristic evaluation for unfinished games.
+    /// Returns (white_score, black_score) in range [-1, 1].
+    /// Based on queen neighbor pressure and piece mobility.
+    pub fn heuristic_value(&self) -> (f32, f32) {
+        let wq = Piece::new(PieceColor::White, PieceType::Queen, 1);
+        let bq = Piece::new(PieceColor::Black, PieceType::Queen, 1);
+
+        // Queen neighbor counts (0-6, 6 = surrounded = loss)
+        let w_queen_neighbors = self.board.piece_position(wq).map_or(0, |pos| {
+            hex_neighbors(pos).iter().filter(|&&n| self.board.is_occupied(n)).count()
+        }) as f32;
+        let b_queen_neighbors = self.board.piece_position(bq).map_or(0, |pos| {
+            hex_neighbors(pos).iter().filter(|&&n| self.board.is_occupied(n)).count()
+        }) as f32;
+
+        // Check for beetle on queen (extra dangerous)
+        let w_beetle_on_queen = self.board.piece_position(wq).map_or(false, |pos| {
+            let stack = self.board.stack_at(pos);
+            stack.height() > 1 && stack.top().map_or(false, |p| p.color() == PieceColor::Black)
+        });
+        let b_beetle_on_queen = self.board.piece_position(bq).map_or(false, |pos| {
+            let stack = self.board.stack_at(pos);
+            stack.height() > 1 && stack.top().map_or(false, |p| p.color() == PieceColor::White)
+        });
+
+        // Queen danger: neighbors/6, with beetle bonus
+        let w_danger = w_queen_neighbors / 6.0 + if w_beetle_on_queen { 0.15 } else { 0.0 };
+        let b_danger = b_queen_neighbors / 6.0 + if b_beetle_on_queen { 0.15 } else { 0.0 };
+
+        // Score: opponent danger minus own danger, clamped to [-1, 1]
+        let w_score = (b_danger - w_danger).clamp(-1.0, 1.0);
+        let b_score = (w_danger - b_danger).clamp(-1.0, 1.0);
+
+        (w_score, b_score)
+    }
+
     pub fn move_history(&self) -> &[Move] {
         &self.move_history
     }

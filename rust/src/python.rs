@@ -178,6 +178,12 @@ impl PyGame {
         let slot = self.game.board.stack_at((q, r));
         slot.iter().map(|p| p.to_string()).collect()
     }
+
+    /// Heuristic value for unfinished games.
+    /// Returns (white_score, black_score) based on queen pressure.
+    fn heuristic_value(&self) -> (f32, f32) {
+        self.game.heuristic_value()
+    }
 }
 
 /// Rust MCTS search exposed to Python.

@@ -37,6 +37,9 @@ class HiveDataset(Dataset):
 
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
                    policy_target: np.ndarray, value_target: float):
+        if self.augment:
+            sym_idx = np.random.randint(0, 12)
+            board_tensor, policy_target = apply_symmetry(board_tensor, policy_target, sym_idx)
         self.board_tensors.append(board_tensor)
         self.reserve_vectors.append(reserve_vector)
         self.policy_targets.append(policy_target)
@@ -52,17 +55,10 @@ class HiveDataset(Dataset):
         return len(self.board_tensors)
 
     def __getitem__(self, idx):
-        board = self.board_tensors[idx]
-        policy = self.policy_targets[idx]
-
-        if self.augment:
-            sym_idx = np.random.randint(0, 12)
-            board, policy = apply_symmetry(board, policy, sym_idx)
-
         return (
-            torch.tensor(board),
+            torch.tensor(self.board_tensors[idx]),
             torch.tensor(self.reserve_vectors[idx]),
-            torch.tensor(policy),
+            torch.tensor(self.policy_targets[idx]),
             torch.tensor(self.value_targets[idx], dtype=torch.float32),
         )
 

@@ -21,7 +21,7 @@ def main():
                               help="MCTS simulations per move")
     train_parser.add_argument("--epochs", type=int, default=1,
                               help="Training epochs per iteration")
-    train_parser.add_argument("--batch-size", type=int, default=64)
+    train_parser.add_argument("--batch-size", type=int, default=512)
     train_parser.add_argument("--model", type=str, default="model.pt",
                               help="Model file path")
     train_parser.add_argument("--device", type=str, default="cuda",

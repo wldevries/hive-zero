@@ -19,9 +19,6 @@ from ..encoding.move_encoder import POLICY_SIZE
 
 def _rust_heuristic_value(game: RustGame) -> dict[str, float]:
     """Heuristic value for unfinished games using RustGame."""
-    # Count queen neighbors via the board
-    # RustGame doesn't expose queen neighbor counting directly,
-    # so we use the valid_moves approach: check game state
     state = game.state
     if state == "WhiteWins":
         return {"w": 1.0, "b": -1.0}
@@ -30,9 +27,9 @@ def _rust_heuristic_value(game: RustGame) -> dict[str, float]:
     elif state == "Draw":
         return {"w": 0.0, "b": 0.0}
 
-    # For unfinished games, return neutral (the NN value will be used instead)
-    # A proper heuristic would need queen position info exposed from Rust
-    return {"w": 0.0, "b": 0.0}
+    # Heuristic based on queen neighbor pressure + beetle-on-queen
+    w_score, b_score = game.heuristic_value()
+    return {"w": w_score, "b": b_score}
 
 
 class RustFastSelfPlay:
