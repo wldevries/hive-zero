@@ -15,7 +15,7 @@ def main():
     train_parser = subparsers.add_parser("train", help="Run self-play training")
     train_parser.add_argument("--iterations", type=int, default=100,
                               help="Number of training iterations")
-    train_parser.add_argument("--games", type=int, default=10,
+    train_parser.add_argument("--games", type=int, default=20,
                               help="Self-play games per iteration")
     train_parser.add_argument("--simulations", type=int, default=100,
                               help="MCTS simulations per move")
@@ -34,6 +34,10 @@ def main():
                               help="Max moves per self-play game")
     train_parser.add_argument("--time-limit", type=float, default=None,
                               help="Training time limit in minutes (stops after current iteration)")
+    train_parser.add_argument("--parallel", type=int, default=8,
+                              help="Number of self-play games to run in parallel")
+    train_parser.add_argument("--mcts-after", type=int, default=20,
+                              help="Use MCTS after this many iterations (fast policy before)")
 
     args = parser.parse_args()
 
@@ -47,7 +51,9 @@ def main():
             num_iterations=args.iterations, games_per_iter=args.games,
             simulations=args.simulations, epochs_per_iter=args.epochs,
             batch_size=args.batch_size, max_moves=args.max_moves,
-            time_limit_minutes=args.time_limit
+            time_limit_minutes=args.time_limit,
+            num_parallel=args.parallel,
+            mcts_after=args.mcts_after
         )
     else:
         # Default: UHP engine
