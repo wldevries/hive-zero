@@ -39,7 +39,7 @@ rust/
 - **Rust-only engine**: All game logic, MCTS, and encoding in Rust. Python handles NN inference and training only. When editing move encoding or board encoding, update both Python and Rust versions.
 
 ## Training Pipeline
-- **SGD + momentum 0.9** with stepped LR schedule: 0.05 → 0.005 (iter 30) → 0.0005 (iter 60) → 0.00005 (iter 90)
+- **SGD + momentum 0.9** with cosine annealing + warm restarts (T_0=30, lr_max=0.05, lr_min=1e-5)
 - **1 epoch** per iteration (avoids overfitting on stale replay buffer data)
 - **Warmup phase**: fills replay buffer (default 10k positions) before first training
 - **Buffer clears** on fast→MCTS transition to avoid diluting MCTS policy targets

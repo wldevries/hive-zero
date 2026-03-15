@@ -388,7 +388,7 @@ impl Game {
             stack.height() > 1 && stack.top().map_or(false, |p| p.color() == PieceColor::White)
         });
 
-        // Queen danger: neighbors/6, with beetle bonus
+        // Queen danger: neighbors/6, with beetle-on-queen bonus
         let w_danger = w_queen_neighbors / 6.0 + if w_beetle_on_queen { 0.15 } else { 0.0 };
         let b_danger = b_queen_neighbors / 6.0 + if b_beetle_on_queen { 0.15 } else { 0.0 };
 

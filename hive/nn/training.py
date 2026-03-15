@@ -35,9 +35,11 @@ class HiveDataset(Dataset):
         self.reserve_vectors = np.zeros((max_size, RESERVE_SIZE), dtype=np.float32)
         self.policy_targets = np.zeros((max_size, POLICY_SIZE), dtype=np.float32)
         self.value_targets = np.zeros(max_size, dtype=np.float32)
+        self.weights = np.ones(max_size, dtype=np.float32)
 
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
-                   policy_target: np.ndarray, value_target: float):
+                   policy_target: np.ndarray, value_target: float,
+                   weight: float = 1.0):
         if self.augment:
             sym_idx = np.random.randint(0, 12)
             if sym_idx != 0:
@@ -47,6 +49,7 @@ class HiveDataset(Dataset):
         self.reserve_vectors[idx] = reserve_vector
         self.policy_targets[idx] = policy_target
         self.value_targets[idx] = value_target
+        self.weights[idx] = weight
         self._count += 1
         self._size = min(self._size + 1, self.max_size)
 
@@ -63,49 +66,69 @@ class HiveDataset(Dataset):
             torch.from_numpy(self.reserve_vectors[idx].copy()),
             torch.from_numpy(self.policy_targets[idx].copy()),
             torch.tensor(self.value_targets[idx], dtype=torch.float32),
+            torch.tensor(self.weights[idx], dtype=torch.float32),
         )
 
 
 class Trainer:
     """Trains the HiveNet model on self-play data.
 
-    Uses SGD with momentum and a stepped LR schedule following AlphaZero:
-      - Start at lr=0.05
-      - Drop by 10x at iteration milestones (default: 30, 60, 90)
+    Uses SGD with momentum and cosine annealing with warm restarts:
+      - LR decays from lr_max to lr_min following a cosine curve
+      - Every T_0 iterations, LR jumps back to lr_max (warm restart)
+      - Restarts help escape sharp local minima for better generalization
     """
-
-    # Default LR schedule: (iteration_threshold, lr)
-    # Applied in order — last matching threshold wins.
-    DEFAULT_LR_SCHEDULE = [
-        (0, 0.05),
-        (30, 0.005),
-        (60, 0.0005),
-        (90, 0.00005),
-    ]
 
     def __init__(self, model: Optional[HiveNet] = None,
                  weight_decay: float = 1e-4, device: str = "cpu",
-                 lr_schedule: list[tuple[int, float]] | None = None):
+                 lr_max: float = 0.05, lr_min: float = 1e-5,
+                 t_0: int = 30, t_mult: int = 1):
         self.device = torch.device(device)
         self.model = model or create_model()
         self.model.to(self.device)
-        self.lr_schedule = lr_schedule or self.DEFAULT_LR_SCHEDULE
+        self.lr_max = lr_max
+        self.lr_min = lr_min
+        self.t_0 = t_0
+        self.t_mult = t_mult
         self.optimizer = optim.SGD(
-            self.model.parameters(), lr=self.lr_schedule[0][1],
+            self.model.parameters(), lr=lr_max,
             momentum=0.9, weight_decay=weight_decay,
         )
-        self._current_lr = self.lr_schedule[0][1]
+        self._current_lr = lr_max
+        self._last_restart = 0
+        self._current_t = t_0
+
+    def fast_forward_lr(self, iteration: int):
+        """Fast-forward cosine schedule state to given iteration (for resume)."""
+        # Replay restart boundaries to find current cycle state
+        last_restart = 0
+        current_t = self.t_0
+        while last_restart + current_t <= iteration:
+            last_restart += current_t
+            current_t = current_t * self.t_mult
+        self._last_restart = last_restart
+        self._current_t = current_t
+        self.update_lr(iteration)
 
     def update_lr(self, iteration: int):
-        """Update learning rate based on iteration and schedule."""
-        target_lr = self.lr_schedule[0][1]
-        for threshold, lr in self.lr_schedule:
-            if iteration >= threshold:
-                target_lr = lr
-        if target_lr != self._current_lr:
+        """Update learning rate using cosine annealing with warm restarts."""
+        import math
+        # How far into the current restart cycle
+        elapsed = iteration - self._last_restart
+        if elapsed >= self._current_t:
+            # Warm restart
+            self._last_restart = iteration
+            self._current_t = self._current_t * self.t_mult
+            elapsed = 0
+        # Cosine decay within current cycle
+        target_lr = self.lr_min + 0.5 * (self.lr_max - self.lr_min) * (
+            1 + math.cos(math.pi * elapsed / self._current_t)
+        )
+        if abs(target_lr - self._current_lr) > 1e-8:
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = target_lr
-            print(f"  LR updated: {self._current_lr} -> {target_lr}")
+            if elapsed == 0 and iteration > 0:
+                print(f"  LR warm restart: {self._current_lr:.6f} -> {target_lr:.6f}")
             self._current_lr = target_lr
 
     def train_epoch(self, dataset: HiveDataset, batch_size: int = 64) -> dict:
@@ -118,20 +141,23 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
-        for board, reserve, policy_target, value_target in loader:
+        for board, reserve, policy_target, value_target, weight in loader:
             board = board.to(self.device)
             reserve = reserve.to(self.device)
             policy_target = policy_target.to(self.device)
             value_target = value_target.to(self.device).unsqueeze(1)
+            weight = weight.to(self.device)
 
             policy_logits, value = self.model(board, reserve)
 
-            # Policy loss: cross-entropy with target distribution
+            # Policy loss: weighted cross-entropy with target distribution
             log_probs = torch.log_softmax(policy_logits, dim=1)
-            policy_loss = -(policy_target * log_probs).sum(dim=1).mean()
+            per_sample_policy = -(policy_target * log_probs).sum(dim=1)
+            policy_loss = (per_sample_policy * weight).mean()
 
-            # Value loss: MSE
-            value_loss = nn.functional.mse_loss(value, value_target)
+            # Value loss: weighted MSE
+            per_sample_value = (value.squeeze(1) - value_target.squeeze(1)) ** 2
+            value_loss = (per_sample_value * weight).mean()
 
             # Combined loss
             loss = policy_loss + value_loss

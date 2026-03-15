@@ -17,7 +17,8 @@ except ImportError:
 from ..encoding.move_encoder import POLICY_SIZE
 
 
-DRAW_PENALTY = -0.2  # both sides penalized for not finishing
+DRAW_PENALTY = -0.5  # both sides penalized for not finishing
+DECISIVE_WEIGHT = 10.0  # upweight positions from games with a winner
 
 
 def _rust_heuristic_value(game: RustGame) -> dict[str, float]:
@@ -182,17 +183,21 @@ class RustFastSelfPlay:
             state = game.state
             if state == "WhiteWins":
                 outcome = {"w": 1.0, "b": -1.0}
+                decisive = True
                 wins_w += 1
             elif state == "BlackWins":
                 outcome = {"w": -1.0, "b": 1.0}
+                decisive = True
                 wins_b += 1
             else:
                 outcome = _rust_heuristic_value(game)
+                decisive = False
                 draws += 1
 
+            weight = DECISIVE_WEIGHT if decisive else 1.0
             samples = []
             for bt, rv, pv, color in histories[gi]:
-                samples.append((bt, rv, pv, outcome[color]))
+                samples.append((bt, rv, pv, outcome[color], weight))
             all_game_samples.append(samples)
 
         print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}")
@@ -406,17 +411,21 @@ class RustParallelSelfPlay:
             state = game.state
             if state == "WhiteWins":
                 outcome = {"w": 1.0, "b": -1.0}
+                decisive = True
                 wins_w += 1
             elif state == "BlackWins":
                 outcome = {"w": -1.0, "b": 1.0}
+                decisive = True
                 wins_b += 1
             else:
                 outcome = _rust_heuristic_value(game)
+                decisive = False
                 draws += 1
 
+            weight = DECISIVE_WEIGHT if decisive else 1.0
             samples = []
             for bt, rv, pv, color in histories[gi]:
-                samples.append((bt, rv, pv, outcome[color]))
+                samples.append((bt, rv, pv, outcome[color], weight))
             all_game_samples.append(samples)
 
         print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}")

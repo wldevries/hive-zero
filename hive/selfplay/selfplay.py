@@ -35,6 +35,10 @@ class SelfPlayTrainer:
 
         self.model.to(device)
         self.trainer = Trainer(self.model, device=device)
+        if self.start_iteration > 0:
+            # Start a fresh cosine cycle from the resume point
+            self.trainer._last_restart = self.start_iteration
+            self.trainer.update_lr(self.start_iteration)
 
     def run(self, num_iterations: int = 100, games_per_iter: int = 10,
             simulations: int = 100, epochs_per_iter: int = 1,
@@ -58,6 +62,16 @@ class SelfPlayTrainer:
 
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
+        # Training log (TSV, truncated on fresh start)
+        log_path = "training_log.tsv"
+        if self.start_iteration == 0:
+            self._log = open(log_path, "w")
+            self._log.write("iter\tmode\twins_w\twins_b\tdraws\tpositions\tbuffer\t"
+                            "loss\tpolicy_loss\tvalue_loss\tlr\tplay_s\n")
+        else:
+            self._log = open(log_path, "a")
+        self._log.flush()
+
         # Replay buffer: keep last ~50k positions across iterations
         replay_buffer = HiveDataset(max_size=50_000)
 
@@ -72,8 +86,8 @@ class SelfPlayTrainer:
                 )
                 all_game_samples, _ = sp.play_games(games_per_iter)
                 for samples in all_game_samples:
-                    for bt, rv, pv, vt in samples:
-                        replay_buffer.add_sample(bt, rv, pv, vt)
+                    for bt, rv, pv, vt, wt in samples:
+                        replay_buffer.add_sample(bt, rv, pv, vt, wt)
                 print(f"  Buffer: {len(replay_buffer)}/{warmup_positions}")
             print(f"=== Warmup complete: {len(replay_buffer)} positions ===\n")
 
@@ -116,7 +130,9 @@ class SelfPlayTrainer:
             # so fast-mode uniform policy targets don't dilute MCTS data
             if use_mcts and not prev_was_mcts:
                 replay_buffer.clear()
-                print(f"\n  Buffer cleared for MCTS phase")
+                self.trainer._last_restart = iteration
+                self.trainer.update_lr(iteration)
+                print(f"\n  Buffer cleared + LR reset for MCTS phase")
             prev_was_mcts = use_mcts
 
             print(f"\n=== Iteration {iteration} [{mode_label}] [Rust]{elapsed_str} ===")
@@ -141,8 +157,8 @@ class SelfPlayTrainer:
             total_positions = 0
             buf_start = time.time()
             for gi, samples in enumerate(all_game_samples):
-                for bt, rv, pv, vt in samples:
-                    replay_buffer.add_sample(bt, rv, pv, vt)
+                for bt, rv, pv, vt, wt in samples:
+                    replay_buffer.add_sample(bt, rv, pv, vt, wt)
                 total_positions += len(samples)
             buf_time = time.time() - buf_start
 
@@ -152,17 +168,22 @@ class SelfPlayTrainer:
                   f"{total_positions / max(game_time, 0.1):.0f} pos/s), "
                   f"buffer: {len(replay_buffer)}")
 
-            # Show board of first decisive game (if any)
+            # Count results and show board of first decisive game
+            wins_w, wins_b, draws = 0, 0, 0
             from ..core.render import render_board
             for g in finished_games:
-                # RustGame.state returns strings, Python GameState uses enums
                 state = g.state if isinstance(g.state, str) else g.state.value
-                if state in ("WhiteWins", "BlackWins"):
+                if state == "WhiteWins":
+                    wins_w += 1
+                elif state == "BlackWins":
+                    wins_b += 1
+                else:
+                    draws += 1
+                if state in ("WhiteWins", "BlackWins") and wins_w + wins_b == 1:
                     winner = "White" if state == "WhiteWins" else "Black"
                     move_count = g.move_count if hasattr(g, 'move_count') else len(g.move_history)
                     print(f"  {winner} wins ({move_count} moves):")
                     print(render_board(g))
-                    break
 
             # Update learning rate based on schedule
             self.trainer.update_lr(iteration)
@@ -173,6 +194,14 @@ class SelfPlayTrainer:
                 lr = self.trainer._current_lr
                 print(f"  Epoch {epoch + 1}: loss={losses['total_loss']:.4f} "
                       f"(policy={losses['policy_loss']:.4f}, value={losses['value_loss']:.4f}, lr={lr})")
+
+            # Log to TSV
+            self._log.write(f"{iteration}\t{mode_label}\t"
+                            f"{wins_w}\t{wins_b}\t{draws}\t{total_positions}\t"
+                            f"{len(replay_buffer)}\t{losses['total_loss']:.6f}\t"
+                            f"{losses['policy_loss']:.6f}\t{losses['value_loss']:.6f}\t"
+                            f"{lr:.8f}\t{play_time:.1f}\n")
+            self._log.flush()
 
             # Save latest model + periodic checkpoint
             metadata = {
