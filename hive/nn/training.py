@@ -17,48 +17,51 @@ from ..encoding.symmetry import apply_symmetry
 class HiveDataset(Dataset):
     """Dataset of (board_tensor, reserve_vector, policy_target, value_target) tuples.
 
-    Acts as a replay buffer with a max capacity. When full, oldest samples
-    are discarded.
+    Acts as a replay buffer with a max capacity using pre-allocated numpy arrays
+    and a ring buffer to avoid GC pressure from thousands of individual arrays.
     """
 
-    def __init__(self, max_size: int = 0, augment: bool = True):
+    def __init__(self, max_size: int = 50_000, augment: bool = True):
         """Args:
-            max_size: Maximum number of samples to keep. 0 = unlimited.
+            max_size: Maximum number of samples to keep.
             augment: Apply random symmetry augmentation (12 hex symmetries).
         """
-        from collections import deque
         self.max_size = max_size
         self.augment = augment
-        maxlen = max_size if max_size > 0 else None
-        self.board_tensors: deque[np.ndarray] = deque(maxlen=maxlen)
-        self.reserve_vectors: deque[np.ndarray] = deque(maxlen=maxlen)
-        self.policy_targets: deque[np.ndarray] = deque(maxlen=maxlen)
-        self.value_targets: deque[float] = deque(maxlen=maxlen)
+        self._count = 0  # total samples added (for ring buffer index)
+        self._size = 0   # current number of valid samples
+        # Pre-allocate contiguous arrays
+        self.board_tensors = np.zeros((max_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
+        self.reserve_vectors = np.zeros((max_size, RESERVE_SIZE), dtype=np.float32)
+        self.policy_targets = np.zeros((max_size, POLICY_SIZE), dtype=np.float32)
+        self.value_targets = np.zeros(max_size, dtype=np.float32)
 
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
                    policy_target: np.ndarray, value_target: float):
         if self.augment:
             sym_idx = np.random.randint(0, 12)
-            board_tensor, policy_target = apply_symmetry(board_tensor, policy_target, sym_idx)
-        self.board_tensors.append(board_tensor)
-        self.reserve_vectors.append(reserve_vector)
-        self.policy_targets.append(policy_target)
-        self.value_targets.append(value_target)
+            if sym_idx != 0:
+                board_tensor, policy_target = apply_symmetry(board_tensor, policy_target, sym_idx)
+        idx = self._count % self.max_size
+        self.board_tensors[idx] = board_tensor
+        self.reserve_vectors[idx] = reserve_vector
+        self.policy_targets[idx] = policy_target
+        self.value_targets[idx] = value_target
+        self._count += 1
+        self._size = min(self._size + 1, self.max_size)
 
     def clear(self):
-        self.board_tensors.clear()
-        self.reserve_vectors.clear()
-        self.policy_targets.clear()
-        self.value_targets.clear()
+        self._count = 0
+        self._size = 0
 
     def __len__(self):
-        return len(self.board_tensors)
+        return self._size
 
     def __getitem__(self, idx):
         return (
-            torch.tensor(self.board_tensors[idx]),
-            torch.tensor(self.reserve_vectors[idx]),
-            torch.tensor(self.policy_targets[idx]),
+            torch.from_numpy(self.board_tensors[idx].copy()),
+            torch.from_numpy(self.reserve_vectors[idx].copy()),
+            torch.from_numpy(self.policy_targets[idx].copy()),
             torch.tensor(self.value_targets[idx], dtype=torch.float32),
         )
 

@@ -136,16 +136,20 @@ class SelfPlayTrainer:
                 )
 
             all_game_samples, finished_games = sp.play_games(games_per_iter)
+            play_time = time.time() - iter_start
 
             total_positions = 0
+            buf_start = time.time()
             for gi, samples in enumerate(all_game_samples):
                 for bt, rv, pv, vt in samples:
                     replay_buffer.add_sample(bt, rv, pv, vt)
                 total_positions += len(samples)
+            buf_time = time.time() - buf_start
 
             game_time = time.time() - iter_start
             print(f"  {games_per_iter} games: {total_positions} new positions "
-                  f"({game_time:.1f}s, {total_positions / max(game_time, 0.1):.0f} pos/s), "
+                  f"(play={play_time:.1f}s, buf={buf_time:.1f}s, "
+                  f"{total_positions / max(game_time, 0.1):.0f} pos/s), "
                   f"buffer: {len(replay_buffer)}")
 
             # Show board of first decisive game (if any)
