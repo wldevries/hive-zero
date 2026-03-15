@@ -224,11 +224,11 @@ class SelfPlayTrainer:
 
             # Periodic evaluation vs Mzinga
             if eval_config and iteration % eval_config["every"] == 0:
-                self._run_eval(eval_config, iteration)
+                self._run_eval(eval_config, iteration, replay_buffer)
 
 
-    def _run_eval(self, eval_config: dict, iteration: int):
-        """Run evaluation games against Mzinga."""
+    def _run_eval(self, eval_config: dict, iteration: int, replay_buffer=None):
+        """Run evaluation games against Mzinga and feed samples back."""
         from ..eval.engine_match import EngineConfig, UHPProcess, ModelEngine, run_match
 
         print(f"\n--- Eval vs Mzinga (iter {iteration}) ---")
@@ -259,11 +259,21 @@ class SelfPlayTrainer:
             w = summary["engine1_wins"]
             d = summary["draws"]
             l = summary["engine2_wins"]
-            print(f"  vs {summary['engine2']}: {w}W/{d}D/{l}L "
-                  f"(score: {score:.0%})")
+
+            # Feed samples back into replay buffer
+            samples = summary.get("training_samples", [])
+            if replay_buffer is not None and samples:
+                for bt, rv, pv, vt, wt in samples:
+                    replay_buffer.add_sample(bt, rv, pv, vt, wt)
+                print(f"  vs {summary['engine2']}: {w}W/{d}D/{l}L "
+                      f"(score: {score:.0%}, {len(samples)} samples -> buffer)")
+            else:
+                print(f"  vs {summary['engine2']}: {w}W/{d}D/{l}L "
+                      f"(score: {score:.0%})")
 
             # Log to TSV
-            self._log.write(f"{iteration}\teval\t{w}\t{l}\t{d}\t0\t0\t"
+            self._log.write(f"{iteration}\teval\t{w}\t{l}\t{d}\t{len(samples)}\t"
+                            f"{len(replay_buffer) if replay_buffer else 0}\t"
                             f"{score:.6f}\t0\t0\t0\t0\n")
             self._log.flush()
         except Exception as e:

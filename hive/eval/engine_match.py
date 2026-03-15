@@ -124,6 +124,7 @@ class ModelEngine:
     """In-process engine using our model + Rust MCTS.
 
     Avoids subprocess overhead and reuses the already-loaded model.
+    Records board states and MCTS policies for training feedback.
     """
 
     def __init__(self, model, device: str = "cpu", simulations: int = 800,
@@ -133,12 +134,33 @@ class ModelEngine:
         self.simulations = simulations
         self.name = name
         self._game = None
+        # Training sample collection: (board_tensor, reserve_vec, policy_vec, turn_color)
+        self._history: list[tuple] = []
 
     def start(self):
         pass
 
     def stop(self):
         self._game = None
+
+    def new_game_history(self):
+        """Clear history for a new game."""
+        self._history = []
+
+    def get_samples(self, outcome: dict[str, float], weight: float = 1.0) -> list[tuple]:
+        """Build training samples from recorded history with game outcome.
+
+        Args:
+            outcome: {"w": float, "b": float} value targets.
+            weight: sample weight for the replay buffer.
+
+        Returns:
+            List of (board_tensor, reserve_vec, policy_vec, value, weight).
+        """
+        samples = []
+        for bt, rv, pv, color in self._history:
+            samples.append((bt, rv, pv, outcome[color], weight))
+        return samples
 
     def send(self, command: str) -> list[str]:
         parts = command.strip().split(None, 1)
@@ -282,6 +304,12 @@ class ModelEngine:
         if not valid:
             return ["pass"]
 
+        # Record board state before searching
+        bt, rv = game.encode_board()
+        bt = np.asarray(bt)
+        rv = np.asarray(rv)
+        turn_color = game.turn_color
+
         mcts = RustMCTS()
         model = self.model
         device = self.device
@@ -289,19 +317,38 @@ class ModelEngine:
         def eval_fn(board_batch, reserve_batch):
             board_4d = np.asarray(board_batch)
             reserves = np.asarray(reserve_batch)
-            bt = torch.tensor(board_4d).to(device)
-            rv = torch.tensor(reserves).to(device)
+            b = torch.tensor(board_4d).to(device)
+            r = torch.tensor(reserves).to(device)
             with torch.no_grad():
-                policy_logits, values = model(bt, rv)
+                policy_logits, values = model(b, r)
             policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
             vals = values.cpu().numpy().flatten()
             return policy.astype(np.float32), vals.astype(np.float32)
 
-        result = mcts.search(game, eval_fn, self.simulations)
-        if result is None:
+        # Use get_policy to get the full visit distribution for training
+        moves_probs = mcts.get_policy(game, eval_fn, self.simulations, temperature=0.0)
+        moves, probs = moves_probs
+
+        if not moves:
             return ["pass"]
 
-        piece_str, from_pos, to_pos = result
+        # Build policy vector from MCTS visit distribution
+        policy_vector = np.zeros(POLICY_SIZE, dtype=np.float32)
+        for (piece_str, from_pos, to_pos), prob in zip(moves, probs):
+            if piece_str != "pass":
+                idx = game.encode_move(piece_str, from_pos, to_pos)
+                if 0 <= idx < POLICY_SIZE:
+                    policy_vector[idx] = prob
+
+        # Record for training
+        self._history.append((bt, rv, policy_vector, turn_color))
+
+        # Pick best move (temperature=0 already applied)
+        best_idx = int(np.argmax(probs))
+        piece_str, from_pos, to_pos = moves[best_idx]
+        if piece_str == "pass":
+            return ["pass"]
+
         uhp_str = game.format_move_uhp(piece_str, from_pos, to_pos)
         return [uhp_str]
 
@@ -313,6 +360,12 @@ def play_game(
     verbose: bool = False,
 ) -> GameResult:
     """Play a single game between two engines."""
+    # Clear training history for ModelEngine(s)
+    if isinstance(white, ModelEngine):
+        white.new_game_history()
+    if isinstance(black, ModelEngine):
+        black.new_game_history()
+
     white.send("newgame Base")
     black.send("newgame Base")
 
@@ -402,6 +455,7 @@ def run_match(
         print()
 
     results = []
+    all_samples = []
     e1_wins = 0
     e2_wins = 0
     draws = 0
@@ -442,6 +496,17 @@ def run_match(
                 print(f"  Result: {winner} in {result.moves} moves "
                       f"({elapsed:.1f}s)\n")
 
+            # Collect training samples from ModelEngine(s)
+            if result.result in ("white", "black"):
+                outcome = {"w": 1.0, "b": -1.0} if result.result == "white" \
+                    else {"w": -1.0, "b": 1.0}
+            else:
+                outcome = {"w": 0.0, "b": 0.0}
+
+            for eng in (engine1, engine2):
+                if isinstance(eng, ModelEngine) and eng._history:
+                    all_samples.extend(eng.get_samples(outcome))
+
     finally:
         engine1.stop()
         engine2.stop()
@@ -456,11 +521,14 @@ def run_match(
         "total": total,
         "engine1_score": (e1_wins + 0.5 * draws) / total if total else 0,
         "results": results,
+        "training_samples": all_samples,
     }
 
     if verbose:
         print("=" * 40)
         print(f"Results: {engine1.name} {e1_wins}W / {draws}D / {e2_wins}L")
         print(f"Score: {summary['engine1_score']:.1%}")
+        if all_samples:
+            print(f"Training samples collected: {len(all_samples)}")
 
     return summary

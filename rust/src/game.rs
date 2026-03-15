@@ -248,6 +248,11 @@ impl Game {
                 })
                 .collect();
             placeable.sort_by_key(|p| p.raw());
+            // UHP requires pieces of the same type to be played in order
+            // (e.g., wA1 before wA2). Since pieces of the same type are
+            // functionally identical for placement, only keep the lowest
+            // numbered piece per type to enforce this.
+            placeable.dedup_by_key(|p| p.piece_type());
 
             for piece in &placeable {
                 let mut sorted_hexes = placement_hexes.clone();
@@ -528,12 +533,13 @@ mod tests {
     fn test_first_move() {
         let mut game = Game::new();
         let moves = game.valid_moves();
-        // First move: 10 pieces at origin (queen excluded by tournament rule)
-        assert_eq!(moves.len(), 10);
+        // First move: 4 piece types at origin (queen excluded, deduped by type)
+        assert_eq!(moves.len(), 4);
         for mv in &moves {
             assert!(mv.from.is_none()); // all placements
             assert_eq!(mv.to, Some((0, 0)));
             assert_ne!(mv.piece.unwrap().piece_type(), PieceType::Queen);
+            assert_eq!(mv.piece.unwrap().number(), 1); // always #1 first
         }
 
         // Play first move
@@ -549,9 +555,9 @@ mod tests {
         let ws1 = Piece::new(PieceColor::White, PieceType::Spider, 1);
         game.play_move(&Move::placement(ws1, (0, 0)));
 
-        // Black should have 10 pieces (no queen on first turn) * 6 positions = 60 moves
+        // Black should have 4 piece types (no queen) * 6 positions = 24 moves
         let moves = game.valid_moves();
-        assert_eq!(moves.len(), 10 * 6);
+        assert_eq!(moves.len(), 4 * 6);
     }
 
     #[test]

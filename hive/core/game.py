@@ -112,14 +112,19 @@ class Game:
             is_first_move = (color == PieceColor.WHITE and self.move_count == 0) or \
                             (color == PieceColor.BLACK and self.move_count == 1)
 
-            # Determine which piece types can be placed
-            placeable = set()
-            for piece in reserve:
+            # Determine which piece types can be placed.
+            # Only include lowest-numbered piece per type (UHP ordering rule).
+            seen_types = set()
+            placeable = []
+            for piece in sorted(reserve, key=lambda p: (str(p.piece_type.value), p.number)):
                 if must_queen and piece.piece_type != PieceType.QUEEN:
                     continue
                 if is_first_move and piece.piece_type == PieceType.QUEEN:
                     continue
-                placeable.add(piece)
+                if piece.piece_type in seen_types:
+                    continue
+                seen_types.add(piece.piece_type)
+                placeable.append(piece)
 
             for piece in sorted(placeable, key=str):
                 for pos in sorted(placement_hexes):
