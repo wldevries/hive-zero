@@ -167,13 +167,13 @@ impl Piece {
 
 impl std::fmt::Debug for Piece {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
+        write!(f, "{}{}{}", self.color().as_char(), self.piece_type().as_char(), self.number())
     }
 }
 
 impl std::fmt::Display for Piece {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
+        write!(f, "{}{}{}", self.color().as_char(), self.piece_type().as_char(), self.number())
     }
 }
 

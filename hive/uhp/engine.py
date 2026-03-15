@@ -230,20 +230,9 @@ class UHPEngine:
         except ImportError:
             pass
 
-        try:
-            from ..mcts.mcts import MCTS
-            mcts = MCTS()
-            move = mcts.search(self.game, max_simulations=max_sims)
-
-            if move is None:
-                self._respond("pass")
-            else:
-                piece, from_pos, to_pos = move
-                self._respond(self._format_move(piece, from_pos, to_pos))
-        except ImportError:
-            # Fallback: first valid move
-            piece, from_pos, to_pos = valid[0]
-            self._respond(self._format_move(piece, from_pos, to_pos))
+        # Fallback: first valid move
+        piece, from_pos, to_pos = valid[0]
+        self._respond(self._format_move(piece, from_pos, to_pos))
 
     def _cmd_undo(self, args: str):
         if self.game is None:

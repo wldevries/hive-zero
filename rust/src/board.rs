@@ -598,6 +598,20 @@ mod tests {
     }
 
     #[test]
+    fn test_all_top_pieces_after_place() {
+        use crate::piece::{Piece, PieceColor, PieceType};
+        let mut board = Board::new();
+        let piece = Piece::new(PieceColor::White, PieceType::Queen, 1);
+        board.place_piece(piece, (0, 0));
+
+        let tops = board.all_top_pieces();
+        assert_eq!(tops.len(), 1);
+        let (pos, p) = &tops[0];
+        assert_eq!(p.to_string(), "wQ1");
+        println!("top piece: {} at {:?}", p, pos);
+    }
+
+    #[test]
     fn test_hex_to_grid_roundtrip() {
         for q in -11..=11 {
             for r in -11..=11 {

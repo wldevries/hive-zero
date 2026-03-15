@@ -3,27 +3,37 @@
 from __future__ import annotations
 
 from .hex import Hex
-from .board import Board
-from .pieces import PieceColor
+from .pieces import Piece, PieceColor
 
 
-def render_board(board: Board) -> str:
+def render_board(board_or_game) -> str:
     r"""Render a board to a string using compact flat-top hex tiles.
 
+    Accepts a Board, GameState, or RustGame object.
     Uses 4-char wide hexes with 2-char piece labels (e.g. wQ, bA).
     Stacked hexes show a reference number in the bottom row, with
     a legend below the board listing the full stack top-to-bottom.
     """
-    top_pieces = board.all_top_pieces()
+    # Extract data depending on type
+    if hasattr(board_or_game, 'all_top_pieces') and hasattr(board_or_game, 'stack_at'):
+        top_pieces, get_stack = _extract_from_board_like(board_or_game)
+    elif hasattr(board_or_game, 'board'):
+        # GameState or similar wrapper
+        top_pieces, get_stack = _extract_from_board_like(board_or_game.board)
+    else:
+        return "  (unsupported board type)"
+
     if not top_pieces:
         return "  (empty board)"
 
     # Build label map and identify stacks
     labels: dict[Hex, str] = {}
-    stacks: dict[Hex, list] = {}  # hex -> full stack (only for stacked positions)
-    for pos, piece in top_pieces:
-        labels[pos] = f"{piece.color.value}{piece.piece_type.value}"
-        stack = board.stack_at(pos)
+    colors: dict[Hex, str] = {}  # 'w' or 'b'
+    stacks: dict[Hex, list[str]] = {}  # hex -> full stack as strings (only stacked)
+    for pos, piece_str in top_pieces:
+        labels[pos] = piece_str[:2]  # e.g. "wQ" from "wQ1"
+        colors[pos] = piece_str[0]
+        stack = get_stack(pos)
         if len(stack) > 1:
             stacks[pos] = stack
 
@@ -103,8 +113,7 @@ def render_board(board: Board) -> str:
             canvas[sy + 2][sx + 2] = '_'
 
         # Record colored top label
-        piece = dict(top_pieces)[pos]
-        color = WHITE_FG if piece.color == PieceColor.WHITE else BLACK_FG
+        color = WHITE_FG if colors[pos] == 'w' else BLACK_FG
         color_labels[(sy + 1, sx + 1)] = f"{color}{label}{RESET}"
 
         # Record colored stack ref
@@ -141,9 +150,32 @@ def render_board(board: Board) -> str:
             stack = stacks[pos]
             # Show top to bottom
             parts = []
-            for piece in reversed(stack):
-                pc = WHITE_FG if piece.color == PieceColor.WHITE else BLACK_FG
-                parts.append(f"{pc}{piece}{RESET}")
+            for piece_str in reversed(stack):
+                pc = WHITE_FG if piece_str.startswith('w') else BLACK_FG
+                parts.append(f"{pc}{piece_str}{RESET}")
             lines.append(f"  #{ref}: {' > '.join(parts)}")
 
     return '\n'.join(lines)
+
+
+def _extract_from_board_like(board):
+    """Extract (top_pieces, get_stack) from a Board or RustGame."""
+    raw_tops = board.all_top_pieces()
+
+    if not raw_tops:
+        return [], lambda pos: []
+
+    # Check if it's a RustGame (returns ((q,r), str)) or Board (returns (Hex, Piece))
+    first_pos, first_piece = raw_tops[0]
+    if isinstance(first_piece, str):
+        # RustGame: positions are tuples, pieces are strings
+        top_pieces = [(Hex(*pos), piece_str) for pos, piece_str in raw_tops]
+        def get_stack(pos):
+            return board.stack_at(pos.q, pos.r)
+    else:
+        # Python Board: positions are Hex, pieces are Piece objects
+        top_pieces = [(pos, str(piece)) for pos, piece in raw_tops]
+        def get_stack(pos):
+            return [str(p) for p in board.stack_at(pos)]
+
+    return top_pieces, get_stack

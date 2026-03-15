@@ -34,8 +34,6 @@ def main():
                               help="Max moves per self-play game")
     train_parser.add_argument("--time-limit", type=float, default=None,
                               help="Training time limit in minutes (stops after current iteration)")
-    train_parser.add_argument("--parallel", type=int, default=None,
-                              help="Number of self-play games per wave (default: num_games)")
     train_parser.add_argument("--mcts-after", type=int, default=0,
                               help="Skip fast/full cycling and use full MCTS after this iteration (0=disabled)")
     train_parser.add_argument("--fast-iters", type=int, default=10,
@@ -56,7 +54,6 @@ def main():
             simulations=args.simulations, epochs_per_iter=args.epochs,
             batch_size=args.batch_size, max_moves=args.max_moves,
             time_limit_minutes=args.time_limit,
-            num_parallel=args.parallel or args.games,
             mcts_after=args.mcts_after,
             fast_iters=args.fast_iters,
             full_iters=args.full_iters

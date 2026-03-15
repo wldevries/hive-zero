@@ -163,6 +163,21 @@ impl PyGame {
     fn turn_string(&self) -> String {
         self.game.turn_string()
     }
+
+    /// All (hex, top_piece_str) pairs for occupied positions.
+    /// Returns list of ((q, r), piece_str) e.g. [((0, 0), "wQ1"), ((-1, 0), "bA1")].
+    fn all_top_pieces(&self) -> Vec<((i8, i8), String)> {
+        self.game.board.all_top_pieces().iter().map(|(hex, piece)| {
+            (*hex, piece.to_string())
+        }).collect()
+    }
+
+    /// Full stack at a position (bottom to top) as list of piece strings.
+    #[pyo3(signature = (q, r))]
+    fn stack_at(&self, q: i8, r: i8) -> Vec<String> {
+        let slot = self.game.board.stack_at((q, r));
+        slot.iter().map(|p| p.to_string()).collect()
+    }
 }
 
 /// Rust MCTS search exposed to Python.
