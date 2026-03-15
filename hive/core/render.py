@@ -11,25 +11,26 @@ def render_board(board: Board) -> str:
     r"""Render a board to a string using compact flat-top hex tiles.
 
     Uses 4-char wide hexes with 2-char piece labels (e.g. wQ, bA).
-    Stacked pieces show the piece underneath in the bottom row:
-       __
-      /wB\   <- top piece (beetle)
-      \wQ/   <- piece underneath (queen)
+    Stacked hexes show a reference number in the bottom row, with
+    a legend below the board listing the full stack top-to-bottom.
     """
     top_pieces = board.all_top_pieces()
     if not top_pieces:
         return "  (empty board)"
 
-    # Build maps of hex -> top label and hex -> bottom label (for stacks)
+    # Build label map and identify stacks
     labels: dict[Hex, str] = {}
-    bottom_labels: dict[Hex, str] = {}
+    stacks: dict[Hex, list] = {}  # hex -> full stack (only for stacked positions)
     for pos, piece in top_pieces:
-        label = f"{piece.color.value}{piece.piece_type.value}"
-        labels[pos] = label
+        labels[pos] = f"{piece.color.value}{piece.piece_type.value}"
         stack = board.stack_at(pos)
         if len(stack) > 1:
-            below = stack[-2]  # piece just below top
-            bottom_labels[pos] = f"{below.color.value}{below.piece_type.value}"
+            stacks[pos] = stack
+
+    # Assign reference numbers to stacks
+    stack_refs: dict[Hex, int] = {}
+    for i, pos in enumerate(sorted(stacks.keys(), key=lambda h: (h.r, h.q)), 1):
+        stack_refs[pos] = i
 
     # Screen coordinates for flat-top hex at (q, r):
     #   screen_x = q * 3  (each hex is 4 wide, overlapping by 1)
@@ -43,13 +44,12 @@ def render_board(board: Board) -> str:
     if not positions:
         return "  (empty board)"
 
-    # Find bounds
+    # Find bounds and normalize to 0-based
     min_sx = min(sx for sx, sy in positions.values())
     max_sx = max(sx for sx, sy in positions.values())
     min_sy = min(sy for sx, sy in positions.values())
     max_sy = max(sy for sx, sy in positions.values())
 
-    # Normalize to 0-based
     for pos in list(positions):
         sx, sy = positions[pos]
         positions[pos] = (sx - min_sx, sy - min_sy)
@@ -64,17 +64,17 @@ def render_board(board: Board) -> str:
     # ANSI colors
     WHITE_FG = '\033[97m'   # bright white
     BLACK_FG = '\033[93m'   # yellow for black pieces (visible on dark bg)
-    DIM = '\033[2m'         # dim for bottom piece in stack
+    DIM = '\033[2m'         # dim for stack reference
     RESET = '\033[0m'
 
     color_labels: dict[tuple[int, int], str] = {}  # (row, col) -> colored string
 
     # Draw non-stacked hexes first, then stacked ones on top
-    sorted_positions = sorted(positions.items(), key=lambda x: x[0] in bottom_labels)
+    sorted_positions = sorted(positions.items(), key=lambda x: x[0] in stacks)
 
     for pos, (sx, sy) in sorted_positions:
         label = labels[pos]
-        has_stack = pos in bottom_labels
+        has_stack = pos in stacks
 
         # Top: __ at (sy, sx+1..sx+2)
         canvas[sy][sx + 1] = '_'
@@ -90,9 +90,14 @@ def render_board(board: Board) -> str:
         canvas[sy + 2][sx] = '\\'
         canvas[sy + 2][sx + 3] = '/'
         if has_stack:
-            bl = bottom_labels[pos]
-            canvas[sy + 2][sx + 1] = bl[0]
-            canvas[sy + 2][sx + 2] = bl[1]
+            ref = str(stack_refs[pos])
+            # Right-align single digit, use both chars for 2-digit
+            if len(ref) == 1:
+                canvas[sy + 2][sx + 1] = '#'
+                canvas[sy + 2][sx + 2] = ref[0]
+            else:
+                canvas[sy + 2][sx + 1] = ref[0]
+                canvas[sy + 2][sx + 2] = ref[1]
         else:
             canvas[sy + 2][sx + 1] = '_'
             canvas[sy + 2][sx + 2] = '_'
@@ -102,13 +107,11 @@ def render_board(board: Board) -> str:
         color = WHITE_FG if piece.color == PieceColor.WHITE else BLACK_FG
         color_labels[(sy + 1, sx + 1)] = f"{color}{label}{RESET}"
 
-        # Record colored bottom label for stacks
+        # Record colored stack ref
         if has_stack:
-            bl = bottom_labels[pos]
-            stack = board.stack_at(pos)
-            below = stack[-2]
-            bcolor = WHITE_FG if below.color == PieceColor.WHITE else BLACK_FG
-            color_labels[(sy + 2, sx + 1)] = f"{DIM}{bcolor}{bl}{RESET}"
+            ref = str(stack_refs[pos])
+            ref_text = f"#{ref}" if len(ref) == 1 else ref
+            color_labels[(sy + 2, sx + 1)] = f"{DIM}{ref_text}{RESET}"
 
     # Build output string, replacing label chars with colored versions
     lines = []
@@ -129,5 +132,18 @@ def render_board(board: Board) -> str:
         lines.pop(0)
     while lines and not lines[-1].strip():
         lines.pop()
+
+    # Add stack legend
+    if stack_refs:
+        lines.append('')
+        for pos in sorted(stack_refs.keys(), key=lambda h: stack_refs[h]):
+            ref = stack_refs[pos]
+            stack = stacks[pos]
+            # Show top to bottom
+            parts = []
+            for piece in reversed(stack):
+                pc = WHITE_FG if piece.color == PieceColor.WHITE else BLACK_FG
+                parts.append(f"{pc}{piece}{RESET}")
+            lines.append(f"  #{ref}: {' > '.join(parts)}")
 
     return '\n'.join(lines)
