@@ -656,10 +656,16 @@ impl PyBatchMCTS {
                 active_searches.push(unsafe { &mut *ptr });
             }
 
+            // Cap per-game batch to remaining simulations.
+            let per_game_batch: Vec<usize> = searching.iter()
+                .map(|&si| (num_simulations - sims_done[si]).min(leaf_batch_size).max(1))
+                .collect();
+
             let results: Vec<(Vec<u32>, Vec<f32>, Vec<f32>)> = active_searches
                 .par_iter_mut()
-                .map(|search| {
-                    let leaves = search.select_leaves(leaf_batch_size);
+                .zip(per_game_batch.par_iter())
+                .map(|(search, &batch)| {
+                    let leaves = search.select_leaves(batch);
                     let mut boards = vec![0.0f32; leaves.len() * board_size];
                     let mut reserves = vec![0.0f32; leaves.len() * RESERVE_SIZE];
                     for (j, &leaf) in leaves.iter().enumerate() {
@@ -675,12 +681,12 @@ impl PyBatchMCTS {
                 })
                 .collect();
 
-            // Track sims and count total leaves
+            // Track sims by actual unique leaves found, not batch size
             let mut total_leaves = 0usize;
             let mut leaf_counts = Vec::with_capacity(searching.len());
             for (si_idx, &si) in searching.iter().enumerate() {
-                sims_done[si] += leaf_batch_size;
                 let n = results[si_idx].0.len();
+                sims_done[si] += n.max(1); // at least 1 to avoid infinite loop
                 leaf_counts.push(n);
                 total_leaves += n;
             }

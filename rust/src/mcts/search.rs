@@ -64,6 +64,39 @@ fn backpropagate(arena: &mut NodeArena, mut node_id: NodeId, mut value: f32) {
     }
 }
 
+/// Apply virtual loss: increment visit_count and subtract 1 from value_sum up the tree.
+/// This deters subsequent selections from taking the same path within a batch.
+fn apply_virtual_loss(arena: &mut NodeArena, mut node_id: NodeId) {
+    let mut value = -1.0f32;
+    loop {
+        let node = arena.get_mut(node_id);
+        node.visit_count += 1;
+        node.value_sum += value;
+        value = -value;
+        match node.parent {
+            Some(parent) => node_id = parent,
+            None => break,
+        }
+    }
+}
+
+/// Correct virtual loss by replacing the -1 placeholder with the real value.
+/// Does NOT increment visit_count (already done by apply_virtual_loss).
+fn correct_virtual_loss(arena: &mut NodeArena, mut node_id: NodeId, mut real_value: f32) {
+    let mut virtual_value = -1.0f32;
+    loop {
+        let node = arena.get_mut(node_id);
+        // Subtract the virtual placeholder and add the real value.
+        node.value_sum += real_value - virtual_value;
+        real_value = -real_value;
+        virtual_value = -virtual_value;
+        match node.parent {
+            Some(parent) => node_id = parent,
+            None => break,
+        }
+    }
+}
+
 /// Terminal game value from a perspective.
 fn terminal_value(game: &Game, perspective: PieceColor) -> f32 {
     match game.state {
@@ -164,7 +197,6 @@ impl MctsSearch {
     pub fn select_leaves(&mut self, batch_size: usize) -> Vec<NodeId> {
         let root_turn = self.arena.get(self.root).game.turn_color;
         let mut leaves = Vec::new();
-        let mut seen = std::collections::HashSet::new();
 
         for _ in 0..batch_size {
             let leaf = select_leaf(&self.arena, self.root, self.c_puct);
@@ -172,10 +204,9 @@ impl MctsSearch {
             if self.arena.get(leaf).game.is_game_over() {
                 let value = terminal_value(&self.arena.get(leaf).game, root_turn);
                 backpropagate(&mut self.arena, leaf, value);
-            } else if seen.contains(&leaf) {
-                backpropagate(&mut self.arena, leaf, 0.0);
             } else {
-                seen.insert(leaf);
+                // Apply virtual loss so subsequent selections in this batch diverge.
+                apply_virtual_loss(&mut self.arena, leaf);
                 leaves.push(leaf);
             }
         }
@@ -197,7 +228,8 @@ impl MctsSearch {
             if self.arena.get(leaf).game.turn_color != root_turn {
                 value = -value;
             }
-            backpropagate(&mut self.arena, leaf, value);
+            // Replace virtual loss placeholder with real value (visit_count already correct).
+            correct_virtual_loss(&mut self.arena, leaf, value);
         }
     }
 
