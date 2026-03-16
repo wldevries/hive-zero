@@ -19,6 +19,8 @@ def game_type(content: str) -> str:
 def parse_moves(content: str):
     """Yield UHP move strings from Boardspace SGF content.
 
+    Handles both old format (lowercase commands, no color prefix on pieces) and
+    new format (uppercase commands, color-prefixed pieces like wB1/bA1).
     Handles Pick/Pickb + Dropb pairs, combined Move/movedone lines, and pass.
     Expansion pieces (M, L, P) are passed through as-is.
     """
@@ -27,32 +29,35 @@ def parse_moves(content: str):
     move_count = 0
     pending_old_coords: str | None = None  # set by Pickb, consumed by Dropb
 
-    action_pat = re.compile(r';\s*P[01]\[\d+\s+(.*?)\](?:TM\[\d+\])?', re.MULTILINE)
+    # Capture player index (0=white, 1=black) for inferring color in old format
+    action_pat = re.compile(r';\s*P([01])\[\d+\s+(.*?)\](?:TM\[\d+\])?', re.MULTILINE)
 
     for m in action_pat.finditer(content):
-        action = m.group(1).strip()
+        player_color = 'w' if m.group(1) == '0' else 'b'
+        action = m.group(2).strip()
         low = action.lower()
 
         if low.startswith('done') or low.startswith('start'):
             pending_old_coords = None
             continue
 
-        # Pick from reserve: "Pick W 4 wS1"
-        if re.match(r'Pick [BW] \d+ \S+', action):
+        # Pick from reserve: "Pick W 4 wS1" (new) or "pick b 1 A1" (old)
+        if re.match(r'pick\s+[BWbw]\s+\d+\s+\S+', action, re.IGNORECASE):
             pending_old_coords = None
             continue
 
-        # Pick from board: "Pickb N 13 wS1"
-        pb = re.match(r'Pickb ([A-Z]) (\d+) (\S+)', action)
+        # Pick from board: "Pickb N 13 wS1" (new) or "pickb P 13 G1" (old)
+        pb = re.match(r'pickb\s+([A-Za-z])\s+(\d+)\s+(\S+)', action, re.IGNORECASE)
         if pb:
-            col, row = pb.group(1), pb.group(2)
+            col, row = pb.group(1).upper(), pb.group(2)
             pending_old_coords = f"{col}-{row}"
             continue
 
-        # Drop: "Dropb wS1 N 13 ."
-        db = re.match(r'Dropb (\S+) ([A-Z]) (\d+) (.+)', action)
+        # Drop: "Dropb wS1 N 13 ." (new) or "dropb A1 O 13 wB1-" (old)
+        db = re.match(r'dropb\s+(\S+)\s+([A-Za-z])\s+(\d+)\s+(.+)', action, re.IGNORECASE)
         if db:
-            piece, col, row = db.group(1), db.group(2), db.group(3)
+            piece = _ensure_color(db.group(1), player_color)
+            col, row = db.group(2).upper(), db.group(3)
             ref_raw = db.group(4).strip()
             new_coords = f"{col}-{row}"
             old_coords, pending_old_coords = pending_old_coords, None
@@ -64,11 +69,14 @@ def parse_moves(content: str):
             move_count += 1
             continue
 
-        # Move (combined): "Move B bS1 M 12 /wS1"
-        mv = re.match(r'Move [BW] (\S+) ([A-Z]) (\d+) (.+)', action)
-        if mv:
-            piece, col, row = mv.group(1), mv.group(2), mv.group(3)
-            ref_raw = mv.group(4).strip()
+        # movedone (alternate combined format): "movedone B bS1 M 12 /wS1"
+        # Must be checked before Move since 'movedone' starts with 'move'
+        md = re.match(r'movedone\s+([BWbw])\s+(\S+)\s+([A-Za-z])\s+(\d+)\s+(.+)', action, re.IGNORECASE)
+        if md:
+            color = 'w' if md.group(1).upper() == 'W' else 'b'
+            piece = _ensure_color(md.group(2), color)
+            col, row = md.group(3).upper(), md.group(4)
+            ref_raw = md.group(5).strip()
             new_coords = f"{col}-{row}"
             old_coords = piece_coords.get(piece)
 
@@ -79,11 +87,13 @@ def parse_moves(content: str):
             move_count += 1
             continue
 
-        # movedone (alternate combined format): "movedone B bS1 M 12 /wS1"
-        md = re.match(r'movedone [BW] (\S+) ([A-Z]) (\d+) (.+)', action)
-        if md:
-            piece, col, row = md.group(1), md.group(2), md.group(3)
-            ref_raw = md.group(4).strip()
+        # Move (combined): "Move B bS1 M 12 /wS1" (new) or "move W B1 N 13 ." (old)
+        mv = re.match(r'move\s+([BWbw])\s+(\S+)\s+([A-Za-z])\s+(\d+)\s+(.+)', action, re.IGNORECASE)
+        if mv:
+            color = 'w' if mv.group(1).upper() == 'W' else 'b'
+            piece = _ensure_color(mv.group(2), color)
+            col, row = mv.group(3).upper(), mv.group(4)
+            ref_raw = mv.group(5).strip()
             new_coords = f"{col}-{row}"
             old_coords = piece_coords.get(piece)
 
@@ -101,6 +111,16 @@ def parse_moves(content: str):
 
 
 # ---- internal helpers ----
+
+def _ensure_color(piece: str, color: str) -> str:
+    """Add color prefix to piece name if not already present.
+
+    New format already has prefix: 'wB1', 'bA1'. Old format does not: 'B1', 'A1'.
+    """
+    if len(piece) >= 2 and piece[0] in ('w', 'b') and piece[1].isupper():
+        return piece
+    return color + piece
+
 
 def _resolve_ref(ref_raw: str, new_coords: str, piece: str, move_count: int,
                  coord_stack, piece_coords) -> str:

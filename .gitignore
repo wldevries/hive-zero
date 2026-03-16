@@ -10,6 +10,7 @@ checkpoints/
 training_log.tsv
 *.sgf
 *.zip
+games/**/*.csv
 
 # Rust
 rust/target/
