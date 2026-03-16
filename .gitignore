@@ -8,6 +8,8 @@ __pycache__/
 *.pth
 checkpoints/
 training_log.tsv
+*.sgf
+*.zip
 
 # Rust
 rust/target/
