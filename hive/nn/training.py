@@ -11,7 +11,6 @@ from typing import Optional
 from .model import HiveNet, create_model, save_model
 from ..encoding.board_encoder import NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE
 from ..encoding.move_encoder import POLICY_SIZE
-from ..encoding.symmetry import apply_symmetry
 
 
 class HiveDataset(Dataset):
@@ -21,13 +20,11 @@ class HiveDataset(Dataset):
     and a ring buffer to avoid GC pressure from thousands of individual arrays.
     """
 
-    def __init__(self, max_size: int = 50_000, augment: bool = True):
+    def __init__(self, max_size: int = 50_000):
         """Args:
             max_size: Maximum number of samples to keep.
-            augment: Apply random symmetry augmentation (12 hex symmetries).
         """
         self.max_size = max_size
-        self.augment = augment
         self._count = 0  # total samples added (for ring buffer index)
         self._size = 0   # current number of valid samples
         # Pre-allocate contiguous arrays
@@ -40,10 +37,6 @@ class HiveDataset(Dataset):
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
                    policy_target: np.ndarray, value_target: float,
                    weight: float = 1.0):
-        if self.augment:
-            sym_idx = np.random.randint(0, 12)
-            if sym_idx != 0:
-                board_tensor, policy_target = apply_symmetry(board_tensor, policy_target, sym_idx)
         idx = self._count % self.max_size
         self.board_tensors[idx] = board_tensor
         self.reserve_vectors[idx] = reserve_vector
