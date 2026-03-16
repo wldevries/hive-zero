@@ -50,7 +50,7 @@ class SelfPlayTrainer:
             eval_config: dict | None = None,
             checkpoint_eval_games: int | None = None,
             checkpoint_eval_simulations: int | None = None,
-            checkpoint_every: int = 20,
+            checkpoint_every: int = 10,
             resign_threshold: float = -0.97,
             resign_moves: int = 5,
             calibration_frac: float = 0.1):

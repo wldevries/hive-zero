@@ -42,8 +42,8 @@ def main():
                               help="Number of full MCTS iterations per cycle (default: 2)")
     train_parser.add_argument("--warmup-positions", type=int, default=10_000,
                               help="Fill buffer to this many positions before training (0=skip)")
-    train_parser.add_argument("--checkpoint-every", type=int, default=20,
-                              help="Save checkpoint and run self-eval every N iterations (default: 20)")
+    train_parser.add_argument("--checkpoint-every", type=int, default=10,
+                              help="Save checkpoint and run self-eval every N iterations (default: 10)")
     train_parser.add_argument("--eval-every", type=int, default=0,
                               help="Run evaluation vs Mzinga every N iterations (0=disabled)")
     train_parser.add_argument("--eval-games", type=int, default=6,
