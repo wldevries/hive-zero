@@ -628,6 +628,15 @@ impl PyBatchMCTS {
         });
     }
 
+    /// Apply Dirichlet noise to root priors for the given game indices.
+    /// Call this after init_searches, before run_simulations, during self-play only.
+    #[pyo3(signature = (active_indices, alpha=0.3, epsilon=0.25))]
+    fn apply_root_dirichlet(&mut self, active_indices: Vec<usize>, alpha: f32, epsilon: f32) {
+        for gi in active_indices {
+            self.searches[gi].apply_root_dirichlet(alpha, epsilon);
+        }
+    }
+
     /// Run full simulation loop for active games, calling eval_fn for GPU batches.
     /// eval_fn(boards_2d, reserves_2d) -> (policies_2d, values_1d)
     /// This minimizes Python↔Rust round trips to one per simulation round.

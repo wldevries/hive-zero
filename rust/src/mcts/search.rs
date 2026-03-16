@@ -233,6 +233,37 @@ impl MctsSearch {
         }
     }
 
+    /// Apply Dirichlet noise to root children priors.
+    /// alpha: concentration parameter (e.g. 0.3 for Hive)
+    /// epsilon: noise weight (e.g. 0.25)
+    pub fn apply_root_dirichlet(&mut self, alpha: f32, epsilon: f32) {
+        use rand::SeedableRng;
+        use rand_distr::{Dirichlet, Distribution};
+
+        let root = self.arena.get(self.root);
+        let child_count = root.child_count as usize;
+        if child_count == 0 {
+            return;
+        }
+
+        let alphas = vec![alpha; child_count];
+        let dirichlet = match Dirichlet::new(&alphas) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut rng = rand::rngs::StdRng::from_entropy();
+        let noise: Vec<f32> = dirichlet.sample(&mut rng);
+
+        let mut child_id = self.arena.get(self.root).first_child;
+        let mut i = 0;
+        while let Some(cid) = child_id {
+            let child = self.arena.get_mut(cid);
+            child.prior = (1.0 - epsilon) * child.prior + epsilon * noise[i];
+            child_id = child.next_sibling;
+            i += 1;
+        }
+    }
+
     /// Get the best move by visit count.
     pub fn best_move(&self) -> Option<Move> {
         let root = self.arena.get(self.root);

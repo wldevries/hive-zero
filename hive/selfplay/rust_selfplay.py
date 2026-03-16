@@ -315,6 +315,7 @@ class RustParallelSelfPlay:
             )
             game_refs = [games[gi] for gi in mcts_games]
             batch_mcts.init_searches(game_refs, init_policies)
+            batch_mcts.apply_root_dirichlet(list(range(len(mcts_games))))
 
             # Map from batch index to game index
             batch_to_gi = list(mcts_games)
