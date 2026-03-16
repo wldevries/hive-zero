@@ -85,3 +85,6 @@ uv pip install torch==2.10.0+cu128 --index-url https://download.pytorch.org/whl/
 
 ## UHP Commands
 `info`, `newgame`, `play`, `validmoves`, `bestmove`, `undo`, `options`, `pass`
+
+## Git
+Only commit when explicitly asked by the user.
