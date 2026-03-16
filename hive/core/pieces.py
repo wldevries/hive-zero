@@ -11,6 +11,10 @@ class PieceType(Enum):
     BEETLE = "B"
     GRASSHOPPER = "G"
     ANT = "A"
+    # Expansion pieces (display/parsing only — not used in training)
+    MOSQUITO = "M"
+    LADYBUG = "L"
+    PILLBUG = "P"
 
 
 class PieceColor(Enum):
