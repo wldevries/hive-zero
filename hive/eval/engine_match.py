@@ -128,12 +128,14 @@ class ModelEngine:
     """
 
     def __init__(self, model, device: str = "cpu", simulations: int = 800,
-                 name: str = "HiveZero"):
+                 name: str = "HiveZero", opening_temp_moves: int = 8):
         self.model = model
         self.device = device
         self.simulations = simulations
         self.name = name
+        self.opening_temp_moves = opening_temp_moves
         self._game = None
+        self._move_count = 0
         # Training sample collection: (board_tensor, reserve_vec, policy_vec, turn_color)
         self._history: list[tuple] = []
 
@@ -146,6 +148,7 @@ class ModelEngine:
     def new_game_history(self):
         """Clear history for a new game."""
         self._history = []
+        self._move_count = 0
 
     def get_samples(self, outcome: dict[str, float], weight: float = 1.0) -> list[tuple]:
         """Build training samples from recorded history with game outcome.
@@ -296,7 +299,7 @@ class ModelEngine:
 
     def _bestmove(self) -> list[str]:
         import torch
-        from hive_engine import RustMCTS
+        from hive_engine import RustBatchMCTS
         from ..encoding.move_encoder import POLICY_SIZE
 
         game = self._game
@@ -310,10 +313,10 @@ class ModelEngine:
         rv = np.asarray(rv)
         turn_color = game.turn_color
 
-        mcts = RustMCTS()
         model = self.model
         device = self.device
 
+        # Batch eval for initial policy + run_simulations callback
         def eval_fn(board_batch, reserve_batch):
             board_4d = np.asarray(board_batch)
             reserves = np.asarray(reserve_batch)
@@ -325,9 +328,14 @@ class ModelEngine:
             vals = values.cpu().numpy().flatten()
             return policy.astype(np.float32), vals.astype(np.float32)
 
-        # Use get_policy to get the full visit distribution for training
-        moves_probs = mcts.get_policy(game, eval_fn, self.simulations, temperature=0.0)
-        moves, probs = moves_probs
+        # Initial policy for root
+        init_policy, _ = eval_fn(bt.reshape(1, *bt.shape), rv.reshape(1, -1))
+
+        batch_mcts = RustBatchMCTS(num_games=1, c_puct=1.5, leaf_batch_size=16)
+        batch_mcts.init_searches([game], init_policy)
+        batch_mcts.run_simulations([0], self.simulations, eval_fn)
+
+        moves, probs = batch_mcts.visit_distributions([0])[0]
 
         if not moves:
             return ["pass"]
@@ -343,8 +351,14 @@ class ModelEngine:
         # Record for training
         self._history.append((bt, rv, policy_vector, turn_color))
 
-        # Pick best move (temperature=0 already applied)
-        best_idx = int(np.argmax(probs))
+        # Opening moves: sample with temperature 1 for diversity; then argmax
+        if self._move_count < self.opening_temp_moves:
+            p = np.array(probs, dtype=np.float64)
+            p /= p.sum()
+            best_idx = int(np.random.choice(len(probs), p=p))
+        else:
+            best_idx = int(np.argmax(probs))
+        self._move_count += 1
         piece_str, from_pos, to_pos = moves[best_idx]
         if piece_str == "pass":
             return ["pass"]
@@ -444,6 +458,7 @@ def run_match(
     num_games: int = 10,
     max_moves: int = 200,
     verbose: bool = True,
+    show_progress: bool = False,
 ) -> dict:
     """Run a match of multiple games, alternating colors."""
     engine1.start()
@@ -495,6 +510,12 @@ def run_match(
             if verbose:
                 print(f"  Result: {winner} in {result.moves} moves "
                       f"({elapsed:.1f}s)\n")
+            if show_progress:
+                done = i + 1
+                score = (e1_wins + 0.5 * draws) / done
+                print(f"  Games: {done}/{num_games} done  "
+                      f"{engine1.name}={e1_wins} {engine2.name}={e2_wins} D={draws}  score={score:.0%}",
+                      end="\r" if done < num_games else "\n", flush=True)
 
             # Collect training samples from ModelEngine(s)
             if result.result in ("white", "black"):

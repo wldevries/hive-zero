@@ -47,7 +47,10 @@ class SelfPlayTrainer:
             mcts_after: int = 0,
             fast_iters: int = 10, full_iters: int = 2,
             warmup_positions: int = 10_000,
-            eval_config: dict | None = None):
+            eval_config: dict | None = None,
+            checkpoint_eval_games: int | None = None,
+            checkpoint_eval_simulations: int | None = None,
+            checkpoint_every: int = 20):
         """Run the full training loop.
 
         Args:
@@ -59,6 +62,9 @@ class SelfPlayTrainer:
                 training begins. 0 = no warmup.
             eval_config: If set, run evaluation vs Mzinga periodically.
                 Keys: every, games, simulations, mzinga_path, mzinga_time.
+            checkpoint_eval_games: Games per checkpoint self-eval (default 2x games_per_iter).
+            checkpoint_eval_simulations: Simulations for checkpoint eval.
+                Defaults to same as `simulations`.
         """
         import time
         start_time = time.time()
@@ -74,6 +80,14 @@ class SelfPlayTrainer:
         else:
             self._log = open(log_path, "a")
         self._log.flush()
+
+        # Bootstrap eval: if best_model.pt doesn't exist, run it immediately
+        # rather than waiting until the next checkpoint iteration.
+        best_model_path = os.path.join(os.path.dirname(self.model_path) or ".", "best_model.pt")
+        if not os.path.exists(best_model_path):
+            eval_sims = checkpoint_eval_simulations if checkpoint_eval_simulations is not None else simulations
+            eval_games = checkpoint_eval_games if checkpoint_eval_games is not None else 2 * games_per_iter
+            self._run_checkpoint_eval(self.start_iteration, eval_sims, eval_games)
 
         # Replay buffer: keep last ~50k positions across iterations
         replay_buffer = HiveDataset(max_size=50_000)
@@ -215,10 +229,13 @@ class SelfPlayTrainer:
             }
             save_checkpoint(self.model, self.model_path, iteration, metadata)
 
-            if iteration % 10 == 0:
+            if iteration % checkpoint_every == 0:
                 ckpt_path = os.path.join(self.checkpoint_dir, f"model_iter{iteration:04d}.pt")
                 save_checkpoint(self.model, ckpt_path, iteration, metadata)
                 print(f"  Checkpoint saved to {ckpt_path}")
+                eval_sims = checkpoint_eval_simulations if checkpoint_eval_simulations is not None else simulations
+                eval_games = checkpoint_eval_games if checkpoint_eval_games is not None else 2 * games_per_iter
+                self._run_checkpoint_eval(iteration, eval_sims, eval_games)
 
             print(f"  Model saved to {self.model_path} (iteration {iteration})")
 
@@ -226,6 +243,105 @@ class SelfPlayTrainer:
             if eval_config and iteration % eval_config["every"] == 0:
                 self._run_eval(eval_config, iteration, replay_buffer)
 
+
+    def _find_prev_checkpoint(self, current_iteration: int) -> str | None:
+        """Return path of the latest checkpoint strictly before current_iteration, or None."""
+        import glob as _glob
+        pattern = os.path.join(self.checkpoint_dir, "model_iter*.pt")
+        candidates = []
+        for path in _glob.glob(pattern):
+            name = os.path.basename(path)
+            try:
+                iter_num = int(name[len("model_iter"):-len(".pt")])
+                if iter_num < current_iteration:
+                    candidates.append((iter_num, path))
+            except ValueError:
+                pass
+        if not candidates:
+            return None
+        return max(candidates, key=lambda x: x[0])[1]
+
+    def _run_checkpoint_eval(self, iteration: int, simulations: int, num_games: int):
+        """Pit current model against best_model.pt. Winner becomes new best and model.pt."""
+        import shutil
+        from ..eval.engine_match import ModelEngine, run_match
+
+        WIN_THRESHOLD = 0.5
+        best_model_path = os.path.join(os.path.dirname(self.model_path) or ".", "best_model.pt")
+
+        if not os.path.exists(best_model_path):
+            # Bootstrap: pit model.pt against the previous checkpoint to find the best.
+            prev_ckpt = self._find_prev_checkpoint(iteration)
+            if prev_ckpt is None:
+                print(f"  No best_model.pt and no prior checkpoint — current model is now best")
+                save_checkpoint(self.model, best_model_path, iteration)
+                shutil.copy2(best_model_path, self.model_path)
+                return
+            print(f"\n--- Bootstrap eval: model.pt vs {os.path.basename(prev_ckpt)} ({num_games} games) ---")
+            self.model.eval()
+            engine1 = ModelEngine(model=self.model, device=self.device,
+                                  simulations=simulations, name=f"current-i{iteration}")
+            prev_model, prev_ckpt_data = load_checkpoint(prev_ckpt)
+            prev_iter = prev_ckpt_data.get("iteration", 0)
+            prev_model.to(self.device)
+            prev_model.eval()
+            engine2 = ModelEngine(model=prev_model, device=self.device,
+                                  simulations=simulations, name=f"prev-i{prev_iter}")
+            try:
+                summary = run_match(engine1, engine2, num_games=num_games, max_moves=200, verbose=False, show_progress=True)
+            finally:
+                self.model.train()
+            score = summary["engine1_score"]
+            w, d, l = summary["engine1_wins"], summary["draws"], summary["engine2_wins"]
+            if score >= 0.5:
+                winner_label = engine1.name
+                save_checkpoint(self.model, best_model_path, iteration)
+            else:
+                winner_label = engine2.name
+                shutil.copy2(prev_ckpt, best_model_path)
+            shutil.copy2(best_model_path, self.model_path)
+            print(f"  {w}W/{d}D/{l}L → best model: {winner_label}")
+            self._log.write(f"{iteration}\tpit-bootstrap\t{w}\t{l}\t{d}\t0\t0\t"
+                            f"{score:.6f}\t0\t0\t0\t0\n")
+            self._log.flush()
+            return
+
+        print(f"\n--- Checkpoint eval: challenger (i{iteration}) vs best ({num_games} games) ---")
+        self.model.eval()
+
+        challenger = ModelEngine(
+            model=self.model, device=self.device,
+            simulations=simulations, name=f"challenger-i{iteration}",
+        )
+        best_model, _ = load_checkpoint(best_model_path)
+        best_model.to(self.device)
+        best_model.eval()
+        defender = ModelEngine(
+            model=best_model, device=self.device,
+            simulations=simulations, name="best",
+        )
+
+        try:
+            summary = run_match(challenger, defender, num_games=num_games, max_moves=200, verbose=False, show_progress=True)
+        finally:
+            self.model.train()
+
+        score = summary["engine1_score"]
+        w, d, l = summary["engine1_wins"], summary["draws"], summary["engine2_wins"]
+        print(f"  {w}W/{d}D/{l}L (score: {score:.0%})", end="")
+
+        if score >= WIN_THRESHOLD:
+            save_checkpoint(self.model, best_model_path, iteration)
+            print(f" → NEW BEST (iter {iteration})")
+        else:
+            print(f" → no improvement (defender holds)")
+
+        # model.pt always mirrors best_model.pt so fresh restarts use the best known weights
+        shutil.copy2(best_model_path, self.model_path)
+
+        self._log.write(f"{iteration}\tpit\t{w}\t{l}\t{d}\t0\t0\t"
+                        f"{score:.6f}\t0\t0\t0\t0\n")
+        self._log.flush()
 
     def _run_eval(self, eval_config: dict, iteration: int, replay_buffer=None):
         """Run evaluation games against Mzinga and feed samples back."""
