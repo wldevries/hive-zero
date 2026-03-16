@@ -75,7 +75,7 @@ class SelfPlayTrainer:
         log_path = "training_log.tsv"
         if self.start_iteration == 0:
             self._log = open(log_path, "w")
-            self._log.write("iter\tmode\twins_w\twins_b\tdraws\tpositions\tbuffer\t"
+            self._log.write("iter\tmode\tsimulations\twins_w\twins_b\tdraws\tpositions\tbuffer\t"
                             "loss\tpolicy_loss\tvalue_loss\tlr\tplay_s\n")
         else:
             self._log = open(log_path, "a")
@@ -209,7 +209,7 @@ class SelfPlayTrainer:
                       f"(policy={losses['policy_loss']:.4f}, value={losses['value_loss']:.4f}, lr={lr})")
 
             # Log to TSV
-            self._log.write(f"{iteration}\t{mode_label}\t"
+            self._log.write(f"{iteration}\t{mode_label}\t{simulations}\t"
                             f"{wins_w}\t{wins_b}\t{draws}\t{total_positions}\t"
                             f"{len(replay_buffer)}\t{losses['total_loss']:.6f}\t"
                             f"{losses['policy_loss']:.6f}\t{losses['value_loss']:.6f}\t"
@@ -297,7 +297,7 @@ class SelfPlayTrainer:
                 shutil.copy2(prev_ckpt, best_model_path)
             shutil.copy2(best_model_path, self.model_path)
             print(f"  {w}W/{d}D/{l}L → best model: {winner_label}")
-            self._log.write(f"{iteration}\tpit-bootstrap\t{w}\t{l}\t{d}\t0\t0\t"
+            self._log.write(f"{iteration}\tpit-bootstrap\t{simulations}\t{w}\t{l}\t{d}\t0\t0\t"
                             f"{score:.6f}\t0\t0\t0\t0\n")
             self._log.flush()
             return
@@ -335,7 +335,7 @@ class SelfPlayTrainer:
         # model.pt always mirrors best_model.pt so fresh restarts use the best known weights
         shutil.copy2(best_model_path, self.model_path)
 
-        self._log.write(f"{iteration}\tpit\t{w}\t{l}\t{d}\t0\t0\t"
+        self._log.write(f"{iteration}\tpit\t{simulations}\t{w}\t{l}\t{d}\t0\t0\t"
                         f"{score:.6f}\t0\t0\t0\t0\n")
         self._log.flush()
 
@@ -384,7 +384,7 @@ class SelfPlayTrainer:
                       f"(score: {score:.0%})")
 
             # Log to TSV
-            self._log.write(f"{iteration}\teval\t{w}\t{l}\t{d}\t{len(samples)}\t"
+            self._log.write(f"{iteration}\teval\t{eval_config['simulations']}\t{w}\t{l}\t{d}\t{len(samples)}\t"
                             f"{len(replay_buffer) if replay_buffer else 0}\t"
                             f"{score:.6f}\t0\t0\t0\t0\n")
             self._log.flush()
