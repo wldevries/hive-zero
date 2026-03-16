@@ -6,10 +6,12 @@ A Python + Rust AI engine for the [Hive](https://boardgamegeek.com/boardgame/265
 
 - **Complete Hive rules**: Queen, Beetle, Grasshopper, Spider, Ant with full movement validation including One Hive rule, gate blocking, and beetle stacking
 - **UHP compliant**: stdin/stdout protocol compatible with Mzinga and other UHP viewers
-- **AlphaZero-style AI**: Convolutional neural network with policy and value heads, trained via self-play with SGD + stepped LR schedule
+- **AlphaZero-style AI**: Convolutional neural network with policy and value heads, trained via self-play with SGD + cosine annealing with warm restarts
 - **Rust game engine**: PyO3-based Rust extension (`hive_engine`) for game simulation, MCTS, and board encoding
 - **Rayon-parallel MCTS**: Cross-game batched tree search with parallel CPU ops and batched GPU inference
+- **Dirichlet noise**: Applied to MCTS root during self-play for exploration
 - **Self-play training**: Automated pipeline with fast/MCTS cycling, warmup phase, and replay buffer
+- **Checkpoint evaluation**: Periodic self-play matches between the current model and best known model to prevent regressions
 
 ## Requirements
 
@@ -48,7 +50,7 @@ The engine communicates over stdin/stdout using UHP. Connect it to any UHP-compa
 uv run python main.py train
 
 # With options
-uv run python main.py train --iterations 50 --games 40 --simulations 100 --device cuda
+uv run python main.py train --iterations 200 --games 40 --simulations 25 --device cuda
 ```
 
 Key training flags:
@@ -69,13 +71,37 @@ Key training flags:
 | `--fast-iters` | 10 | Fast iterations per cycle |
 | `--full-iters` | 2 | Full MCTS iterations per cycle |
 | `--warmup-positions` | 10000 | Fill buffer before training (0=skip) |
+| `--checkpoint-every` | 20 | Save checkpoint and run self-eval every N iterations |
 | `--time-limit` | None | Stop after N minutes |
+
+### Checkpoint Evaluation
+
+Every `--checkpoint-every` iterations, the current model is pitted against `best_model.pt` in a self-play match. If the challenger scores ≥ 50%, it becomes the new `best_model.pt` and `model.pt` is updated to match — ensuring `model.pt` always reflects the best known weights.
+
+On first run (no `best_model.pt`), the two most recent checkpoints play each other to establish a baseline.
+
+Eval games use opening temperature sampling (first 8 moves) for game diversity, then switch to argmax.
+
+### Evaluate Against Mzinga
+
+```bash
+uv run python main.py eval --games 10 --simulations 200 --mzinga-path path/to/MzingaEngine.exe
+```
 
 ### Run Tests
 
 ```bash
 uv run python -m pytest tests/
 ```
+
+## Model Files
+
+| File | Description |
+|------|-------------|
+| `model.pt` | Current training model (always mirrors `best_model.pt` after each eval) |
+| `best_model.pt` | Best model found by checkpoint evaluation |
+| `checkpoints/model_iter{N}.pt` | Periodic snapshots every `--checkpoint-every` iterations |
+| `training_log.tsv` | Per-iteration training metrics and eval results |
 
 ## UHP Commands
 
@@ -96,10 +122,11 @@ uv run python -m pytest tests/
 ```
 hive/
   core/        Game logic (hex coordinates, pieces, board, rules, game state, renderer)
-  encoding/    Neural network I/O (board tensors, move encoding, symmetry augmentation)
+  encoding/    Neural network I/O (board tensors, move encoding)
   nn/          PyTorch model (AlphaZero-style conv net, policy + value heads)
   uhp/         UHP protocol engine (stdin/stdout)
   selfplay/    Self-play training loop (Rust-accelerated)
+  eval/        Engine-vs-engine match runner and model evaluation
 rust/
   src/         Rust game engine exposed via PyO3 as `hive_engine`
                (board, game, rules, MCTS, move/board encoding, rayon parallelism)
