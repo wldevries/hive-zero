@@ -10,7 +10,7 @@ A Python + Rust AI engine for the [Hive](https://boardgamegeek.com/boardgame/265
 - **Rust game engine**: PyO3-based Rust extension (`hive_engine`) for game simulation, MCTS, and board encoding
 - **Rayon-parallel MCTS**: Cross-game batched tree search with parallel CPU ops and batched GPU inference
 - **Dirichlet noise**: Applied to MCTS root during self-play for exploration
-- **Self-play training**: Automated pipeline with fast/MCTS cycling, warmup phase, and replay buffer
+- **Self-play training**: Automated pipeline with MCTS self-play, warmup phase, and replay buffer
 - **Resignation**: Configurable threshold-based resignation during self-play (disabled during warmup); ~10% calibration games track false-positive rate
 - **Checkpoint evaluation**: Periodic self-play matches between the current model and best known model to prevent regressions
 
@@ -68,9 +68,7 @@ Key training flags:
 | `--blocks` | 6 | Residual blocks in network |
 | `--channels` | 64 | Channels in network |
 | `--max-moves` | 200 | Max moves per game |
-| `--mcts-after` | 0 | Use full MCTS after this iteration (0=cycling, -1=always MCTS) |
-| `--fast-iters` | 10 | Fast iterations per cycle |
-| `--full-iters` | 2 | Full MCTS iterations per cycle |
+| `--mcts-after` | 0 | Use fast self-play until this iteration, then switch to full MCTS (0=always MCTS) |
 | `--warmup-positions` | 10000 | Fill buffer before training (0=skip) |
 | `--checkpoint-every` | 20 | Save checkpoint and run self-eval every N iterations |
 | `--time-limit` | None | Stop after N minutes |

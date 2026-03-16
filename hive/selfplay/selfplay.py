@@ -45,7 +45,6 @@ class SelfPlayTrainer:
             batch_size: int = 64, max_moves: int = 200,
             time_limit_minutes: float | None = None,
             mcts_after: int = 0,
-            fast_iters: int = 10, full_iters: int = 2,
             warmup_positions: int = 10_000,
             eval_config: dict | None = None,
             checkpoint_eval_games: int | None = None,
@@ -57,10 +56,8 @@ class SelfPlayTrainer:
         """Run the full training loop.
 
         Args:
-            mcts_after: If >0, skip cycling and use full MCTS after this
-                iteration (backward compat). 0 = disabled (use cycling).
-            fast_iters: Number of fast iterations per cycle.
-            full_iters: Number of full MCTS iterations per cycle.
+            mcts_after: Use fast self-play until this iteration, then switch
+                to full MCTS. 0 = always use full MCTS.
             warmup_positions: Fill buffer to this many positions before
                 training begins. 0 = no warmup.
             eval_config: If set, run evaluation vs Mzinga periodically.
@@ -112,7 +109,7 @@ class SelfPlayTrainer:
                 print(f"  Buffer: {len(replay_buffer)}/{warmup_positions}")
             print(f"=== Warmup complete: {len(replay_buffer)} positions ===\n")
 
-        prev_was_mcts = False
+        prev_was_mcts = mcts_after == 0  # always-MCTS mode: no transition to detect
 
         for i in range(num_iterations):
             iteration = self.start_iteration + i + 1
@@ -126,29 +123,17 @@ class SelfPlayTrainer:
             elapsed_str = f" [{(time.time() - start_time) / 60:.1f}m]" if time_limit_minutes else ""
 
             # Determine whether to use fast or full MCTS
-            if mcts_after < 0:
-                # Always MCTS
-                use_mcts = True
-                mode_label = "MCTS"
-            elif mcts_after > 0:
-                # Legacy mode: one-time switch
+            if mcts_after > 0:
                 use_mcts = iteration > mcts_after
                 mode_label = "MCTS" if use_mcts else "fast"
             else:
-                # Cycling mode
-                cycle_len = fast_iters + full_iters
-                cycle_pos = (iteration - 1) % cycle_len  # 0-based position in cycle
-                use_mcts = cycle_pos >= fast_iters
-                if use_mcts:
-                    full_pos = cycle_pos - fast_iters + 1
-                    mode_label = f"full {full_pos}/{full_iters}"
-                else:
-                    mode_label = f"fast {cycle_pos + 1}/{fast_iters}"
+                use_mcts = True
+                mode_label = "MCTS"
 
             from .rust_selfplay import RustFastSelfPlay, RustParallelSelfPlay
 
-            # Clear buffer on first MCTS iteration of each cycle
-            # so fast-mode uniform policy targets don't dilute MCTS data
+            # Clear buffer on transition from fast → MCTS so uniform policy
+            # targets from fast mode don't dilute MCTS data
             if use_mcts and not prev_was_mcts:
                 replay_buffer.clear()
                 self.trainer._last_restart = iteration
@@ -424,11 +409,7 @@ def main():
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--parallel", type=int, default=8)
     parser.add_argument("--mcts-after", type=int, default=0,
-                        help="Use MCTS after this iteration (0=cycling mode, -1=always MCTS)")
-    parser.add_argument("--fast-iters", type=int, default=10,
-                        help="Fast iterations per cycle (cycling mode only)")
-    parser.add_argument("--full-iters", type=int, default=2,
-                        help="Full MCTS iterations per cycle (cycling mode only)")
+                        help="Use fast self-play until this iteration, then switch to full MCTS (0=always MCTS)")
     args = parser.parse_args()
 
     trainer = SelfPlayTrainer(
@@ -439,8 +420,7 @@ def main():
         num_iterations=args.iterations, games_per_iter=args.games,
         simulations=args.simulations, epochs_per_iter=args.epochs,
         batch_size=args.batch_size,
-        mcts_after=args.mcts_after, fast_iters=args.fast_iters,
-        full_iters=args.full_iters,
+        mcts_after=args.mcts_after,
     )
 
 
