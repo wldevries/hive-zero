@@ -181,8 +181,9 @@ class SelfPlayTrainer:
                   f"{total_positions / max(game_time, 0.1):.0f} pos/s), "
                   f"buffer: {len(replay_buffer)}")
 
-            # Count results and show board of first decisive game
+            # Count results and show boards of up to 3 decisive games side-by-side
             wins_w, wins_b, draws = 0, 0, 0
+            decisive_games = []
             from ..core.render import render_board
             for g in finished_games:
                 state = g.state if isinstance(g.state, str) else g.state.value
@@ -192,11 +193,18 @@ class SelfPlayTrainer:
                     wins_b += 1
                 else:
                     draws += 1
-                if state in ("WhiteWins", "BlackWins") and wins_w + wins_b == 1:
+                if state in ("WhiteWins", "BlackWins") and len(decisive_games) < 3:
+                    decisive_games.append(g)
+
+            if decisive_games:
+                labels, boards = [], []
+                for g in decisive_games:
+                    state = g.state if isinstance(g.state, str) else g.state.value
                     winner = "White" if state == "WhiteWins" else "Black"
                     move_count = g.move_count if hasattr(g, 'move_count') else len(g.move_history)
-                    print(f"  {winner} wins ({move_count} moves):")
-                    print(render_board(g))
+                    labels.append(f"{winner} wins ({move_count} moves)")
+                    boards.append(render_board(g))
+                print(_render_boards_horizontally(boards, labels=labels))
 
             # Update learning rate based on schedule
             self.trainer.update_lr(iteration)
@@ -392,6 +400,40 @@ class SelfPlayTrainer:
             print(f"  Eval failed: {e}")
         finally:
             self.model.train()
+
+
+def _render_boards_horizontally(board_strings: list[str], labels: list[str] | None = None, sep: str = "   ") -> str:
+    """Render multiple board strings side-by-side, handling ANSI escape codes."""
+    import re
+    _ANSI = re.compile(r'\033\[[0-9;]*m')
+
+    def visual_len(s: str) -> int:
+        return len(_ANSI.sub('', s))
+
+    boards_lines = [b.split('\n') for b in board_strings]
+    board_widths = [max((visual_len(line) for line in lines), default=0) for lines in boards_lines]
+
+    if labels:
+        board_widths = [max(w, len(labels[i])) for i, w in enumerate(board_widths)]
+
+    max_height = max(len(lines) for lines in boards_lines)
+    all_lines = []
+
+    if labels:
+        all_lines.append(sep.join(lbl.ljust(board_widths[i]) for i, lbl in enumerate(labels)))
+
+    for row in range(max_height):
+        parts = []
+        for bi, lines in enumerate(boards_lines):
+            if row < len(lines):
+                line = lines[row]
+                padding = board_widths[bi] - visual_len(line)
+                parts.append(line + ' ' * padding)
+            else:
+                parts.append(' ' * board_widths[bi])
+        all_lines.append(sep.join(parts))
+
+    return '\n'.join(all_lines)
 
 
 def main():
