@@ -46,12 +46,17 @@ class RustFastSelfPlay:
     """
 
     def __init__(self, model, device: str = "cpu", max_moves: int = 80,
-                 temperature: float = 1.0, temp_threshold: int = 30):
+                 temperature: float = 1.0, temp_threshold: int = 30,
+                 resign_threshold: float = -0.97, resign_moves: int = 5,
+                 calibration_frac: float = 0.1):
         self.model = model
         self.device = device
         self.max_moves = max_moves
         self.temperature = temperature
         self.temp_threshold = temp_threshold
+        self.resign_threshold = resign_threshold
+        self.resign_moves = resign_moves
+        self.calibration_frac = calibration_frac
 
     def play_games(self, num_games: int) -> tuple[list[list[tuple]], list]:
         """Play num_games using raw policy with Rust game engine."""
@@ -63,6 +68,18 @@ class RustFastSelfPlay:
         active = list(range(num_games))
         move_counts = [0] * num_games
         recent_positions = [[] for _ in range(num_games)]
+
+        # Resignation state
+        resign_counters = [0] * num_games
+        resigned_as: dict[int, str] = {}  # gi -> color that resigned
+        if self.resign_threshold is not None:
+            num_cal = max(1, int(num_games * self.calibration_frac))
+            calibration_games: set[int] = set(
+                np.random.choice(num_games, num_cal, replace=False).tolist()
+            )
+        else:
+            calibration_games = set()
+        calibration_would_resign: dict[int, str] = {}  # gi -> color that would have resigned
 
         while active:
             # Batch encode all active positions using Rust
@@ -78,16 +95,34 @@ class RustFastSelfPlay:
                 bt_batch = torch.tensor(np.stack(boards)).to(self.device)
                 rv_batch = torch.tensor(np.stack(reserves)).to(self.device)
                 with torch.no_grad():
-                    policy_logits, _ = self.model(bt_batch, rv_batch)
+                    policy_logits, value_logits = self.model(bt_batch, rv_batch)
                 policies = torch.softmax(policy_logits, dim=1).cpu().numpy()
+                values = value_logits.cpu().numpy().flatten()
             else:
                 policies = np.ones((len(active), POLICY_SIZE), dtype=np.float32) / POLICY_SIZE
+                values = None
 
             newly_finished = []
             for i, gi in enumerate(active):
                 game = games[gi]
                 move_num = move_counts[gi]
                 temp = self.temperature if move_num < self.temp_threshold else 0.0
+
+                # Resignation check (value is from current player's perspective)
+                if self.resign_threshold is not None and values is not None:
+                    val = float(values[i])
+                    if val < self.resign_threshold:
+                        resign_counters[gi] += 1
+                    else:
+                        resign_counters[gi] = 0
+                    if resign_counters[gi] >= self.resign_moves:
+                        if gi in calibration_games:
+                            if gi not in calibration_would_resign:
+                                calibration_would_resign[gi] = game.turn_color
+                        else:
+                            resigned_as[gi] = game.turn_color
+                            newly_finished.append(gi)
+                            continue
 
                 # Get legal moves and mask using Rust
                 mask, indexed_moves = game.get_legal_move_mask()
@@ -168,31 +203,43 @@ class RustFastSelfPlay:
 
             total_moves = sum(move_counts)
             finished = num_games - len(active)
+            resign_str = f", {len(resigned_as)} resigned" if resigned_as else ""
             print(f"\r  Games: {finished}/{num_games} done, "
                   f"{len(active)} active, "
-                  f"{total_moves} total moves", end="", flush=True)
+                  f"{total_moves} total moves{resign_str}", end="", flush=True)
 
         print()
 
         # Build samples with outcomes
         from ..core.pieces import PieceColor
         all_game_samples = []
-        wins_w, wins_b, draws = 0, 0, 0
+        wins_w, wins_b, draws, resignations = 0, 0, 0, 0
         for gi in range(num_games):
             game = games[gi]
-            state = game.state
-            if state == "WhiteWins":
-                outcome = {"w": 1.0, "b": -1.0}
+            if gi in resigned_as:
+                resigning_color = resigned_as[gi]
+                if resigning_color == "w":
+                    outcome = {"w": -1.0, "b": 1.0}
+                    wins_b += 1
+                else:
+                    outcome = {"w": 1.0, "b": -1.0}
+                    wins_w += 1
                 decisive = True
-                wins_w += 1
-            elif state == "BlackWins":
-                outcome = {"w": -1.0, "b": 1.0}
-                decisive = True
-                wins_b += 1
+                resignations += 1
             else:
-                outcome = _rust_heuristic_value(game)
-                decisive = False
-                draws += 1
+                state = game.state
+                if state == "WhiteWins":
+                    outcome = {"w": 1.0, "b": -1.0}
+                    decisive = True
+                    wins_w += 1
+                elif state == "BlackWins":
+                    outcome = {"w": -1.0, "b": 1.0}
+                    decisive = True
+                    wins_b += 1
+                else:
+                    outcome = _rust_heuristic_value(game)
+                    decisive = False
+                    draws += 1
 
             weight = DECISIVE_WEIGHT if decisive else 1.0
             samples = []
@@ -200,7 +247,20 @@ class RustFastSelfPlay:
                 samples.append((bt, rv, pv, outcome[color], weight))
             all_game_samples.append(samples)
 
-        print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}")
+        resign_suffix = f" (resigned={resignations})" if resignations else ""
+        print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}{resign_suffix}")
+
+        # Calibration report
+        if calibration_games and calibration_would_resign:
+            false_pos = 0
+            for gi, would_resign_color in calibration_would_resign.items():
+                state = games[gi].state
+                if (would_resign_color == "w" and state == "WhiteWins") or \
+                   (would_resign_color == "b" and state == "BlackWins"):
+                    false_pos += 1
+            print(f"  Calibration: {len(calibration_would_resign)}/{len(calibration_games)} "
+                  f"would resign, {false_pos} false positives")
+
         return all_game_samples, games
 
 
@@ -217,6 +277,8 @@ class RustParallelSelfPlay:
     def __init__(self, model, device: str = "cpu",
                  simulations: int = 100, max_moves: int = 200,
                  temperature: float = 1.0, temp_threshold: int = 30,
+                 resign_threshold: float = -0.97, resign_moves: int = 5,
+                 calibration_frac: float = 0.1,
                  **kwargs):
         self.model = model
         self.device = device
@@ -224,6 +286,9 @@ class RustParallelSelfPlay:
         self.max_moves = max_moves
         self.temperature = temperature
         self.temp_threshold = temp_threshold
+        self.resign_threshold = resign_threshold
+        self.resign_moves = resign_moves
+        self.calibration_frac = calibration_frac
 
     def _eval_batch(self, board_batch_4d, reserve_batch):
         """Evaluate a batch of positions. Returns (policies, values)."""
@@ -277,6 +342,18 @@ class RustParallelSelfPlay:
         active = set(range(num_games))
         finished_count = 0
 
+        # Resignation state
+        resign_counters = [0] * num_games
+        resigned_as: dict[int, str] = {}
+        if self.resign_threshold is not None:
+            num_cal = max(1, int(num_games * self.calibration_frac))
+            calibration_games: set[int] = set(
+                np.random.choice(num_games, num_cal, replace=False).tolist()
+            )
+        else:
+            calibration_games = set()
+        calibration_would_resign: dict[int, str] = {}
+
         while active:
             # --- Handle passes ---
             mcts_games = []
@@ -305,7 +382,7 @@ class RustParallelSelfPlay:
 
             board_batch = np.concatenate(board_list)
             reserve_batch = np.concatenate(reserve_list)
-            init_policies, _ = self._eval_batch(board_batch, reserve_batch)
+            init_policies, init_values = self._eval_batch(board_batch, reserve_batch)
 
             # --- Init batch MCTS (rayon-parallel) ---
             batch_mcts = RustBatchMCTS(
@@ -347,6 +424,24 @@ class RustParallelSelfPlay:
                     continue
 
                 game = games[gi]
+
+                # Resignation check (value is from current player's perspective)
+                if self.resign_threshold is not None:
+                    val = float(init_values[bi])
+                    if val < self.resign_threshold:
+                        resign_counters[gi] += 1
+                    else:
+                        resign_counters[gi] = 0
+                    if resign_counters[gi] >= self.resign_moves:
+                        if gi in calibration_games:
+                            if gi not in calibration_would_resign:
+                                calibration_would_resign[gi] = game.turn_color
+                        else:
+                            resigned_as[gi] = game.turn_color
+                            active.discard(gi)
+                            finished_count += 1
+                            continue
+
                 move_num = move_counts[gi]
                 temp = self.temperature if move_num < self.temp_threshold else 0.0
                 bt, rv = positions[gi]
@@ -398,30 +493,42 @@ class RustParallelSelfPlay:
                     finished_count += 1
 
             total_moves = sum(move_counts)
+            resign_str = f", {len(resigned_as)} resigned" if resigned_as else ""
             print(f"\r  Games: {finished_count}/{num_games} done, "
                   f"{len(active)} active, "
-                  f"{total_moves} total moves", end="", flush=True)
+                  f"{total_moves} total moves{resign_str}", end="", flush=True)
 
         print()
 
         # Build samples with outcomes
         all_game_samples = []
-        wins_w, wins_b, draws = 0, 0, 0
+        wins_w, wins_b, draws, resignations = 0, 0, 0, 0
         for gi in range(num_games):
             game = games[gi]
-            state = game.state
-            if state == "WhiteWins":
-                outcome = {"w": 1.0, "b": -1.0}
+            if gi in resigned_as:
+                resigning_color = resigned_as[gi]
+                if resigning_color == "w":
+                    outcome = {"w": -1.0, "b": 1.0}
+                    wins_b += 1
+                else:
+                    outcome = {"w": 1.0, "b": -1.0}
+                    wins_w += 1
                 decisive = True
-                wins_w += 1
-            elif state == "BlackWins":
-                outcome = {"w": -1.0, "b": 1.0}
-                decisive = True
-                wins_b += 1
+                resignations += 1
             else:
-                outcome = _rust_heuristic_value(game)
-                decisive = False
-                draws += 1
+                state = game.state
+                if state == "WhiteWins":
+                    outcome = {"w": 1.0, "b": -1.0}
+                    decisive = True
+                    wins_w += 1
+                elif state == "BlackWins":
+                    outcome = {"w": -1.0, "b": 1.0}
+                    decisive = True
+                    wins_b += 1
+                else:
+                    outcome = _rust_heuristic_value(game)
+                    decisive = False
+                    draws += 1
 
             weight = DECISIVE_WEIGHT if decisive else 1.0
             samples = []
@@ -429,5 +536,18 @@ class RustParallelSelfPlay:
                 samples.append((bt, rv, pv, outcome[color], weight))
             all_game_samples.append(samples)
 
-        print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}")
+        resign_suffix = f" (resigned={resignations})" if resignations else ""
+        print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}{resign_suffix}")
+
+        # Calibration report
+        if calibration_games and calibration_would_resign:
+            false_pos = 0
+            for gi, would_resign_color in calibration_would_resign.items():
+                state = games[gi].state
+                if (would_resign_color == "w" and state == "WhiteWins") or \
+                   (would_resign_color == "b" and state == "BlackWins"):
+                    false_pos += 1
+            print(f"  Calibration: {len(calibration_would_resign)}/{len(calibration_games)} "
+                  f"would resign, {false_pos} false positives")
+
         return all_game_samples, games

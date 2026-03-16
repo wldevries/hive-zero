@@ -11,6 +11,7 @@ A Python + Rust AI engine for the [Hive](https://boardgamegeek.com/boardgame/265
 - **Rayon-parallel MCTS**: Cross-game batched tree search with parallel CPU ops and batched GPU inference
 - **Dirichlet noise**: Applied to MCTS root during self-play for exploration
 - **Self-play training**: Automated pipeline with fast/MCTS cycling, warmup phase, and replay buffer
+- **Resignation**: Configurable threshold-based resignation during self-play (disabled during warmup); ~10% calibration games track false-positive rate
 - **Checkpoint evaluation**: Periodic self-play matches between the current model and best known model to prevent regressions
 
 ## Requirements

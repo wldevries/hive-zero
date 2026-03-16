@@ -50,7 +50,10 @@ class SelfPlayTrainer:
             eval_config: dict | None = None,
             checkpoint_eval_games: int | None = None,
             checkpoint_eval_simulations: int | None = None,
-            checkpoint_every: int = 20):
+            checkpoint_every: int = 20,
+            resign_threshold: float = -0.97,
+            resign_moves: int = 5,
+            calibration_frac: float = 0.1):
         """Run the full training loop.
 
         Args:
@@ -100,6 +103,7 @@ class SelfPlayTrainer:
                 sp = RustFastSelfPlay(
                     model=self.model, device=self.device,
                     max_moves=max_moves,
+                    resign_threshold=None,  # untrained network values are meaningless
                 )
                 all_game_samples, _ = sp.play_games(games_per_iter)
                 for samples in all_game_samples:
@@ -157,15 +161,22 @@ class SelfPlayTrainer:
             # Generate self-play games
             iter_start = time.time()
 
+            resign_kwargs = dict(
+                resign_threshold=resign_threshold,
+                resign_moves=resign_moves,
+                calibration_frac=calibration_frac,
+            )
             if use_mcts:
                 sp = RustParallelSelfPlay(
                     model=self.model, device=self.device,
                     simulations=simulations, max_moves=max_moves,
+                    **resign_kwargs,
                 )
             else:
                 sp = RustFastSelfPlay(
                     model=self.model, device=self.device,
                     max_moves=max_moves,
+                    **resign_kwargs,
                 )
 
             all_game_samples, finished_games = sp.play_games(games_per_iter)
