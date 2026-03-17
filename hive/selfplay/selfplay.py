@@ -48,6 +48,7 @@ class SelfPlayTrainer:
             checkpoint_eval_games: int | None = None,
             checkpoint_eval_simulations: int | None = None,
             checkpoint_every: int = 10,
+            checkpoint_eval: bool = False,
             resign_threshold: float = -0.97,
             resign_moves: int = 5,
             calibration_frac: float = 0.1,
@@ -82,11 +83,12 @@ class SelfPlayTrainer:
 
         # Bootstrap eval: if best_model.pt doesn't exist, run it immediately
         # rather than waiting until the next checkpoint iteration.
-        best_model_path = os.path.join(os.path.dirname(self.model_path) or ".", "best_model.pt")
-        if not os.path.exists(best_model_path):
-            eval_sims = checkpoint_eval_simulations if checkpoint_eval_simulations is not None else simulations
-            eval_games = checkpoint_eval_games if checkpoint_eval_games is not None else 2 * games_per_iter
-            self._run_checkpoint_eval(self.start_iteration, eval_sims, eval_games)
+        if checkpoint_eval:
+            best_model_path = os.path.join(os.path.dirname(self.model_path) or ".", "best_model.pt")
+            if not os.path.exists(best_model_path):
+                eval_sims = checkpoint_eval_simulations if checkpoint_eval_simulations is not None else simulations
+                eval_games = checkpoint_eval_games if checkpoint_eval_games is not None else 2 * games_per_iter
+                self._run_checkpoint_eval(self.start_iteration, eval_sims, eval_games)
 
         # Replay buffer: keep last ~50k positions across iterations
         replay_buffer = HiveDataset(max_size=50_000)
@@ -206,9 +208,10 @@ class SelfPlayTrainer:
                 ckpt_path = os.path.join(self.checkpoint_dir, f"model_iter{iteration:04d}.pt")
                 save_checkpoint(self.model, ckpt_path, iteration, metadata)
                 print(f"  Checkpoint saved to {ckpt_path}")
-                eval_sims = checkpoint_eval_simulations if checkpoint_eval_simulations is not None else simulations
-                eval_games = checkpoint_eval_games if checkpoint_eval_games is not None else 2 * games_per_iter
-                self._run_checkpoint_eval(iteration, eval_sims, eval_games)
+                if checkpoint_eval:
+                    eval_sims = checkpoint_eval_simulations if checkpoint_eval_simulations is not None else simulations
+                    eval_games = checkpoint_eval_games if checkpoint_eval_games is not None else 2 * games_per_iter
+                    self._run_checkpoint_eval(iteration, eval_sims, eval_games)
 
             print(f"  Model saved to {self.model_path} (iteration {iteration})")
 
