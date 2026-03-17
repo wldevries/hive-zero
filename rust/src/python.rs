@@ -466,6 +466,7 @@ pub struct PyBatchMCTS {
     c_puct: f32,
     leaf_batch_size: usize,
     use_forced_playouts: bool,
+    last_init_values: Vec<f32>,
 }
 
 #[pymethods]
@@ -481,7 +482,7 @@ impl PyBatchMCTS {
                 s
             })
             .collect();
-        PyBatchMCTS { searches, c_puct, leaf_batch_size, use_forced_playouts }
+        PyBatchMCTS { searches, c_puct, leaf_batch_size, use_forced_playouts, last_init_values: Vec::new() }
     }
 
     /// Initialize MCTS trees for all games with pre-computed policies.
@@ -641,14 +642,15 @@ impl PyBatchMCTS {
         }
     }
 
-    /// Run full simulation loop for active games, calling eval_fn for GPU batches.
+    /// Run simulation loop with per-game simulation caps.
+    /// Each game in active_indices has its own cap from per_game_caps.
+    /// Games that reach their cap stop producing leaves; others continue.
     /// eval_fn(boards_2d, reserves_2d) -> (policies_2d, values_1d)
-    /// This minimizes Python↔Rust round trips to one per simulation round.
     fn run_simulations(
         &mut self,
         py: Python<'_>,
         active_indices: Vec<usize>,
-        num_simulations: usize,
+        per_game_caps: Vec<usize>,
         eval_fn: &Bound<'_, PyAny>,
     ) {
         use rayon::prelude::*;
@@ -671,7 +673,7 @@ impl PyBatchMCTS {
 
             // Cap per-game batch to remaining simulations.
             let per_game_batch: Vec<usize> = searching.iter()
-                .map(|&si| (num_simulations - sims_done[si]).min(leaf_batch_size).max(1))
+                .map(|&si| (per_game_caps[si] - sims_done[si]).min(leaf_batch_size).max(1))
                 .collect();
 
             let results: Vec<(Vec<u32>, Vec<f32>, Vec<f32>)> = active_searches
@@ -705,7 +707,7 @@ impl PyBatchMCTS {
             }
 
             if total_leaves == 0 {
-                searching.retain(|&si| sims_done[si] < num_simulations);
+                searching.retain(|&si| sims_done[si] < per_game_caps[si]);
                 continue;
             }
 
@@ -762,8 +764,93 @@ impl PyBatchMCTS {
                 search.expand_and_backprop(&leaf_ids, &policies_vec, &values_vec);
             });
 
-            searching.retain(|&si| sims_done[si] < num_simulations);
+            searching.retain(|&si| sims_done[si] < per_game_caps[si]);
         }
+    }
+
+    /// Combined init + dirichlet + simulate in a single call.
+    /// Reduces Python↔Rust round-trips from 5 to 2 per turn.
+    /// dirichlet_indices: batch indices (into active_indices) that get Dirichlet noise.
+    #[pyo3(signature = (active_indices, games, per_game_caps, dirichlet_indices, eval_fn))]
+    fn run_turn(
+        &mut self,
+        py: Python<'_>,
+        active_indices: Vec<usize>,
+        games: Vec<PyRef<PyGame>>,
+        per_game_caps: Vec<usize>,
+        dirichlet_indices: Vec<usize>,
+        eval_fn: &Bound<'_, PyAny>,
+    ) {
+        use rayon::prelude::*;
+
+        let board_size = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
+
+        // --- Encode all positions (rayon-parallel) ---
+        let game_clones: Vec<Game> = games.iter().map(|g| g.game.clone()).collect();
+        let num = active_indices.len();
+
+        let encoded: Vec<(Vec<f32>, Vec<f32>)> = game_clones.par_iter().map(|game| {
+            let mut board = vec![0.0f32; board_size];
+            let mut reserve = vec![0.0f32; RESERVE_SIZE];
+            crate::board_encoding::encode_board(game, &mut board, &mut reserve);
+            (board, reserve)
+        }).collect();
+
+        // Flatten into contiguous arrays for GPU
+        let mut all_boards = vec![0.0f32; num * board_size];
+        let mut all_reserves = vec![0.0f32; num * RESERVE_SIZE];
+        for (i, (board, reserve)) in encoded.iter().enumerate() {
+            all_boards[i * board_size..(i + 1) * board_size].copy_from_slice(board);
+            all_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE].copy_from_slice(reserve);
+        }
+
+        // --- GPU: initial policy eval ---
+        let board_arr = make_array2(py, &all_boards, num, board_size);
+        let board_4d = board_arr.reshape([num, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+        let reserve_arr = make_array2(py, &all_reserves, num, RESERVE_SIZE);
+
+        let result = eval_fn.call1((board_4d, reserve_arr)).expect("eval_fn call failed");
+        let tuple = result.downcast::<PyTuple>().expect("eval_fn must return tuple");
+        let policy_arr: PyReadonlyArray2<f32> = tuple.get_item(0).unwrap().extract().unwrap();
+        let init_values: PyReadonlyArray1<f32> = tuple.get_item(1).unwrap().extract().unwrap();
+
+        let policy_data = policy_arr.as_slice().unwrap();
+        // Store init values for Python to retrieve later
+        self.last_init_values = init_values.as_slice().unwrap().to_vec();
+
+        // --- Init MCTS trees (rayon-parallel) ---
+        let use_forced = self.use_forced_playouts;
+        let c_puct = self.c_puct;
+        let searches = &mut self.searches;
+
+        // Only reinit the active searches
+        let mut active_searches: Vec<(usize, &mut MctsSearch)> = Vec::with_capacity(num);
+        for (pos, &gi) in active_indices.iter().enumerate() {
+            let ptr = &mut searches[gi] as *mut MctsSearch;
+            active_searches.push((pos, unsafe { &mut *ptr }));
+        }
+
+        active_searches.par_iter_mut().for_each(|(pos, search)| {
+            search.c_puct = c_puct;
+            search.use_forced_playouts = use_forced;
+            let policy = &policy_data[*pos * POLICY_SIZE..(*pos + 1) * POLICY_SIZE];
+            search.init(&game_clones[*pos], policy);
+        });
+
+        // --- Apply Dirichlet noise to full-search games ---
+        for &bi in &dirichlet_indices {
+            let gi = active_indices[bi];
+            self.searches[gi].apply_root_dirichlet(0.3, 0.25);
+        }
+
+        // --- Run simulations with per-game caps ---
+        self.run_simulations(py, active_indices, per_game_caps, eval_fn);
+    }
+
+    /// Get the initial values from the last run_turn call.
+    /// Returns values in the same order as the active_indices passed to run_turn.
+    fn last_init_values(&self) -> Vec<f32> {
+        self.last_init_values.clone()
     }
 
     /// Get visit distributions for specified games.

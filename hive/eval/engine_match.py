@@ -333,7 +333,7 @@ class ModelEngine:
 
         batch_mcts = RustBatchMCTS(num_games=1, c_puct=1.5, leaf_batch_size=16)
         batch_mcts.init_searches([game], init_policy)
-        batch_mcts.run_simulations([0], self.simulations, eval_fn)
+        batch_mcts.run_simulations([0], [self.simulations], eval_fn)
 
         moves, probs = batch_mcts.visit_distributions([0])[0]
 
@@ -574,7 +574,7 @@ def run_parallel_match(
                         active.discard(gi)
 
             if searching:
-                batch_mcts.run_simulations(searching, engine.simulations, eval_fn)
+                batch_mcts.run_simulations(searching, [engine.simulations] * len(searching), eval_fn)
 
             # Collect results and play moves
             all_dists = batch_mcts.visit_distributions(list(range(len(game_indices))))

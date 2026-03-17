@@ -142,6 +142,15 @@ class RustParallelSelfPlay:
         # Playout cap randomization state
         use_playout_cap = self.playout_cap_p > 0
 
+        # Create batch MCTS once, reuse across turns
+        batch_mcts = RustBatchMCTS(
+            num_games=num_games,
+            c_puct=1.5,
+            leaf_batch_size=self.LEAF_BATCH_SIZE,
+            use_forced_playouts=True,
+        )
+        eval_fn = self._eval_fn()
+
         while active:
             # --- Handle passes ---
             mcts_games = []
@@ -167,73 +176,38 @@ class RustParallelSelfPlay:
             else:
                 is_full_search = {gi: True for gi in mcts_games}
 
-            # --- Record positions & batch initial policy eval ---
+            # --- Record positions for training ---
             positions = {}
-            board_list = []
-            reserve_list = []
             for gi in mcts_games:
                 bt, rv = games[gi].encode_board()
                 positions[gi] = (bt, rv)
-                board_list.append(np.asarray(bt).reshape(1, NUM_CH, GS, GS))
-                reserve_list.append(np.asarray(rv).reshape(1, -1))
 
-            board_batch = np.concatenate(board_list)
-            reserve_batch = np.concatenate(reserve_list)
-            init_policies, init_values = self._eval_batch(board_batch, reserve_batch)
-
-            # --- Init batch MCTS (rayon-parallel) ---
-            # Forced playouts + policy target pruning enabled for all games;
-            # only meaningful for full-search games that have Dirichlet noise
-            batch_mcts = RustBatchMCTS(
-                num_games=len(mcts_games),
-                c_puct=1.5,
-                leaf_batch_size=self.LEAF_BATCH_SIZE,
-                use_forced_playouts=True,
-            )
-            game_refs = [games[gi] for gi in mcts_games]
-            batch_mcts.init_searches(game_refs, init_policies)
-
-            # Only apply Dirichlet noise to full-search games
+            # --- Build per-game sim caps ---
+            per_game_caps = [
+                self.simulations if is_full_search[gi] else self.fast_cap
+                for gi in mcts_games
+            ]
             full_bis = [bi for bi, gi in enumerate(mcts_games) if is_full_search[gi]]
-            if full_bis:
-                batch_mcts.apply_root_dirichlet(full_bis)
 
-            # Map from batch index to game index
-            batch_to_gi = list(mcts_games)
+            # --- Combined init + dirichlet + simulate in single Rust call ---
+            game_refs = [games[gi] for gi in mcts_games]
+            batch_mcts.run_turn(
+                mcts_games, game_refs, per_game_caps, full_bis, eval_fn,
+            )
+
+            # --- Collect results: visit distributions, play moves ---
+            init_values = batch_mcts.last_init_values()
             child_counts = batch_mcts.root_child_counts()
+            # root_child_counts returns for ALL games; index by gi
+            all_dists = batch_mcts.visit_distributions(mcts_games)
 
-            # Split into fast and full search groups
-            fast_searching = []
-            full_searching = []
-            for bi, gi in enumerate(batch_to_gi):
-                if child_counts[bi] > 0:
-                    if is_full_search[gi]:
-                        full_searching.append(bi)
-                    else:
-                        fast_searching.append(bi)
-                else:
+            for bi, gi in enumerate(mcts_games):
+                if child_counts[gi] == 0:
                     games[gi].play_pass()
                     move_counts[gi] += 1
                     if games[gi].is_game_over or move_counts[gi] >= self.max_moves:
                         active.discard(gi)
                         finished_count += 1
-
-            # --- Run simulations: fast cap for fast games, full cap for full ---
-            if fast_searching:
-                batch_mcts.run_simulations(
-                    fast_searching, self.fast_cap, self._eval_fn(),
-                )
-            if full_searching:
-                batch_mcts.run_simulations(
-                    full_searching, self.simulations, self._eval_fn(),
-                )
-
-            # --- Collect results: visit distributions, play moves ---
-            all_bi = list(range(len(batch_to_gi)))
-            all_dists = batch_mcts.visit_distributions(all_bi)
-
-            for bi, gi in enumerate(batch_to_gi):
-                if child_counts[bi] == 0:
                     continue
 
                 game = games[gi]
