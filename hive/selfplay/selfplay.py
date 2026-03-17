@@ -44,7 +44,6 @@ class SelfPlayTrainer:
             simulations: int = 100, epochs_per_iter: int = 1,
             batch_size: int = 64, max_moves: int = 200,
             time_limit_minutes: float | None = None,
-            warmup_positions: int = 10_000,
             eval_config: dict | None = None,
             checkpoint_eval_games: int | None = None,
             checkpoint_eval_simulations: int | None = None,
@@ -57,8 +56,6 @@ class SelfPlayTrainer:
         """Run the full training loop.
 
         Args:
-            warmup_positions: Fill buffer to this many positions before
-                training begins. 0 = no warmup.
             eval_config: If set, run evaluation vs Mzinga periodically.
                 Keys: every, games, simulations, mzinga_path, mzinga_time.
             checkpoint_eval_games: Games per checkpoint self-eval (default 2x games_per_iter).
@@ -93,25 +90,6 @@ class SelfPlayTrainer:
 
         # Replay buffer: keep last ~50k positions across iterations
         replay_buffer = HiveDataset(max_size=50_000)
-
-        # Warmup: fill buffer before training starts using low-sim MCTS
-        if warmup_positions > 0 and self.start_iteration == 0:
-            from .rust_selfplay import RustParallelSelfPlay
-            print(f"=== Warmup: filling buffer to {warmup_positions} positions ===")
-            while len(replay_buffer) < warmup_positions:
-                sp = RustParallelSelfPlay(
-                    model=self.model, device=self.device,
-                    simulations=fast_cap if fast_cap > 0 else 20,
-                    max_moves=max_moves,
-                    resign_threshold=None,  # untrained network values are meaningless
-                )
-                all_game_samples, _ = sp.play_games(games_per_iter)
-                for samples in all_game_samples:
-                    for sample in samples:
-                        bt, rv, pv, vt, wt = sample[0], sample[1], sample[2], sample[3], sample[4]
-                        replay_buffer.add_sample(bt, rv, pv, vt, wt)
-                print(f"  Buffer: {len(replay_buffer)}/{warmup_positions}")
-            print(f"=== Warmup complete: {len(replay_buffer)} positions ===\n")
 
         cap_label = ""
         if playout_cap_p > 0:
@@ -150,23 +128,24 @@ class SelfPlayTrainer:
             play_time = time.time() - iter_start
 
             total_positions = 0
-            policy_positions = 0
+            skipped_fast = 0
             buf_start = time.time()
             for gi, samples in enumerate(all_game_samples):
                 for sample in samples:
                     bt, rv, pv, vt, wt = sample[0], sample[1], sample[2], sample[3], sample[4]
                     is_value_only = sample[5] if len(sample) > 5 else False
+                    if is_value_only:
+                        skipped_fast += 1
+                        continue
                     replay_buffer.add_sample(bt, rv, pv, vt, wt)
-                    if not is_value_only:
-                        policy_positions += 1
-                total_positions += len(samples)
+                    total_positions += 1
             buf_time = time.time() - buf_start
 
             game_time = time.time() - iter_start
-            policy_str = ""
-            if playout_cap_p > 0:
-                policy_str = f", {policy_positions} policy"
-            print(f"  {games_per_iter} games: {total_positions} positions{policy_str} "
+            fast_str = ""
+            if skipped_fast > 0:
+                fast_str = f" ({skipped_fast} fast-only skipped)"
+            print(f"  {games_per_iter} games: {total_positions} new positions{fast_str} "
                   f"(play={play_time:.1f}s, buf={buf_time:.1f}s, "
                   f"{total_positions / max(game_time, 0.1):.0f} pos/s), "
                   f"buffer: {len(replay_buffer)}")

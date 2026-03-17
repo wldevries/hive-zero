@@ -13,7 +13,7 @@ hive/
   nn/          - PyTorch AlphaZero-style model (policy + value heads), training loop
   uhp/         - UHP stdin/stdout protocol engine
   selfplay/    - Self-play training loop (Rust-only, no Python MCTS)
-    selfplay.py       - SelfPlayTrainer orchestrator, playout cap randomization, warmup
+    selfplay.py       - SelfPlayTrainer orchestrator, playout cap randomization
     rust_selfplay.py  - RustParallelSelfPlay (rayon-parallel batched MCTS, playout cap)
 rust/
   src/         - Rust game engine (PyO3 extension module `hive_engine`)
@@ -41,7 +41,6 @@ rust/
 ## Training Pipeline
 - **SGD + momentum 0.9** with cosine annealing + warm restarts (T_0=30, lr_max=0.05, lr_min=1e-5)
 - **1 epoch** per iteration (avoids overfitting on stale replay buffer data)
-- **Warmup phase**: fills replay buffer (default 10k positions) before first training
 - **Playout cap randomization**: per-turn random fast/full search (KataGo-style), fast turns train value only
 - **Symmetry augmentation** at buffer insertion time (12 hex symmetries), not during training
 - **Replay buffer**: 50k positions max, deque-based O(1) eviction
