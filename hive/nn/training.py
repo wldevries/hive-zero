@@ -33,16 +33,18 @@ class HiveDataset(Dataset):
         self.policy_targets = np.zeros((max_size, POLICY_SIZE), dtype=np.float32)
         self.value_targets = np.zeros(max_size, dtype=np.float32)
         self.weights = np.ones(max_size, dtype=np.float32)
+        self.value_only = np.zeros(max_size, dtype=np.bool_)
 
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
                    policy_target: np.ndarray, value_target: float,
-                   weight: float = 1.0):
+                   weight: float = 1.0, value_only: bool = False):
         idx = self._count % self.max_size
         self.board_tensors[idx] = board_tensor
         self.reserve_vectors[idx] = reserve_vector
         self.policy_targets[idx] = policy_target
         self.value_targets[idx] = value_target
         self.weights[idx] = weight
+        self.value_only[idx] = value_only
         self._count += 1
         self._size = min(self._size + 1, self.max_size)
 
@@ -60,6 +62,7 @@ class HiveDataset(Dataset):
             torch.from_numpy(self.policy_targets[idx].copy()),
             torch.tensor(self.value_targets[idx], dtype=torch.float32),
             torch.tensor(self.weights[idx], dtype=torch.float32),
+            torch.tensor(self.value_only[idx], dtype=torch.bool),
         )
 
 
@@ -134,21 +137,23 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
-        for board, reserve, policy_target, value_target, weight in loader:
+        for board, reserve, policy_target, value_target, weight, vo_mask in loader:
             board = board.to(self.device)
             reserve = reserve.to(self.device)
             policy_target = policy_target.to(self.device)
             value_target = value_target.to(self.device).unsqueeze(1)
             weight = weight.to(self.device)
+            vo_mask = vo_mask.to(self.device)
 
             policy_logits, value = self.model(board, reserve)
 
-            # Policy loss: weighted cross-entropy with target distribution
+            # Policy loss: weighted cross-entropy, masked for value-only samples
             log_probs = torch.log_softmax(policy_logits, dim=1)
             per_sample_policy = -(policy_target * log_probs).sum(dim=1)
-            policy_loss = (per_sample_policy * weight).mean()
+            policy_weight = weight * (~vo_mask).float()
+            policy_loss = (per_sample_policy * policy_weight).mean()
 
-            # Value loss: weighted MSE
+            # Value loss: weighted MSE (all samples contribute)
             per_sample_value = (value.squeeze(1) - value_target.squeeze(1)) ** 2
             value_loss = (per_sample_value * weight).mean()
 

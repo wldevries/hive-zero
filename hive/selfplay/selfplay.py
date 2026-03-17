@@ -130,23 +130,22 @@ class SelfPlayTrainer:
             play_time = time.time() - iter_start
 
             total_positions = 0
-            skipped_fast = 0
+            fast_positions = 0
             buf_start = time.time()
             for gi, samples in enumerate(all_game_samples):
                 for sample in samples:
                     bt, rv, pv, vt, wt = sample[0], sample[1], sample[2], sample[3], sample[4]
                     is_value_only = sample[5] if len(sample) > 5 else False
                     if is_value_only:
-                        skipped_fast += 1
-                        continue
-                    replay_buffer.add_sample(bt, rv, pv, vt, wt)
+                        fast_positions += 1
+                    replay_buffer.add_sample(bt, rv, pv, vt, wt, value_only=is_value_only)
                     total_positions += 1
             buf_time = time.time() - buf_start
 
             game_time = time.time() - iter_start
             fast_str = ""
-            if skipped_fast > 0:
-                fast_str = f" ({skipped_fast} fast-only skipped)"
+            if fast_positions > 0:
+                fast_str = f" ({fast_positions} value-only)"
             print(f"  {games_per_iter} games: {total_positions} new positions{fast_str} "
                   f"(play={play_time:.1f}s, buf={buf_time:.1f}s, "
                   f"{total_positions / max(game_time, 0.1):.0f} pos/s), "
