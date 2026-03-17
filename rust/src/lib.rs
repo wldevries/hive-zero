@@ -7,6 +7,7 @@ pub mod board_encoding;
 pub mod move_encoding;
 pub mod mcts;
 pub mod python;
+pub mod selfplay;
 
 use pyo3::prelude::*;
 
@@ -14,5 +15,6 @@ use pyo3::prelude::*;
 #[pymodule]
 fn hive_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     python::register(m)?;
+    selfplay::register(m)?;
     Ok(())
 }
