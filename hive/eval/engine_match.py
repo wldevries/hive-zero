@@ -452,6 +452,214 @@ def play_game(
                       move_count, move_list, game_string)
 
 
+def run_parallel_match(
+    engine1: ModelEngine,
+    engine2: ModelEngine,
+    num_games: int = 10,
+    max_moves: int = 200,
+    verbose: bool = True,
+    show_progress: bool = False,
+) -> dict:
+    """Run a match with all games played in parallel using batched MCTS.
+
+    Both engines must be ModelEngine instances. Games are played concurrently,
+    with MCTS evaluations batched per-model for GPU efficiency.
+    Even-indexed games: engine1=white, engine2=black.
+    Odd-indexed games: engine2=white, engine1=black.
+    """
+    import torch
+    from hive_engine import RustGame, RustBatchMCTS
+    from ..encoding.move_encoder import POLICY_SIZE
+
+    NUM_CH = 23
+    GS = 23
+
+    if verbose:
+        print(f"Match: {engine1.name} vs {engine2.name} ({num_games} games parallel)")
+
+    # Initialize all games
+    games = [RustGame() for _ in range(num_games)]
+    move_counts = [0] * num_games
+    active = set(range(num_games))
+    results: list[Optional[GameResult]] = [None] * num_games
+
+    # Track which engine plays which color per game
+    # Even games: engine1=white(0), engine2=black(1)
+    # Odd games: engine2=white(0), engine1=black(1)
+    def get_engine(gi: int, turn: int) -> ModelEngine:
+        """Return the engine that moves on this turn for game gi."""
+        is_white_turn = (turn % 2 == 0)
+        if gi % 2 == 0:
+            return engine1 if is_white_turn else engine2
+        else:
+            return engine2 if is_white_turn else engine1
+
+    def make_eval_fn(model, device):
+        def eval_fn(board_batch, reserve_batch):
+            board_4d = np.asarray(board_batch)
+            reserves = np.asarray(reserve_batch)
+            bt = torch.tensor(board_4d).to(device)
+            rv = torch.tensor(reserves).to(device)
+            with torch.no_grad():
+                policy_logits, values = model(bt, rv)
+            policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
+            vals = values.cpu().numpy().flatten()
+            return policy.astype(np.float32), vals.astype(np.float32)
+        return eval_fn
+
+    eval_fn1 = make_eval_fn(engine1.model, engine1.device)
+    eval_fn2 = make_eval_fn(engine2.model, engine2.device)
+
+    while active:
+        # Handle passes for games with no valid moves
+        for gi in list(active):
+            if not games[gi].valid_moves():
+                games[gi].play_pass()
+                move_counts[gi] += 1
+                if games[gi].is_game_over or move_counts[gi] >= max_moves:
+                    active.discard(gi)
+
+        if not active:
+            break
+
+        # Group active games by which engine needs to move
+        e1_games = []  # game indices where engine1 moves
+        e2_games = []  # game indices where engine2 moves
+        for gi in active:
+            eng = get_engine(gi, move_counts[gi])
+            if eng is engine1:
+                e1_games.append(gi)
+            else:
+                e2_games.append(gi)
+
+        # Process each engine's games as a batch
+        for engine, game_indices, eval_fn in [
+            (engine1, e1_games, eval_fn1),
+            (engine2, e2_games, eval_fn2),
+        ]:
+            if not game_indices:
+                continue
+
+            # Encode boards and get initial policies
+            board_list = []
+            reserve_list = []
+            for gi in game_indices:
+                bt, rv = games[gi].encode_board()
+                board_list.append(np.asarray(bt).reshape(1, NUM_CH, GS, GS))
+                reserve_list.append(np.asarray(rv).reshape(1, -1))
+
+            board_batch = np.concatenate(board_list)
+            reserve_batch = np.concatenate(reserve_list)
+            init_policies, _ = eval_fn(board_batch, reserve_batch)
+
+            # Set up batch MCTS
+            batch_mcts = RustBatchMCTS(
+                num_games=len(game_indices),
+                c_puct=1.5,
+                leaf_batch_size=512,
+            )
+            game_refs = [games[gi] for gi in game_indices]
+            batch_mcts.init_searches(game_refs, init_policies)
+
+            # Check which games have moves
+            child_counts = batch_mcts.root_child_counts()
+            searching = []
+            for bi, gi in enumerate(game_indices):
+                if child_counts[bi] > 0:
+                    searching.append(bi)
+                else:
+                    games[gi].play_pass()
+                    move_counts[gi] += 1
+                    if games[gi].is_game_over or move_counts[gi] >= max_moves:
+                        active.discard(gi)
+
+            if searching:
+                batch_mcts.run_simulations(searching, engine.simulations, eval_fn)
+
+            # Collect results and play moves
+            all_dists = batch_mcts.visit_distributions(list(range(len(game_indices))))
+            for bi, gi in enumerate(game_indices):
+                if child_counts[bi] == 0:
+                    continue
+
+                moves, probs = all_dists[bi]
+                if not moves:
+                    games[gi].play_pass()
+                    move_counts[gi] += 1
+                    if games[gi].is_game_over or move_counts[gi] >= max_moves:
+                        active.discard(gi)
+                    continue
+
+                # Always argmax in eval
+                best_idx = int(np.argmax(probs))
+                piece_str, from_pos, to_pos = moves[best_idx]
+                if piece_str == "pass":
+                    games[gi].play_pass()
+                else:
+                    games[gi].play_move(piece_str, from_pos, to_pos)
+
+                move_counts[gi] += 1
+                if games[gi].is_game_over or move_counts[gi] >= max_moves:
+                    active.discard(gi)
+
+        if show_progress:
+            done = num_games - len(active)
+            print(f"\r  Eval: {done}/{num_games} games done", end="", flush=True)
+
+    if show_progress:
+        print()
+
+    # Tally results
+    e1_wins = 0
+    e2_wins = 0
+    draws = 0
+    game_results = []
+
+    for gi in range(num_games):
+        state = games[gi].state
+        if gi % 2 == 0:
+            w_name, b_name = engine1.name, engine2.name
+        else:
+            w_name, b_name = engine2.name, engine1.name
+
+        if state == "WhiteWins":
+            result_str = "white"
+            if gi % 2 == 0:
+                e1_wins += 1
+            else:
+                e2_wins += 1
+        elif state == "BlackWins":
+            result_str = "black"
+            if gi % 2 == 0:
+                e2_wins += 1
+            else:
+                e1_wins += 1
+        else:
+            result_str = "draw"
+            draws += 1
+
+        game_results.append(GameResult(w_name, b_name, result_str, move_counts[gi]))
+
+    total = e1_wins + e2_wins + draws
+    summary = {
+        "engine1": engine1.name,
+        "engine2": engine2.name,
+        "engine1_wins": e1_wins,
+        "engine2_wins": e2_wins,
+        "draws": draws,
+        "total": total,
+        "engine1_score": (e1_wins + 0.5 * draws) / total if total else 0,
+        "results": game_results,
+        "training_samples": [],
+    }
+
+    if verbose:
+        print(f"  Results: {engine1.name} {e1_wins}W / {draws}D / {e2_wins}L")
+        print(f"  Score: {summary['engine1_score']:.0%}")
+
+    return summary
+
+
 def run_match(
     engine1: Engine,
     engine2: Engine,

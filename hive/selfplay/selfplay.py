@@ -237,7 +237,7 @@ class SelfPlayTrainer:
     def _run_checkpoint_eval(self, iteration: int, simulations: int, num_games: int):
         """Pit current model against best_model.pt. Winner becomes new best and model.pt."""
         import shutil
-        from ..eval.engine_match import ModelEngine, run_match
+        from ..eval.engine_match import ModelEngine, run_parallel_match
 
         WIN_THRESHOLD = 0.5
         best_model_path = os.path.join(os.path.dirname(self.model_path) or ".", "best_model.pt")
@@ -261,7 +261,7 @@ class SelfPlayTrainer:
             engine2 = ModelEngine(model=prev_model, device=self.device,
                                   simulations=simulations, name=f"prev-i{prev_iter}")
             try:
-                summary = run_match(engine1, engine2, num_games=num_games, max_moves=200, verbose=False, show_progress=True)
+                summary = run_parallel_match(engine1, engine2, num_games=num_games, max_moves=200, verbose=False, show_progress=True)
             finally:
                 self.model.train()
             score = summary["engine1_score"]
@@ -295,7 +295,7 @@ class SelfPlayTrainer:
         )
 
         try:
-            summary = run_match(challenger, defender, num_games=num_games, max_moves=200, verbose=False, show_progress=True)
+            summary = run_parallel_match(challenger, defender, num_games=num_games, max_moves=200, verbose=False, show_progress=True)
         finally:
             self.model.train()
 
