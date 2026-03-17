@@ -194,10 +194,13 @@ impl PySelfPlaySession {
     }
 
     /// Play all games to completion. Only calls eval_fn for GPU inference.
+    /// progress_fn(finished, total, active, total_moves, resigned) is called each turn.
+    #[pyo3(signature = (eval_fn, progress_fn=None))]
     fn play_games(
         &self,
         py: Python<'_>,
         eval_fn: &Bound<'_, PyAny>,
+        progress_fn: Option<&Bound<'_, PyAny>>,
     ) -> PySelfPlayResult {
         let cfg = &self.config;
         let num_games = cfg.num_games;
@@ -507,19 +510,14 @@ impl PySelfPlaySession {
                 }
             }
 
-            // Progress
-            let total_m: u32 = move_counts.iter().sum();
-            let num_resigned = resigned_as.iter().filter(|r| r.is_some()).count();
-            let resign_str = if num_resigned > 0 {
-                format!(", {} resigned", num_resigned)
-            } else {
-                String::new()
-            };
-            eprint!("\r  Games: {}/{} done, {} active, {} total moves{}",
-                finished_count, num_games, active.iter().filter(|&&a| a).count(),
-                total_m, resign_str);
+            // Progress callback
+            if let Some(pfn) = progress_fn {
+                let total_m: u32 = move_counts.iter().sum();
+                let num_resigned = resigned_as.iter().filter(|r| r.is_some()).count() as u32;
+                let num_active = active.iter().filter(|&&a| a).count() as u32;
+                let _ = pfn.call1((finished_count, num_games as u32, num_active, total_m, num_resigned));
+            }
         }
-        eprintln!(); // newline after progress
 
         // --- Build training samples with outcomes ---
         let mut result_board_data: Vec<f32> = Vec::new();

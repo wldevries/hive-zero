@@ -81,7 +81,15 @@ class RustParallelSelfPlay:
             calibration_frac=self.calibration_frac,
         )
 
-        return session.play_games(self._eval_fn())
+        def progress(finished, total, active, moves, resigned):
+            resign_str = f", {resigned} resigned" if resigned else ""
+            print(f"\r  Games: {finished}/{total} done, "
+                  f"{active} active, "
+                  f"{moves} total moves{resign_str}", end="", flush=True)
+
+        result = session.play_games(self._eval_fn(), progress)
+        print()  # newline after progress
+        return result
 
 
 def _render_boards_horizontally(board_strings: list[str], labels: list[str] | None = None, sep: str = "   ") -> str:
