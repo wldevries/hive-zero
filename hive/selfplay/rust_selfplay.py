@@ -186,10 +186,13 @@ class RustParallelSelfPlay:
             init_policies, init_values = self._eval_batch(board_batch, reserve_batch)
 
             # --- Init batch MCTS (rayon-parallel) ---
+            # Forced playouts + policy target pruning enabled for all games;
+            # only meaningful for full-search games that have Dirichlet noise
             batch_mcts = RustBatchMCTS(
                 num_games=len(mcts_games),
                 c_puct=1.5,
                 leaf_batch_size=self.LEAF_BATCH_SIZE,
+                use_forced_playouts=True,
             )
             game_refs = [games[gi] for gi in mcts_games]
             batch_mcts.init_searches(game_refs, init_policies)

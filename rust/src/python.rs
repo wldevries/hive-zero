@@ -465,21 +465,23 @@ pub struct PyBatchMCTS {
     searches: Vec<MctsSearch>,
     c_puct: f32,
     leaf_batch_size: usize,
+    use_forced_playouts: bool,
 }
 
 #[pymethods]
 impl PyBatchMCTS {
     #[new]
-    #[pyo3(signature = (num_games, c_puct=1.5, leaf_batch_size=16, capacity=100000))]
-    fn new(num_games: usize, c_puct: f32, leaf_batch_size: usize, capacity: usize) -> Self {
+    #[pyo3(signature = (num_games, c_puct=1.5, leaf_batch_size=16, capacity=100000, use_forced_playouts=false))]
+    fn new(num_games: usize, c_puct: f32, leaf_batch_size: usize, capacity: usize, use_forced_playouts: bool) -> Self {
         let searches: Vec<MctsSearch> = (0..num_games)
             .map(|_| {
                 let mut s = MctsSearch::new(capacity);
                 s.c_puct = c_puct;
+                s.use_forced_playouts = use_forced_playouts;
                 s
             })
             .collect();
-        PyBatchMCTS { searches, c_puct, leaf_batch_size }
+        PyBatchMCTS { searches, c_puct, leaf_batch_size, use_forced_playouts }
     }
 
     /// Initialize MCTS trees for all games with pre-computed policies.
@@ -491,8 +493,10 @@ impl PyBatchMCTS {
         // Collect game clones first (can't send PyRef across threads)
         let game_clones: Vec<Game> = games.iter().map(|g| g.game.clone()).collect();
 
+        let use_forced = self.use_forced_playouts;
         self.searches.par_iter_mut().enumerate().for_each(|(i, search)| {
             search.c_puct = self.c_puct;
+            search.use_forced_playouts = use_forced;
             let policy = &policy_data[i * POLICY_SIZE..(i + 1) * POLICY_SIZE];
             search.init(&game_clones[i], policy);
         });
@@ -763,11 +767,16 @@ impl PyBatchMCTS {
     }
 
     /// Get visit distributions for specified games.
+    /// Uses pruned distributions when forced playouts are enabled.
     fn visit_distributions(&self, game_indices: Vec<usize>)
         -> Vec<(Vec<(String, Option<(i8, i8)>, (i8, i8))>, Vec<f32>)>
     {
         game_indices.iter().map(|&gi| {
-            let dist = self.searches[gi].get_visit_distribution();
+            let dist = if self.use_forced_playouts {
+                self.searches[gi].get_pruned_visit_distribution()
+            } else {
+                self.searches[gi].get_visit_distribution()
+            };
             let moves: Vec<_> = dist.iter().map(|(mv, _)| {
                 match mv.piece {
                     Some(p) => (p.to_string(), mv.from, mv.to.unwrap()),
