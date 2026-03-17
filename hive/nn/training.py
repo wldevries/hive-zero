@@ -48,6 +48,23 @@ class HiveDataset(Dataset):
         self._count += 1
         self._size = min(self._size + 1, self.max_size)
 
+    def add_batch(self, board_tensors: np.ndarray, reserve_vectors: np.ndarray,
+                  policy_targets: np.ndarray, value_targets: np.ndarray,
+                  weights: np.ndarray, value_only: list[bool]):
+        """Bulk insert from contiguous arrays. Much faster than per-sample add."""
+        n = board_tensors.shape[0]
+        boards_flat = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
+        for i in range(n):
+            idx = self._count % self.max_size
+            self.board_tensors[idx] = boards_flat[i]
+            self.reserve_vectors[idx] = reserve_vectors[i]
+            self.policy_targets[idx] = policy_targets[i]
+            self.value_targets[idx] = value_targets[i]
+            self.weights[idx] = weights[i]
+            self.value_only[idx] = value_only[i]
+            self._count += 1
+            self._size = min(self._size + 1, self.max_size)
+
     def clear(self):
         self._count = 0
         self._size = 0

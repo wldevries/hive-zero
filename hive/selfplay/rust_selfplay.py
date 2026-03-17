@@ -1,52 +1,20 @@
 """Rust-accelerated self-play for training.
 
-Uses RustGame for game logic and encoding, keeping NN evaluation in Python/PyTorch.
-Falls back to Python self-play if Rust extension is not available.
+Uses RustSelfPlaySession for the full game loop in Rust,
+with Python only handling NN inference and training.
 """
 
 from __future__ import annotations
 import numpy as np
-from typing import Optional
-
-try:
-    from hive_engine import RustGame, RustMCTS
-    HAS_RUST = True
-except ImportError:
-    HAS_RUST = False
 
 from ..encoding.move_encoder import POLICY_SIZE
 
 
-DECISIVE_WEIGHT = 10.0  # upweight positions from games with a winner
-
-
-def _rust_heuristic_value(game: RustGame) -> dict[str, float]:
-    """Heuristic value for unfinished games using RustGame."""
-    state = game.state
-    if state == "WhiteWins":
-        return {"w": 1.0, "b": -1.0}
-    elif state == "BlackWins":
-        return {"w": -1.0, "b": 1.0}
-    elif state == "Draw":
-        return {"w": 0.0, "b": 0.0}
-
-    # Heuristic based on queen neighbor pressure + beetle-on-queen
-    w_score, b_score = game.heuristic_value()
-    return {"w": w_score, "b": b_score}
-
-
 class RustParallelSelfPlay:
-    """Batched MCTS self-play using Rust game engine with rayon parallelism.
+    """Self-play using Rust game loop with Python NN inference callback.
 
-    Cross-game batching: MCTS tree ops (select, encode, expand, backprop)
-    are parallelized across games with rayon, while NN inference is batched
-    into single GPU calls.
-
-    Supports playout cap randomization (KataGo): each turn is randomly
-    assigned as "full" (probability playout_cap_p) or "fast" (1-p).
-    Full turns use `simulations` playouts with Dirichlet noise and record
-    policy targets. Fast turns use `fast_cap` playouts without noise and
-    only contribute to value training.
+    The entire game loop (MCTS, move selection, training data collection)
+    runs in Rust. Python only provides the eval_fn for GPU inference.
     """
 
     LEAF_BATCH_SIZE = 512
@@ -68,31 +36,11 @@ class RustParallelSelfPlay:
         self.resign_threshold = resign_threshold
         self.resign_moves = resign_moves
         self.calibration_frac = calibration_frac
-        # Playout cap randomization: if playout_cap_p > 0, each turn has
-        # probability p of being a full search (simulations) and (1-p) of
-        # being a fast search (fast_cap). Only full-search turns record
-        # policy targets. playout_cap_p=0 disables (all turns are full).
         self.playout_cap_p = playout_cap_p
         self.fast_cap = fast_cap
 
-    def _eval_batch(self, board_batch_4d, reserve_batch):
-        """Evaluate a batch of positions. Returns (policies, values)."""
-        import torch
-        if self.model is None:
-            n = board_batch_4d.shape[0]
-            return (np.ones((n, POLICY_SIZE), dtype=np.float32) / POLICY_SIZE,
-                    np.zeros(n, dtype=np.float32))
-
-        bt = torch.tensor(board_batch_4d).to(self.device)
-        rv = torch.tensor(reserve_batch).to(self.device)
-        with torch.no_grad():
-            policy_logits, values = self.model(bt, rv)
-        policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
-        vals = values.cpu().numpy().flatten()
-        return policy.astype(np.float32), vals.astype(np.float32)
-
     def _eval_fn(self):
-        """Return a callable for Rust's run_simulations callback."""
+        """Return a callable for Rust's GPU inference callback."""
         import torch
         model = self.model
         device = self.device
@@ -114,249 +62,57 @@ class RustParallelSelfPlay:
 
         return eval_fn
 
-    def play_games(self, num_games: int) -> tuple[list[list[tuple]], list]:
-        """Play num_games with cross-game batched MCTS + rayon parallelism."""
-        from hive_engine import RustBatchMCTS
+    def play_games(self, num_games: int):
+        """Play num_games entirely in Rust. Returns SelfPlayResult."""
+        from hive_engine import RustSelfPlaySession
 
-        NUM_CH = 23
-        GS = 23
-
-        games = [RustGame() for _ in range(num_games)]
-        histories = [[] for _ in range(num_games)]
-        move_counts = [0] * num_games
-        active = set(range(num_games))
-        finished_count = 0
-
-        # Resignation state
-        resign_counters = [0] * num_games
-        resigned_as: dict[int, str] = {}
-        if self.resign_threshold is not None:
-            num_cal = max(1, int(num_games * self.calibration_frac))
-            calibration_games: set[int] = set(
-                np.random.choice(num_games, num_cal, replace=False).tolist()
-            )
-        else:
-            calibration_games = set()
-        calibration_would_resign: dict[int, str] = {}
-
-        # Playout cap randomization state
-        use_playout_cap = self.playout_cap_p > 0
-
-        # Create batch MCTS once, reuse across turns
-        batch_mcts = RustBatchMCTS(
+        session = RustSelfPlaySession(
             num_games=num_games,
+            simulations=self.simulations,
+            max_moves=self.max_moves,
+            temperature=self.temperature,
+            temp_threshold=self.temp_threshold,
+            playout_cap_p=self.playout_cap_p,
+            fast_cap=self.fast_cap,
             c_puct=1.5,
             leaf_batch_size=self.LEAF_BATCH_SIZE,
-            use_forced_playouts=True,
+            resign_threshold=self.resign_threshold,
+            resign_moves=self.resign_moves,
+            calibration_frac=self.calibration_frac,
         )
-        eval_fn = self._eval_fn()
 
-        while active:
-            # --- Handle passes ---
-            mcts_games = []
-            for gi in list(active):
-                if not games[gi].valid_moves():
-                    games[gi].play_pass()
-                    move_counts[gi] += 1
-                    if games[gi].is_game_over or move_counts[gi] >= self.max_moves:
-                        active.discard(gi)
-                        finished_count += 1
-                else:
-                    mcts_games.append(gi)
+        return session.play_games(self._eval_fn())
 
-            if not mcts_games:
-                continue
 
-            # --- Playout cap: decide fast vs full for each game this turn ---
-            if use_playout_cap:
-                is_full_search = {
-                    gi: np.random.random() < self.playout_cap_p
-                    for gi in mcts_games
-                }
+def _render_boards_horizontally(board_strings: list[str], labels: list[str] | None = None, sep: str = "   ") -> str:
+    """Render multiple board strings side-by-side, handling ANSI escape codes."""
+    import re
+    _ANSI = re.compile(r'\033\[[0-9;]*m')
+
+    def visual_len(s: str) -> int:
+        return len(_ANSI.sub('', s))
+
+    boards_lines = [b.split('\n') for b in board_strings]
+    board_widths = [max((visual_len(line) for line in lines), default=0) for lines in boards_lines]
+
+    if labels:
+        board_widths = [max(w, len(labels[i])) for i, w in enumerate(board_widths)]
+
+    max_height = max(len(lines) for lines in boards_lines)
+    all_lines = []
+
+    if labels:
+        all_lines.append(sep.join(lbl.ljust(board_widths[i]) for i, lbl in enumerate(labels)))
+
+    for row in range(max_height):
+        parts = []
+        for bi, lines in enumerate(boards_lines):
+            if row < len(lines):
+                line = lines[row]
+                padding = board_widths[bi] - visual_len(line)
+                parts.append(line + ' ' * padding)
             else:
-                is_full_search = {gi: True for gi in mcts_games}
+                parts.append(' ' * board_widths[bi])
+        all_lines.append(sep.join(parts))
 
-            # --- Record positions for training ---
-            positions = {}
-            for gi in mcts_games:
-                bt, rv = games[gi].encode_board()
-                positions[gi] = (bt, rv)
-
-            # --- Build per-game sim caps ---
-            per_game_caps = [
-                self.simulations if is_full_search[gi] else self.fast_cap
-                for gi in mcts_games
-            ]
-            full_bis = [bi for bi, gi in enumerate(mcts_games) if is_full_search[gi]]
-
-            # --- Combined init + dirichlet + simulate in single Rust call ---
-            game_refs = [games[gi] for gi in mcts_games]
-            batch_mcts.run_turn(
-                mcts_games, game_refs, per_game_caps, full_bis, eval_fn,
-            )
-
-            # --- Collect results: visit distributions, play moves ---
-            init_values = batch_mcts.last_init_values()
-            child_counts = batch_mcts.root_child_counts()
-            # root_child_counts returns for ALL games; index by gi
-            all_dists = batch_mcts.visit_distributions(mcts_games)
-
-            for bi, gi in enumerate(mcts_games):
-                if child_counts[gi] == 0:
-                    games[gi].play_pass()
-                    move_counts[gi] += 1
-                    if games[gi].is_game_over or move_counts[gi] >= self.max_moves:
-                        active.discard(gi)
-                        finished_count += 1
-                    continue
-
-                game = games[gi]
-
-                # Resignation check (value is from current player's perspective)
-                if self.resign_threshold is not None:
-                    val = float(init_values[bi])
-                    if val < self.resign_threshold:
-                        resign_counters[gi] += 1
-                    else:
-                        resign_counters[gi] = 0
-                    if resign_counters[gi] >= self.resign_moves:
-                        if gi in calibration_games:
-                            if gi not in calibration_would_resign:
-                                calibration_would_resign[gi] = game.turn_color
-                        else:
-                            resigned_as[gi] = game.turn_color
-                            active.discard(gi)
-                            finished_count += 1
-                            continue
-
-                move_num = move_counts[gi]
-                temp = self.temperature if move_num < self.temp_threshold else 0.0
-                bt, rv = positions[gi]
-
-                moves, visit_probs = all_dists[bi]
-                if not moves:
-                    game.play_pass()
-                    move_counts[gi] += 1
-                    if game.is_game_over or move_counts[gi] >= self.max_moves:
-                        active.discard(gi)
-                        finished_count += 1
-                    continue
-
-                # Apply temperature
-                probs = np.array(visit_probs, dtype=np.float32)
-                if temp == 0:
-                    best = np.argmax(probs)
-                    probs = np.zeros_like(probs)
-                    probs[best] = 1.0
-                else:
-                    probs = probs ** (1.0 / temp)
-                    total = probs.sum()
-                    if total > 0:
-                        probs /= total
-                    else:
-                        probs = np.ones_like(probs) / len(probs)
-
-                # Build policy vector for training
-                policy_vector = np.zeros(POLICY_SIZE, dtype=np.float32)
-                for (piece_str, from_pos, to_pos), prob in zip(moves, probs):
-                    if piece_str != "pass":
-                        idx = game.encode_move(piece_str, from_pos, to_pos)
-                        if 0 <= idx < POLICY_SIZE:
-                            policy_vector[idx] = prob
-
-                # Full search: record for both policy and value training
-                # Fast search: record for value training only (policy_vector=None)
-                if is_full_search[gi]:
-                    histories[gi].append((bt, rv, policy_vector, game.turn_color))
-                else:
-                    histories[gi].append((bt, rv, None, game.turn_color))
-
-                # Sample move (fast turns play strongest move for game quality)
-                if not is_full_search[gi]:
-                    move_idx = np.argmax(probs)
-                else:
-                    move_idx = np.random.choice(len(moves), p=probs)
-                piece_str, from_pos, to_pos = moves[move_idx]
-                if piece_str == "pass":
-                    game.play_pass()
-                else:
-                    game.play_move(piece_str, from_pos, to_pos)
-
-                move_counts[gi] += 1
-                if game.is_game_over or move_counts[gi] >= self.max_moves:
-                    active.discard(gi)
-                    finished_count += 1
-
-            total_moves = sum(move_counts)
-            resign_str = f", {len(resigned_as)} resigned" if resigned_as else ""
-            print(f"\r  Games: {finished_count}/{num_games} done, "
-                  f"{len(active)} active, "
-                  f"{total_moves} total moves{resign_str}", end="", flush=True)
-
-        print()
-
-        # Build samples with outcomes
-        all_game_samples = []
-        wins_w, wins_b, draws, resignations = 0, 0, 0, 0
-        for gi in range(num_games):
-            game = games[gi]
-            if gi in resigned_as:
-                resigning_color = resigned_as[gi]
-                if resigning_color == "w":
-                    outcome = {"w": -1.0, "b": 1.0}
-                    wins_b += 1
-                else:
-                    outcome = {"w": 1.0, "b": -1.0}
-                    wins_w += 1
-                decisive = True
-                resignations += 1
-            else:
-                state = game.state
-                if state == "WhiteWins":
-                    outcome = {"w": 1.0, "b": -1.0}
-                    decisive = True
-                    wins_w += 1
-                elif state == "BlackWins":
-                    outcome = {"w": -1.0, "b": 1.0}
-                    decisive = True
-                    wins_b += 1
-                else:
-                    outcome = _rust_heuristic_value(game)
-                    decisive = False
-                    draws += 1
-
-            weight = DECISIVE_WEIGHT if decisive else 1.0
-            samples = []
-            for bt, rv, pv, color in histories[gi]:
-                if pv is None:
-                    # Fast-search turn: value-only, zero policy
-                    pv = np.zeros(POLICY_SIZE, dtype=np.float32)
-                    samples.append((bt, rv, pv, outcome[color], weight, True))
-                else:
-                    samples.append((bt, rv, pv, outcome[color], weight, False))
-            all_game_samples.append(samples)
-
-        resign_suffix = f" (resigned={resignations})" if resignations else ""
-        if use_playout_cap:
-            total_turns = sum(len(h) for h in histories)
-            full_turns = sum(
-                1 for h in histories for entry in h if entry[2] is not None
-            )
-            print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}{resign_suffix}")
-            print(f"  Playout cap: {full_turns}/{total_turns} full-search turns "
-                  f"({100*full_turns/max(total_turns,1):.0f}%)")
-        else:
-            print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}{resign_suffix}")
-
-        # Calibration report
-        if calibration_games and calibration_would_resign:
-            false_pos = 0
-            for gi, would_resign_color in calibration_would_resign.items():
-                state = games[gi].state
-                if (would_resign_color == "w" and state == "WhiteWins") or \
-                   (would_resign_color == "b" and state == "BlackWins"):
-                    false_pos += 1
-            print(f"  Calibration: {len(calibration_would_resign)}/{len(calibration_games)} "
-                  f"would resign, {false_pos} false positives")
-
-        return all_game_samples, games
+    return '\n'.join(all_lines)

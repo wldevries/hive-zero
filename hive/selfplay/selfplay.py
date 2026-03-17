@@ -126,55 +126,56 @@ class SelfPlayTrainer:
                 fast_cap=fast_cap,
             )
 
-            all_game_samples, finished_games = sp.play_games(games_per_iter)
+            result = sp.play_games(games_per_iter)
             play_time = time.time() - iter_start
 
-            total_positions = 0
-            fast_positions = 0
+            # Insert training data into replay buffer
             buf_start = time.time()
-            for gi, samples in enumerate(all_game_samples):
-                for sample in samples:
-                    bt, rv, pv, vt, wt = sample[0], sample[1], sample[2], sample[3], sample[4]
-                    is_value_only = sample[5] if len(sample) > 5 else False
-                    if is_value_only:
-                        fast_positions += 1
-                    replay_buffer.add_sample(bt, rv, pv, vt, wt, value_only=is_value_only)
-                    total_positions += 1
+            boards, reserves, policies, values, weights, value_only_flags = result.training_data()
+            replay_buffer.add_batch(boards, reserves, policies, values, weights, value_only_flags)
             buf_time = time.time() - buf_start
 
+            total_positions = result.num_samples
+            fast_positions = sum(value_only_flags)
             game_time = time.time() - iter_start
             fast_str = ""
             if fast_positions > 0:
                 fast_str = f" ({fast_positions} value-only)"
+
+            wins_w = result.wins_w
+            wins_b = result.wins_b
+            draws = result.draws
+            resign_suffix = f" (resigned={result.resignations})" if result.resignations else ""
+            print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}{resign_suffix}")
+            if result.use_playout_cap:
+                print(f"  Playout cap: {result.full_search_turns}/{result.total_turns} full-search turns "
+                      f"({100*result.full_search_turns/max(result.total_turns,1):.0f}%)")
+            if result.calibration_would_resign > 0:
+                print(f"  Calibration: {result.calibration_would_resign}/{result.calibration_total} "
+                      f"would resign, {result.calibration_false_positives} false positives")
             print(f"  {games_per_iter} games: {total_positions} new positions{fast_str} "
                   f"(play={play_time:.1f}s, buf={buf_time:.1f}s, "
                   f"{total_positions / max(game_time, 0.1):.0f} pos/s), "
                   f"buffer: {len(replay_buffer)}")
 
-            # Count results and show boards of up to 3 decisive games side-by-side
-            wins_w, wins_b, draws = 0, 0, 0
+            # Show boards of decisive games
+            finished_games = result.final_games()
             decisive_games = []
             from ..core.render import render_board
             for g in finished_games:
                 state = g.state if isinstance(g.state, str) else g.state.value
-                if state == "WhiteWins":
-                    wins_w += 1
-                elif state == "BlackWins":
-                    wins_b += 1
-                else:
-                    draws += 1
                 if state in ("WhiteWins", "BlackWins") and len(decisive_games) < 3:
                     decisive_games.append(g)
 
             if decisive_games:
-                labels, boards = [], []
+                labels, board_strs = [], []
                 for g in decisive_games:
                     state = g.state if isinstance(g.state, str) else g.state.value
                     winner = "White" if state == "WhiteWins" else "Black"
                     move_count = g.move_count if hasattr(g, 'move_count') else len(g.move_history)
                     labels.append(f"{winner} wins ({move_count} moves)")
-                    boards.append(render_board(g))
-                print(_render_boards_horizontally(boards, labels=labels))
+                    board_strs.append(render_board(g))
+                print(_render_boards_horizontally(board_strs, labels=labels))
 
             # Update learning rate based on schedule
             self.trainer.update_lr(iteration)
