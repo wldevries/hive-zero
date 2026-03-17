@@ -44,8 +44,8 @@ rust/
 - **Playout cap randomization**: per-turn random fast/full search (KataGo-style), fast turns train value only
 - **Symmetry augmentation** at buffer insertion time (12 hex symmetries), not during training
 - **Replay buffer**: 50k positions max, deque-based O(1) eviction
-- **Fast-cap turns**: no Dirichlet noise, play strongest move, value-only training (zero policy target)
-- **Heuristic value** for unfinished games: queen neighbor pressure + beetle-on-queen bonus
+- **Fast-cap turns**: no Dirichlet noise, play strongest move, added to buffer with value-only training (policy loss masked)
+- **Heuristic value** for unfinished games: queen neighbor pressure + beetle-on-queen bonus (no draw penalty)
 - **Rayon parallelism**: MCTS tree ops (select, encode, expand, backprop) parallelized across games
 - **RustBatchMCTS.run_simulations**: full simulation loop in Rust with single Python GPU callback per round
 

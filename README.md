@@ -10,9 +10,10 @@ A Python + Rust AI engine for the [Hive](https://boardgamegeek.com/boardgame/265
 - **Rust game engine**: PyO3-based Rust extension (`hive_engine`) for game simulation, MCTS, and board encoding
 - **Rayon-parallel MCTS**: Cross-game batched tree search with parallel CPU ops and batched GPU inference
 - **Dirichlet noise**: Applied to MCTS root during self-play for exploration
-- **Self-play training**: Automated pipeline with MCTS self-play, warmup phase, and replay buffer
+- **Self-play training**: Automated pipeline with MCTS self-play and replay buffer
+- **Playout cap randomization**: KataGo-style per-turn fast/full search; fast turns train value only, full turns train both policy and value
 - **Resignation**: Configurable threshold-based resignation during self-play (disabled during warmup); ~10% calibration games track false-positive rate
-- **Checkpoint evaluation**: Periodic self-play matches between the current model and best known model to prevent regressions
+- **Checkpoint evaluation**: Opt-in (`--checkpoint-eval`) self-play matches between the current model and best known model to prevent regressions
 
 ## Requirements
 
@@ -68,9 +69,10 @@ Key training flags:
 | `--blocks` | 6 | Residual blocks in network |
 | `--channels` | 64 | Channels in network |
 | `--max-moves` | 200 | Max moves per game |
-| `--mcts-after` | 0 | Use fast self-play until this iteration, then switch to full MCTS (0=always MCTS) |
-| `--warmup-positions` | 10000 | Fill buffer before training (0=skip) |
-| `--checkpoint-every` | 20 | Save checkpoint and run self-eval every N iterations |
+| `--playout-cap-p` | 0.0 | Probability of full search per turn (KataGo-style, 0=disabled) |
+| `--fast-cap` | 20 | Simulations for fast-search turns when playout cap is enabled |
+| `--checkpoint-every` | 10 | Save checkpoint every N iterations |
+| `--checkpoint-eval` | off | Enable self-play eval at each checkpoint |
 | `--time-limit` | None | Stop after N minutes |
 
 ### Checkpoint Evaluation
