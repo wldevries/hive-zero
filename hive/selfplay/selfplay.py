@@ -44,27 +44,26 @@ class SelfPlayTrainer:
             simulations: int = 100, epochs_per_iter: int = 1,
             batch_size: int = 64, max_moves: int = 200,
             time_limit_minutes: float | None = None,
-            mcts_after: int = 0,
-            warmup_positions: int = 10_000,
             eval_config: dict | None = None,
             checkpoint_eval_games: int | None = None,
             checkpoint_eval_simulations: int | None = None,
             checkpoint_every: int = 10,
             resign_threshold: float = -0.97,
             resign_moves: int = 5,
-            calibration_frac: float = 0.1):
+            calibration_frac: float = 0.1,
+            playout_cap_p: float = 0.0,
+            fast_cap: int = 20):
         """Run the full training loop.
 
         Args:
-            mcts_after: Use fast self-play until this iteration, then switch
-                to full MCTS. 0 = always use full MCTS.
-            warmup_positions: Fill buffer to this many positions before
-                training begins. 0 = no warmup.
             eval_config: If set, run evaluation vs Mzinga periodically.
                 Keys: every, games, simulations, mzinga_path, mzinga_time.
             checkpoint_eval_games: Games per checkpoint self-eval (default 2x games_per_iter).
             checkpoint_eval_simulations: Simulations for checkpoint eval.
                 Defaults to same as `simulations`.
+            playout_cap_p: Probability of full search per turn (0=disabled,
+                all turns are full). KataGo-style playout cap randomization.
+            fast_cap: Number of simulations for fast-search turns.
         """
         import time
         start_time = time.time()
@@ -92,24 +91,9 @@ class SelfPlayTrainer:
         # Replay buffer: keep last ~50k positions across iterations
         replay_buffer = HiveDataset(max_size=50_000)
 
-        # Warmup: fill buffer before training starts
-        if warmup_positions > 0 and self.start_iteration == 0:
-            from .rust_selfplay import RustFastSelfPlay
-            print(f"=== Warmup: filling buffer to {warmup_positions} positions ===")
-            while len(replay_buffer) < warmup_positions:
-                sp = RustFastSelfPlay(
-                    model=self.model, device=self.device,
-                    max_moves=max_moves,
-                    resign_threshold=None,  # untrained network values are meaningless
-                )
-                all_game_samples, _ = sp.play_games(games_per_iter)
-                for samples in all_game_samples:
-                    for bt, rv, pv, vt, wt in samples:
-                        replay_buffer.add_sample(bt, rv, pv, vt, wt)
-                print(f"  Buffer: {len(replay_buffer)}/{warmup_positions}")
-            print(f"=== Warmup complete: {len(replay_buffer)} positions ===\n")
-
-        prev_was_mcts = mcts_after == 0  # always-MCTS mode: no transition to detect
+        cap_label = ""
+        if playout_cap_p > 0:
+            cap_label = f" [cap p={playout_cap_p}, fast={fast_cap}]"
 
         for i in range(num_iterations):
             iteration = self.start_iteration + i + 1
@@ -122,61 +106,46 @@ class SelfPlayTrainer:
 
             elapsed_str = f" [{(time.time() - start_time) / 60:.1f}m]" if time_limit_minutes else ""
 
-            # Determine whether to use fast or full MCTS
-            if mcts_after > 0:
-                use_mcts = iteration > mcts_after
-                mode_label = "MCTS" if use_mcts else "fast"
-            else:
-                use_mcts = True
-                mode_label = "MCTS"
+            from .rust_selfplay import RustParallelSelfPlay
 
-            from .rust_selfplay import RustFastSelfPlay, RustParallelSelfPlay
-
-            # Clear buffer on transition from fast → MCTS so uniform policy
-            # targets from fast mode don't dilute MCTS data
-            if use_mcts and not prev_was_mcts:
-                replay_buffer.clear()
-                self.trainer._last_restart = iteration
-                self.trainer.update_lr(iteration)
-                print(f"\n  Buffer cleared + LR reset for MCTS phase")
-            prev_was_mcts = use_mcts
-
-            print(f"\n=== Iteration {iteration} [{mode_label}] [Rust]{elapsed_str} ===")
+            mode_label = "MCTS"
+            print(f"\n=== Iteration {iteration} [{mode_label}]{cap_label} [Rust]{elapsed_str} ===")
 
             # Generate self-play games
             iter_start = time.time()
 
-            resign_kwargs = dict(
+            sp = RustParallelSelfPlay(
+                model=self.model, device=self.device,
+                simulations=simulations, max_moves=max_moves,
                 resign_threshold=resign_threshold,
                 resign_moves=resign_moves,
                 calibration_frac=calibration_frac,
+                playout_cap_p=playout_cap_p,
+                fast_cap=fast_cap,
             )
-            if use_mcts:
-                sp = RustParallelSelfPlay(
-                    model=self.model, device=self.device,
-                    simulations=simulations, max_moves=max_moves,
-                    **resign_kwargs,
-                )
-            else:
-                sp = RustFastSelfPlay(
-                    model=self.model, device=self.device,
-                    max_moves=max_moves,
-                    **resign_kwargs,
-                )
 
             all_game_samples, finished_games = sp.play_games(games_per_iter)
             play_time = time.time() - iter_start
 
             total_positions = 0
+            skipped_fast = 0
             buf_start = time.time()
             for gi, samples in enumerate(all_game_samples):
-                for bt, rv, pv, vt, wt in samples:
+                for sample in samples:
+                    bt, rv, pv, vt, wt = sample[0], sample[1], sample[2], sample[3], sample[4]
+                    is_value_only = sample[5] if len(sample) > 5 else False
+                    if is_value_only:
+                        skipped_fast += 1
+                        continue
                     replay_buffer.add_sample(bt, rv, pv, vt, wt)
-                total_positions += len(samples)
+                    total_positions += 1
             buf_time = time.time() - buf_start
 
             game_time = time.time() - iter_start
-            print(f"  {games_per_iter} games: {total_positions} new positions "
+            fast_str = ""
+            if skipped_fast > 0:
+                fast_str = f" ({skipped_fast} fast-only skipped)"
+            print(f"  {games_per_iter} games: {total_positions} new positions{fast_str} "
                   f"(play={play_time:.1f}s, buf={buf_time:.1f}s, "
                   f"{total_positions / max(game_time, 0.1):.0f} pos/s), "
                   f"buffer: {len(replay_buffer)}")
@@ -217,7 +186,7 @@ class SelfPlayTrainer:
                       f"(policy={losses['policy_loss']:.4f}, value={losses['value_loss']:.4f}, lr={lr})")
 
             # Log to TSV
-            self._log.write(f"{iteration}\t{mode_label}\t{simulations}\t"
+            self._log.write(f"{iteration}\tMCTS\t{simulations}\t"
                             f"{wins_w}\t{wins_b}\t{draws}\t{total_positions}\t"
                             f"{len(replay_buffer)}\t{losses['total_loss']:.6f}\t"
                             f"{losses['policy_loss']:.6f}\t{losses['value_loss']:.6f}\t"
@@ -450,8 +419,6 @@ def main():
     parser.add_argument("--blocks", type=int, default=6)
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--parallel", type=int, default=8)
-    parser.add_argument("--mcts-after", type=int, default=0,
-                        help="Use fast self-play until this iteration, then switch to full MCTS (0=always MCTS)")
     args = parser.parse_args()
 
     trainer = SelfPlayTrainer(
@@ -462,7 +429,6 @@ def main():
         num_iterations=args.iterations, games_per_iter=args.games,
         simulations=args.simulations, epochs_per_iter=args.epochs,
         batch_size=args.batch_size,
-        mcts_after=args.mcts_after,
     )
 
 

@@ -39,237 +39,18 @@ def _rust_heuristic_value(game: RustGame) -> dict[str, float]:
     return {"w": w_score, "b": b_score}
 
 
-class RustFastSelfPlay:
-    """Fast self-play using Rust game engine + raw network policy (no MCTS).
-
-    Replaces FastSelfPlay with Rust-accelerated game logic and encoding.
-    """
-
-    def __init__(self, model, device: str = "cpu", max_moves: int = 80,
-                 temperature: float = 1.0, temp_threshold: int = 30,
-                 resign_threshold: float = -0.97, resign_moves: int = 5,
-                 calibration_frac: float = 0.1):
-        self.model = model
-        self.device = device
-        self.max_moves = max_moves
-        self.temperature = temperature
-        self.temp_threshold = temp_threshold
-        self.resign_threshold = resign_threshold
-        self.resign_moves = resign_moves
-        self.calibration_frac = calibration_frac
-
-    def play_games(self, num_games: int) -> tuple[list[list[tuple]], list]:
-        """Play num_games using raw policy with Rust game engine."""
-        import torch
-        import sys
-
-        games = [RustGame() for _ in range(num_games)]
-        histories = [[] for _ in range(num_games)]
-        active = list(range(num_games))
-        move_counts = [0] * num_games
-        recent_positions = [[] for _ in range(num_games)]
-
-        # Resignation state
-        resign_counters = [0] * num_games
-        resigned_as: dict[int, str] = {}  # gi -> color that resigned
-        if self.resign_threshold is not None:
-            num_cal = max(1, int(num_games * self.calibration_frac))
-            calibration_games: set[int] = set(
-                np.random.choice(num_games, num_cal, replace=False).tolist()
-            )
-        else:
-            calibration_games = set()
-        calibration_would_resign: dict[int, str] = {}  # gi -> color that would have resigned
-
-        while active:
-            # Batch encode all active positions using Rust
-            boards = []
-            reserves = []
-            for gi in active:
-                bt, rv = games[gi].encode_board()
-                boards.append(bt)
-                reserves.append(rv)
-
-            # Single GPU call for all active games
-            if self.model is not None:
-                bt_batch = torch.tensor(np.stack(boards)).to(self.device)
-                rv_batch = torch.tensor(np.stack(reserves)).to(self.device)
-                with torch.no_grad():
-                    policy_logits, value_logits = self.model(bt_batch, rv_batch)
-                policies = torch.softmax(policy_logits, dim=1).cpu().numpy()
-                values = value_logits.cpu().numpy().flatten()
-            else:
-                policies = np.ones((len(active), POLICY_SIZE), dtype=np.float32) / POLICY_SIZE
-                values = None
-
-            newly_finished = []
-            for i, gi in enumerate(active):
-                game = games[gi]
-                move_num = move_counts[gi]
-                temp = self.temperature if move_num < self.temp_threshold else 0.0
-
-                # Resignation check (value is from current player's perspective)
-                if self.resign_threshold is not None and values is not None:
-                    val = float(values[i])
-                    if val < self.resign_threshold:
-                        resign_counters[gi] += 1
-                    else:
-                        resign_counters[gi] = 0
-                    if resign_counters[gi] >= self.resign_moves:
-                        if gi in calibration_games:
-                            if gi not in calibration_would_resign:
-                                calibration_would_resign[gi] = game.turn_color
-                        else:
-                            resigned_as[gi] = game.turn_color
-                            newly_finished.append(gi)
-                            continue
-
-                # Get legal moves and mask using Rust
-                mask, indexed_moves = game.get_legal_move_mask()
-
-                if not indexed_moves:
-                    game.play_pass()
-                    move_counts[gi] += 1
-                    if game.is_game_over or move_counts[gi] >= self.max_moves:
-                        newly_finished.append(gi)
-                    continue
-
-                # Mask and normalize
-                policy = policies[i] * mask
-                total = policy.sum()
-                if total > 0:
-                    policy /= total
-                else:
-                    policy = mask / mask.sum()
-
-                # Dirichlet noise
-                num_legal = len(indexed_moves)
-                noise = np.random.dirichlet([0.3] * num_legal)
-                noise_full = np.zeros(POLICY_SIZE, dtype=np.float32)
-                for j, (idx, _, _, _) in enumerate(indexed_moves):
-                    noise_full[idx] = noise[j]
-                policy = 0.75 * policy + 0.25 * noise_full
-
-                # Policy target for training: uniform over legal moves
-                # (using the model's own output would be circular)
-                policy_vector = np.zeros(POLICY_SIZE, dtype=np.float32)
-                legal_probs = []
-                legal_moves = []
-                uniform_prob = 1.0 / len(indexed_moves)
-                for idx, piece_str, from_pos, to_pos in indexed_moves:
-                    policy_vector[idx] = uniform_prob
-                    legal_probs.append(policy[idx])
-                    legal_moves.append((piece_str, from_pos, to_pos))
-
-                # Repetition detection
-                # Use valid_moves as a position hash proxy
-                pos_key = frozenset(
-                    (piece_str, from_pos, to_pos)
-                    for piece_str, from_pos, to_pos in game.valid_moves()
-                )
-                recent = recent_positions[gi]
-                if recent.count(pos_key) >= 3:
-                    newly_finished.append(gi)
-                    continue
-                recent.append(pos_key)
-
-                # Record training data
-                histories[gi].append((boards[i], reserves[i], policy_vector, game.turn_color))
-                if len(recent) > 20:
-                    recent.pop(0)
-
-                # Sample move
-                legal_probs = np.array(legal_probs, dtype=np.float32)
-                if temp == 0:
-                    move_idx = np.argmax(legal_probs)
-                else:
-                    legal_probs = legal_probs ** (1.0 / temp)
-                    total = legal_probs.sum()
-                    if total > 0:
-                        legal_probs /= total
-                    else:
-                        legal_probs = np.ones(len(legal_probs)) / len(legal_probs)
-                    move_idx = np.random.choice(len(legal_moves), p=legal_probs)
-
-                piece_str, from_pos, to_pos = legal_moves[move_idx]
-                game.play_move(piece_str, from_pos, to_pos)
-                move_counts[gi] += 1
-
-                if game.is_game_over or move_counts[gi] >= self.max_moves:
-                    newly_finished.append(gi)
-
-            for gi in newly_finished:
-                active.remove(gi)
-
-            total_moves = sum(move_counts)
-            finished = num_games - len(active)
-            resign_str = f", {len(resigned_as)} resigned" if resigned_as else ""
-            print(f"\r  Games: {finished}/{num_games} done, "
-                  f"{len(active)} active, "
-                  f"{total_moves} total moves{resign_str}", end="", flush=True)
-
-        print()
-
-        # Build samples with outcomes
-        from ..core.pieces import PieceColor
-        all_game_samples = []
-        wins_w, wins_b, draws, resignations = 0, 0, 0, 0
-        for gi in range(num_games):
-            game = games[gi]
-            if gi in resigned_as:
-                resigning_color = resigned_as[gi]
-                if resigning_color == "w":
-                    outcome = {"w": -1.0, "b": 1.0}
-                    wins_b += 1
-                else:
-                    outcome = {"w": 1.0, "b": -1.0}
-                    wins_w += 1
-                decisive = True
-                resignations += 1
-            else:
-                state = game.state
-                if state == "WhiteWins":
-                    outcome = {"w": 1.0, "b": -1.0}
-                    decisive = True
-                    wins_w += 1
-                elif state == "BlackWins":
-                    outcome = {"w": -1.0, "b": 1.0}
-                    decisive = True
-                    wins_b += 1
-                else:
-                    outcome = _rust_heuristic_value(game)
-                    decisive = False
-                    draws += 1
-
-            weight = DECISIVE_WEIGHT if decisive else 1.0
-            samples = []
-            for bt, rv, pv, color in histories[gi]:
-                samples.append((bt, rv, pv, outcome[color], weight))
-            all_game_samples.append(samples)
-
-        resign_suffix = f" (resigned={resignations})" if resignations else ""
-        print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}{resign_suffix}")
-
-        # Calibration report
-        if calibration_games and calibration_would_resign:
-            false_pos = 0
-            for gi, would_resign_color in calibration_would_resign.items():
-                state = games[gi].state
-                if (would_resign_color == "w" and state == "WhiteWins") or \
-                   (would_resign_color == "b" and state == "BlackWins"):
-                    false_pos += 1
-            print(f"  Calibration: {len(calibration_would_resign)}/{len(calibration_games)} "
-                  f"would resign, {false_pos} false positives")
-
-        return all_game_samples, games
-
-
 class RustParallelSelfPlay:
     """Batched MCTS self-play using Rust game engine with rayon parallelism.
 
     Cross-game batching: MCTS tree ops (select, encode, expand, backprop)
     are parallelized across games with rayon, while NN inference is batched
     into single GPU calls.
+
+    Supports playout cap randomization (KataGo): each turn is randomly
+    assigned as "full" (probability playout_cap_p) or "fast" (1-p).
+    Full turns use `simulations` playouts with Dirichlet noise and record
+    policy targets. Fast turns use `fast_cap` playouts without noise and
+    only contribute to value training.
     """
 
     LEAF_BATCH_SIZE = 512
@@ -279,6 +60,8 @@ class RustParallelSelfPlay:
                  temperature: float = 1.0, temp_threshold: int = 30,
                  resign_threshold: float = -0.97, resign_moves: int = 5,
                  calibration_frac: float = 0.1,
+                 playout_cap_p: float = 0.0,
+                 fast_cap: int = 20,
                  **kwargs):
         self.model = model
         self.device = device
@@ -289,6 +72,12 @@ class RustParallelSelfPlay:
         self.resign_threshold = resign_threshold
         self.resign_moves = resign_moves
         self.calibration_frac = calibration_frac
+        # Playout cap randomization: if playout_cap_p > 0, each turn has
+        # probability p of being a full search (simulations) and (1-p) of
+        # being a fast search (fast_cap). Only full-search turns record
+        # policy targets. playout_cap_p=0 disables (all turns are full).
+        self.playout_cap_p = playout_cap_p
+        self.fast_cap = fast_cap
 
     def _eval_batch(self, board_batch_4d, reserve_batch):
         """Evaluate a batch of positions. Returns (policies, values)."""
@@ -354,6 +143,9 @@ class RustParallelSelfPlay:
             calibration_games = set()
         calibration_would_resign: dict[int, str] = {}
 
+        # Playout cap randomization state
+        use_playout_cap = self.playout_cap_p > 0
+
         while active:
             # --- Handle passes ---
             mcts_games = []
@@ -369,6 +161,15 @@ class RustParallelSelfPlay:
 
             if not mcts_games:
                 continue
+
+            # --- Playout cap: decide fast vs full for each game this turn ---
+            if use_playout_cap:
+                is_full_search = {
+                    gi: np.random.random() < self.playout_cap_p
+                    for gi in mcts_games
+                }
+            else:
+                is_full_search = {gi: True for gi in mcts_games}
 
             # --- Record positions & batch initial policy eval ---
             positions = {}
@@ -392,16 +193,25 @@ class RustParallelSelfPlay:
             )
             game_refs = [games[gi] for gi in mcts_games]
             batch_mcts.init_searches(game_refs, init_policies)
-            batch_mcts.apply_root_dirichlet(list(range(len(mcts_games))))
+
+            # Only apply Dirichlet noise to full-search games
+            full_bis = [bi for bi, gi in enumerate(mcts_games) if is_full_search[gi]]
+            if full_bis:
+                batch_mcts.apply_root_dirichlet(full_bis)
 
             # Map from batch index to game index
             batch_to_gi = list(mcts_games)
             child_counts = batch_mcts.root_child_counts()
 
-            searching = []  # batch indices with valid trees
+            # Split into fast and full search groups
+            fast_searching = []
+            full_searching = []
             for bi, gi in enumerate(batch_to_gi):
                 if child_counts[bi] > 0:
-                    searching.append(bi)
+                    if is_full_search[gi]:
+                        full_searching.append(bi)
+                    else:
+                        fast_searching.append(bi)
                 else:
                     games[gi].play_pass()
                     move_counts[gi] += 1
@@ -409,10 +219,14 @@ class RustParallelSelfPlay:
                         active.discard(gi)
                         finished_count += 1
 
-            # --- Run full simulation loop (rayon + single GPU callback) ---
-            if searching:
+            # --- Run simulations: fast cap for fast games, full cap for full ---
+            if fast_searching:
                 batch_mcts.run_simulations(
-                    searching, self.simulations, self._eval_fn(),
+                    fast_searching, self.fast_cap, self._eval_fn(),
+                )
+            if full_searching:
+                batch_mcts.run_simulations(
+                    full_searching, self.simulations, self._eval_fn(),
                 )
 
             # --- Collect results: visit distributions, play moves ---
@@ -477,10 +291,18 @@ class RustParallelSelfPlay:
                         if 0 <= idx < POLICY_SIZE:
                             policy_vector[idx] = prob
 
-                histories[gi].append((bt, rv, policy_vector, game.turn_color))
+                # Full search: record for both policy and value training
+                # Fast search: record for value training only (policy_vector=None)
+                if is_full_search[gi]:
+                    histories[gi].append((bt, rv, policy_vector, game.turn_color))
+                else:
+                    histories[gi].append((bt, rv, None, game.turn_color))
 
-                # Sample move
-                move_idx = np.random.choice(len(moves), p=probs)
+                # Sample move (fast turns play strongest move for game quality)
+                if not is_full_search[gi]:
+                    move_idx = np.argmax(probs)
+                else:
+                    move_idx = np.random.choice(len(moves), p=probs)
                 piece_str, from_pos, to_pos = moves[move_idx]
                 if piece_str == "pass":
                     game.play_pass()
@@ -533,11 +355,25 @@ class RustParallelSelfPlay:
             weight = DECISIVE_WEIGHT if decisive else 1.0
             samples = []
             for bt, rv, pv, color in histories[gi]:
-                samples.append((bt, rv, pv, outcome[color], weight))
+                if pv is None:
+                    # Fast-search turn: value-only, zero policy
+                    pv = np.zeros(POLICY_SIZE, dtype=np.float32)
+                    samples.append((bt, rv, pv, outcome[color], weight, True))
+                else:
+                    samples.append((bt, rv, pv, outcome[color], weight, False))
             all_game_samples.append(samples)
 
         resign_suffix = f" (resigned={resignations})" if resignations else ""
-        print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}{resign_suffix}")
+        if use_playout_cap:
+            total_turns = sum(len(h) for h in histories)
+            full_turns = sum(
+                1 for h in histories for entry in h if entry[2] is not None
+            )
+            print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}{resign_suffix}")
+            print(f"  Playout cap: {full_turns}/{total_turns} full-search turns "
+                  f"({100*full_turns/max(total_turns,1):.0f}%)")
+        else:
+            print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}{resign_suffix}")
 
         # Calibration report
         if calibration_games and calibration_would_resign:

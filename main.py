@@ -34,10 +34,10 @@ def main():
                               help="Max moves per self-play game")
     train_parser.add_argument("--time-limit", type=float, default=None,
                               help="Training time limit in minutes (stops after current iteration)")
-    train_parser.add_argument("--mcts-after", type=int, default=0,
-                              help="Use fast self-play until this iteration, then switch to full MCTS (0=always MCTS)")
-    train_parser.add_argument("--warmup-positions", type=int, default=10_000,
-                              help="Fill buffer to this many positions before training (0=skip)")
+    train_parser.add_argument("--playout-cap-p", type=float, default=0.0,
+                              help="Playout cap randomization: probability of full search per turn (0=disabled, 0.25=recommended)")
+    train_parser.add_argument("--fast-cap", type=int, default=20,
+                              help="Simulations for fast-search turns when playout cap is enabled (default: 20)")
     train_parser.add_argument("--checkpoint-every", type=int, default=10,
                               help="Save checkpoint and run self-eval every N iterations (default: 10)")
     train_parser.add_argument("--eval-every", type=int, default=0,
@@ -128,10 +128,10 @@ def main():
             simulations=args.simulations, epochs_per_iter=args.epochs,
             batch_size=args.batch_size, max_moves=args.max_moves,
             time_limit_minutes=args.time_limit,
-            mcts_after=args.mcts_after,
-            warmup_positions=args.warmup_positions,
             eval_config=eval_config,
             checkpoint_every=args.checkpoint_every,
+            playout_cap_p=args.playout_cap_p,
+            fast_cap=args.fast_cap,
         )
     else:
         # Default: UHP engine
