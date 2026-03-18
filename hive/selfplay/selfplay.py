@@ -34,6 +34,9 @@ class SelfPlayTrainer:
             params = sum(p.numel() for p in self.model.parameters())
             print(f"Resumed from {model_path} (iteration {self.start_iteration}, "
                   f"{blocks} blocks, {ch} channels, {params/1e6:.2f}M params)")
+            if blocks != num_blocks or ch != channels:
+                print(f"  WARNING: --blocks {num_blocks} --channels {channels} ignored "
+                      f"(checkpoint shape: {blocks} blocks, {ch} channels)")
         else:
             self.model = create_model(num_blocks, channels)
             print(f"Created new model ({num_blocks} blocks, {channels} channels)")
