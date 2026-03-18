@@ -48,6 +48,7 @@ struct SelfPlayConfig {
     leaf_batch_size: usize,
     resign_threshold: Option<f32>,
     resign_moves: u32,
+    resign_min_moves: u32,
     calibration_frac: f32,
 }
 
@@ -61,6 +62,7 @@ pub struct PySelfPlayResult {
     value_targets: Vec<f32>,
     weights: Vec<f32>,
     value_only_flags: Vec<bool>,
+    policy_only_flags: Vec<bool>,
     num_samples: usize,
     // Stats
     wins_w: u32,
@@ -84,13 +86,14 @@ pub struct PySelfPlayResult {
 impl PySelfPlayResult {
     /// Get training data as numpy arrays.
     /// Returns (boards[N,23,23,23], reserves[N,10], policies[N,6348],
-    ///          values[N], weights[N], value_only[N])
+    ///          values[N], weights[N], value_only[N], policy_only[N])
     fn training_data<'py>(&self, py: Python<'py>) -> (
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray1<f32>>,
         Bound<'py, PyArray1<f32>>,
+        Vec<bool>,
         Vec<bool>,
     ) {
         let n = self.num_samples;
@@ -113,6 +116,7 @@ impl PySelfPlayResult {
             PyArray1::from_owned_array_bound(py, values),
             PyArray1::from_owned_array_bound(py, weights),
             self.value_only_flags.clone(),
+            self.policy_only_flags.clone(),
         )
     }
 
@@ -168,6 +172,7 @@ impl PySelfPlaySession {
         leaf_batch_size = 512,
         resign_threshold = None,
         resign_moves = 5,
+        resign_min_moves = 20,
         calibration_frac = 0.1,
     ))]
     fn new(
@@ -182,13 +187,14 @@ impl PySelfPlaySession {
         leaf_batch_size: usize,
         resign_threshold: Option<f32>,
         resign_moves: u32,
+        resign_min_moves: u32,
         calibration_frac: f32,
     ) -> Self {
         PySelfPlaySession {
             config: SelfPlayConfig {
                 num_games, simulations, max_moves, temperature, temp_threshold,
                 playout_cap_p, fast_cap, c_puct, leaf_batch_size,
-                resign_threshold, resign_moves, calibration_frac,
+                resign_threshold, resign_moves, resign_min_moves, calibration_frac,
             },
         }
     }
@@ -399,7 +405,7 @@ impl PySelfPlaySession {
                 // Resignation check
                 if let Some(threshold) = cfg.resign_threshold {
                     let val = init_values[i];
-                    if val < threshold {
+                    if val < threshold && move_counts[gi] >= cfg.resign_min_moves {
                         resign_counters[gi] += 1;
                     } else {
                         resign_counters[gi] = 0;
@@ -515,7 +521,12 @@ impl PySelfPlaySession {
                 let total_m: u32 = move_counts.iter().sum();
                 let num_resigned = resigned_as.iter().filter(|r| r.is_some()).count() as u32;
                 let num_active = active.iter().filter(|&&a| a).count() as u32;
-                let _ = pfn.call1((finished_count, num_games as u32, num_active, total_m, num_resigned));
+                let max_turn: u32 = move_counts.iter().zip(active.iter())
+                    .filter(|(_, &a)| a)
+                    .map(|(&m, _)| m)
+                    .max()
+                    .unwrap_or(0);
+                let _ = pfn.call1((finished_count, num_games as u32, num_active, total_m, num_resigned, max_turn));
             }
         }
 
@@ -526,6 +537,7 @@ impl PySelfPlaySession {
         let mut result_value_targets: Vec<f32> = Vec::new();
         let mut result_weights: Vec<f32> = Vec::new();
         let mut result_value_only: Vec<bool> = Vec::new();
+        let mut result_policy_only: Vec<bool> = Vec::new();
         let mut num_samples = 0usize;
 
         let mut wins_w: u32 = 0;
@@ -554,6 +566,9 @@ impl PySelfPlaySession {
             };
 
             let weight = if decisive { DECISIVE_WEIGHT } else { 1.0 };
+            // Skip value training for timeout games with zero heuristic (balanced position,
+            // no meaningful signal for the value head).
+            let policy_only = !decisive && outcome_w == 0.0;
 
             for record in &histories[gi] {
                 let board = &board_buf[record.board_offset..record.board_offset + BOARD_SIZE];
@@ -569,6 +584,7 @@ impl PySelfPlaySession {
                 result_value_targets.push(value);
                 result_weights.push(weight);
                 result_value_only.push(record.is_value_only);
+                result_policy_only.push(policy_only);
                 num_samples += 1;
             }
         }
@@ -595,6 +611,7 @@ impl PySelfPlaySession {
             value_targets: result_value_targets,
             weights: result_weights,
             value_only_flags: result_value_only,
+            policy_only_flags: result_policy_only,
             num_samples,
             wins_w, wins_b, draws, resignations,
             total_moves: move_counts.iter().sum(),

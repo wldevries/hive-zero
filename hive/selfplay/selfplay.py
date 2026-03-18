@@ -70,11 +70,13 @@ class SelfPlayTrainer:
             checkpoint_eval: bool = False,
             resign_threshold: float = -0.97,
             resign_moves: int = 5,
+            resign_min_moves: int = 20,
             calibration_frac: float = 0.1,
             playout_cap_p: float = 0.0,
             fast_cap: int = 20,
             replay_window: int = 8,
-            leaf_batch_size: int = 512):
+            leaf_batch_size: int = 512,
+            comment: str = ""):
         """Run the full training loop.
 
         Args:
@@ -89,6 +91,7 @@ class SelfPlayTrainer:
         """
         import time
         start_time = time.time()
+        self._comment = comment
 
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
@@ -97,7 +100,7 @@ class SelfPlayTrainer:
         if self.start_iteration == 0:
             self._log = open(log_path, "w")
             self._log.write("iter\tmode\tsimulations\twins_w\twins_b\tdraws\tpositions\tbuffer\t"
-                            "loss\tpolicy_loss\tvalue_loss\tlr\tplay_s\n")
+                            "loss\tpolicy_loss\tvalue_loss\tlr\tplay_s\tcomment\n")
         else:
             self._log = open(log_path, "a")
         self._log.flush()
@@ -147,6 +150,7 @@ class SelfPlayTrainer:
                 simulations=simulations, max_moves=max_moves,
                 resign_threshold=resign_threshold,
                 resign_moves=resign_moves,
+                resign_min_moves=resign_min_moves,
                 calibration_frac=calibration_frac,
                 playout_cap_p=playout_cap_p,
                 fast_cap=fast_cap,
@@ -159,8 +163,8 @@ class SelfPlayTrainer:
 
             # Insert training data into replay buffer
             buf_start = time.time()
-            boards, reserves, policies, values, weights, value_only_flags = result.training_data()
-            replay_buffer.add_batch(boards, reserves, policies, values, weights, value_only_flags)
+            boards, reserves, policies, values, weights, value_only_flags, policy_only_flags = result.training_data()
+            replay_buffer.add_batch(boards, reserves, policies, values, weights, value_only_flags, policy_only_flags)
             buf_time = time.time() - buf_start
 
             total_positions = result.num_samples
@@ -222,7 +226,8 @@ class SelfPlayTrainer:
                             f"{wins_w}\t{wins_b}\t{draws}\t{total_positions}\t"
                             f"{len(replay_buffer)}\t{losses['total_loss']:.6f}\t"
                             f"{losses['policy_loss']:.6f}\t{losses['value_loss']:.6f}\t"
-                            f"{lr:.8f}\t{play_time:.1f}\n")
+                            f"{lr:.8f}\t{play_time:.1f}\t{self._comment}\n")
+            self._comment = ""
             self._log.flush()
 
             # Save latest model + periodic checkpoint
@@ -308,7 +313,7 @@ class SelfPlayTrainer:
             shutil.copy2(best_model_path, self.model_path)
             print(f"  {_cg(w)}W/{_cy(d)}D/{_cr(l)}L → best model: {winner_label}")
             self._log.write(f"{iteration}\tpit-bootstrap\t{simulations}\t{w}\t{l}\t{d}\t0\t0\t"
-                            f"{score:.6f}\t0\t0\t0\t0\n")
+                            f"{score:.6f}\t0\t0\t0\t0\t{self._comment}\n")
             self._log.flush()
             return
 
@@ -346,7 +351,7 @@ class SelfPlayTrainer:
         shutil.copy2(best_model_path, self.model_path)
 
         self._log.write(f"{iteration}\tpit\t{simulations}\t{w}\t{l}\t{d}\t0\t0\t"
-                        f"{score:.6f}\t0\t0\t0\t0\n")
+                        f"{score:.6f}\t0\t0\t0\t0\t{self._comment}\n")
         self._log.flush()
 
     def _run_eval(self, eval_config: dict, iteration: int, replay_buffer=None):
@@ -396,7 +401,7 @@ class SelfPlayTrainer:
             # Log to TSV
             self._log.write(f"{iteration}\teval\t{eval_config['simulations']}\t{w}\t{l}\t{d}\t{len(samples)}\t"
                             f"{len(replay_buffer) if replay_buffer else 0}\t"
-                            f"{score:.6f}\t0\t0\t0\t0\n")
+                            f"{score:.6f}\t0\t0\t0\t0\t{self._comment}\n")
             self._log.flush()
         except Exception as e:
             print(f"  Eval failed: {e}")

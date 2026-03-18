@@ -21,6 +21,7 @@ class RustParallelSelfPlay:
                  simulations: int = 100, max_moves: int = 200,
                  temperature: float = 1.0, temp_threshold: int = 30,
                  resign_threshold: float = -0.97, resign_moves: int = 5,
+                 resign_min_moves: int = 20,
                  calibration_frac: float = 0.1,
                  playout_cap_p: float = 0.0,
                  fast_cap: int = 20,
@@ -34,6 +35,7 @@ class RustParallelSelfPlay:
         self.temp_threshold = temp_threshold
         self.resign_threshold = resign_threshold
         self.resign_moves = resign_moves
+        self.resign_min_moves = resign_min_moves
         self.calibration_frac = calibration_frac
         self.playout_cap_p = playout_cap_p
         self.fast_cap = fast_cap
@@ -78,13 +80,14 @@ class RustParallelSelfPlay:
             leaf_batch_size=self.leaf_batch_size,
             resign_threshold=self.resign_threshold,
             resign_moves=self.resign_moves,
+            resign_min_moves=self.resign_min_moves,
             calibration_frac=self.calibration_frac,
         )
 
-        def progress(finished, total, active, moves, resigned):
+        def progress(finished, total, active, moves, resigned, max_turn=0):
             resign_str = f", {resigned} resigned" if resigned else ""
             print(f"\r  Games: {finished}/{total} done, "
-                  f"{active} active, "
+                  f"{active} active (turn {max_turn}), "
                   f"{moves} total moves{resign_str}", end="", flush=True)
 
         result = session.play_games(self._eval_fn(), progress)

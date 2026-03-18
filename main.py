@@ -56,6 +56,12 @@ def main():
                               help="Leaf batch size for self-play GPU inference (default: 512)")
     train_parser.add_argument("--lr", type=float, default=0.02,
                               help="Learning rate for SGD optimizer (default: 0.02)")
+    train_parser.add_argument("--resign-threshold", type=float, default=-0.97,
+                              help="Resign when value < threshold for N consecutive moves (default: -0.97)")
+    train_parser.add_argument("--resign-min-moves", type=int, default=20,
+                              help="Minimum move count before resign can trigger (default: 20)")
+    train_parser.add_argument("--comment", type=str, default="",
+                              help="Comment to append to every row in the training log")
     train_parser.add_argument("--mzinga-time", type=int, default=2,
                               help="Mzinga search time in seconds per move during eval")
 
@@ -117,6 +123,8 @@ def main():
                   max_moves=args.max_moves, verbose=args.verbose)
 
     elif args.command == "train":
+        if args.resign_threshold > 0:
+            parser.error(f"--resign-threshold must be negative (e.g. -0.95), got {args.resign_threshold}")
         from hive.selfplay.selfplay import SelfPlayTrainer
         trainer = SelfPlayTrainer(
             model_path=args.model, device=args.device,
@@ -143,6 +151,9 @@ def main():
             fast_cap=args.fast_cap,
             replay_window=args.replay_window,
             leaf_batch_size=args.play_batch_size,
+            resign_threshold=args.resign_threshold,
+            resign_min_moves=args.resign_min_moves,
+            comment=args.comment,
         )
     else:
         # Default: UHP engine

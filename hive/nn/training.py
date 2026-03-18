@@ -34,10 +34,11 @@ class HiveDataset(Dataset):
         self.value_targets = np.zeros(max_size, dtype=np.float32)
         self.weights = np.ones(max_size, dtype=np.float32)
         self.value_only = np.zeros(max_size, dtype=np.bool_)
+        self.policy_only = np.zeros(max_size, dtype=np.bool_)
 
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
                    policy_target: np.ndarray, value_target: float,
-                   weight: float = 1.0, value_only: bool = False):
+                   weight: float = 1.0, value_only: bool = False, policy_only: bool = False):
         idx = self._count % self.max_size
         self.board_tensors[idx] = board_tensor
         self.reserve_vectors[idx] = reserve_vector
@@ -45,12 +46,13 @@ class HiveDataset(Dataset):
         self.value_targets[idx] = value_target
         self.weights[idx] = weight
         self.value_only[idx] = value_only
+        self.policy_only[idx] = policy_only
         self._count += 1
         self._size = min(self._size + 1, self.max_size)
 
     def add_batch(self, board_tensors: np.ndarray, reserve_vectors: np.ndarray,
                   policy_targets: np.ndarray, value_targets: np.ndarray,
-                  weights: np.ndarray, value_only: list[bool]):
+                  weights: np.ndarray, value_only: list[bool], policy_only: list[bool]):
         """Bulk insert from contiguous arrays. Much faster than per-sample add."""
         n = board_tensors.shape[0]
         boards_flat = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
@@ -62,6 +64,7 @@ class HiveDataset(Dataset):
             self.value_targets[idx] = value_targets[i]
             self.weights[idx] = weights[i]
             self.value_only[idx] = value_only[i]
+            self.policy_only[idx] = policy_only[i]
             self._count += 1
             self._size = min(self._size + 1, self.max_size)
 
@@ -80,6 +83,7 @@ class HiveDataset(Dataset):
             torch.tensor(self.value_targets[idx], dtype=torch.float32),
             torch.tensor(self.weights[idx], dtype=torch.float32),
             torch.tensor(self.value_only[idx], dtype=torch.bool),
+            torch.tensor(self.policy_only[idx], dtype=torch.bool),
         )
 
 
@@ -111,13 +115,14 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
-        for board, reserve, policy_target, value_target, weight, vo_mask in loader:
+        for board, reserve, policy_target, value_target, weight, vo_mask, po_mask in loader:
             board = board.to(self.device)
             reserve = reserve.to(self.device)
             policy_target = policy_target.to(self.device)
             value_target = value_target.to(self.device).unsqueeze(1)
             weight = weight.to(self.device)
             vo_mask = vo_mask.to(self.device)
+            po_mask = po_mask.to(self.device)
 
             policy_logits, value = self.model(board, reserve)
 
@@ -127,9 +132,10 @@ class Trainer:
             policy_weight = weight * (~vo_mask).float()
             policy_loss = (per_sample_policy * policy_weight).mean()
 
-            # Value loss: weighted MSE (all samples contribute)
+            # Value loss: weighted MSE, masked for policy-only samples (zero-heuristic draws)
             per_sample_value = (value.squeeze(1) - value_target.squeeze(1)) ** 2
-            value_loss = (per_sample_value * weight).mean()
+            value_weight = weight * (~po_mask).float()
+            value_loss = (per_sample_value * value_weight).mean()
 
             # Combined loss
             loss = policy_loss + value_loss
