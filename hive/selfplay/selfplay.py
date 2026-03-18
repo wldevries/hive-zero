@@ -29,7 +29,11 @@ class SelfPlayTrainer:
         if os.path.exists(model_path):
             self.model, ckpt = load_checkpoint(model_path)
             self.start_iteration = ckpt.get("iteration", 0)
-            print(f"Resumed from {model_path} (iteration {self.start_iteration})")
+            blocks = len(self.model.res_blocks)
+            ch = self.model.input_conv.out_channels
+            params = sum(p.numel() for p in self.model.parameters())
+            print(f"Resumed from {model_path} (iteration {self.start_iteration}, "
+                  f"{blocks} blocks, {ch} channels, {params/1e6:.2f}M params)")
         else:
             self.model = create_model(num_blocks, channels)
             print(f"Created new model ({num_blocks} blocks, {channels} channels)")
@@ -51,7 +55,8 @@ class SelfPlayTrainer:
             calibration_frac: float = 0.1,
             playout_cap_p: float = 0.0,
             fast_cap: int = 20,
-            replay_window: int = 8):
+            replay_window: int = 8,
+            leaf_batch_size: int = 512):
         """Run the full training loop.
 
         Args:
@@ -130,6 +135,7 @@ class SelfPlayTrainer:
                 calibration_frac=calibration_frac,
                 playout_cap_p=playout_cap_p,
                 fast_cap=fast_cap,
+                leaf_batch_size=leaf_batch_size,
             )
 
             result = sp.play_games(games_per_iter)

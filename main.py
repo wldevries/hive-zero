@@ -23,7 +23,7 @@ def main():
                               help="MCTS simulations per move")
     train_parser.add_argument("--epochs", type=int, default=1,
                               help="Training epochs per iteration")
-    train_parser.add_argument("--batch-size", type=int, default=512)
+    train_parser.add_argument("--training-batch-size", type=int, default=512)
     train_parser.add_argument("--model", type=str, default="model.pt",
                               help="Model file path")
     train_parser.add_argument("--device", type=str, default="cuda",
@@ -52,6 +52,8 @@ def main():
                               help="MCTS simulations per move during eval")
     train_parser.add_argument("--mzinga-path", type=str, default="mzinga/MzingaEngine.exe",
                               help="Path to MzingaEngine for evaluation")
+    train_parser.add_argument("--play-batch-size", type=int, default=512,
+                              help="Leaf batch size for self-play GPU inference (default: 512)")
     train_parser.add_argument("--lr", type=float, default=0.02,
                               help="Learning rate for SGD optimizer (default: 0.02)")
     train_parser.add_argument("--mzinga-time", type=int, default=2,
@@ -132,7 +134,7 @@ def main():
         trainer.run(
             num_iterations=args.iterations, games_per_iter=args.games,
             simulations=args.simulations, epochs_per_iter=args.epochs,
-            batch_size=args.batch_size, max_moves=args.max_moves,
+            batch_size=args.training_batch_size, max_moves=args.max_moves,
             time_limit_minutes=args.time_limit,
             eval_config=eval_config,
             checkpoint_every=args.checkpoint_every,
@@ -140,6 +142,7 @@ def main():
             playout_cap_p=args.playout_cap_p,
             fast_cap=args.fast_cap,
             replay_window=args.replay_window,
+            leaf_batch_size=args.play_batch_size,
         )
     else:
         # Default: UHP engine

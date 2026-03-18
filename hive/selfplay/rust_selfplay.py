@@ -17,8 +17,6 @@ class RustParallelSelfPlay:
     runs in Rust. Python only provides the eval_fn for GPU inference.
     """
 
-    LEAF_BATCH_SIZE = 512
-
     def __init__(self, model, device: str = "cpu",
                  simulations: int = 100, max_moves: int = 200,
                  temperature: float = 1.0, temp_threshold: int = 30,
@@ -26,6 +24,7 @@ class RustParallelSelfPlay:
                  calibration_frac: float = 0.1,
                  playout_cap_p: float = 0.0,
                  fast_cap: int = 20,
+                 leaf_batch_size: int = 512,
                  **kwargs):
         self.model = model
         self.device = device
@@ -38,6 +37,7 @@ class RustParallelSelfPlay:
         self.calibration_frac = calibration_frac
         self.playout_cap_p = playout_cap_p
         self.fast_cap = fast_cap
+        self.leaf_batch_size = leaf_batch_size
 
     def _eval_fn(self):
         """Return a callable for Rust's GPU inference callback."""
@@ -75,7 +75,7 @@ class RustParallelSelfPlay:
             playout_cap_p=self.playout_cap_p,
             fast_cap=self.fast_cap,
             c_puct=1.5,
-            leaf_batch_size=self.LEAF_BATCH_SIZE,
+            leaf_batch_size=self.leaf_batch_size,
             resign_threshold=self.resign_threshold,
             resign_moves=self.resign_moves,
             calibration_frac=self.calibration_frac,
