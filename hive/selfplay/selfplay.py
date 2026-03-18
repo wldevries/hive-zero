@@ -6,6 +6,21 @@ import numpy as np
 import os
 from typing import Optional
 
+import colorama
+colorama.init()
+_RESET = colorama.Style.RESET_ALL
+_BRIGHT = colorama.Style.BRIGHT
+
+
+def _c(val, color: str) -> str:
+    return f"{color}{_BRIGHT}{val}{_RESET}"
+
+
+_cg = lambda v: _c(v, colorama.Fore.GREEN)    # wins
+_cy = lambda v: _c(v, colorama.Fore.YELLOW)   # draws / secondary losses
+_cr = lambda v: _c(v, colorama.Fore.RED)      # total loss / losses in eval
+_cc = lambda v: _c(v, colorama.Fore.CYAN)     # scores / percentages
+
 from ..encoding.move_encoder import POLICY_SIZE
 
 
@@ -125,10 +140,7 @@ class SelfPlayTrainer:
             # Generate self-play games
             iter_start = time.time()
             torch.cuda.empty_cache()
-            free, total = torch.cuda.mem_get_info()
-            alloc, reserv = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
-            spill = max(0, reserv - total)
-            print(f"  VRAM: {alloc/1e9:.2f}GB live, {reserv/1e9:.2f}GB reserved, {free/1e9:.2f}GB free / {total/1e9:.2f}GB" + (f", {spill/1e9:.2f}GB spill" if spill else ""))
+            _print_vram("pre-play")
 
             sp = RustParallelSelfPlay(
                 model=self.model, device=self.device,
@@ -143,6 +155,7 @@ class SelfPlayTrainer:
 
             result = sp.play_games(games_per_iter)
             play_time = time.time() - iter_start
+            _print_vram("post-play")
 
             # Insert training data into replay buffer
             buf_start = time.time()
@@ -161,7 +174,7 @@ class SelfPlayTrainer:
             wins_b = result.wins_b
             draws = result.draws
             resign_suffix = f" (resigned={result.resignations})" if result.resignations else ""
-            print(f"  Results: W={wins_w} B={wins_b} D/unfinished={draws}{resign_suffix}")
+            print(f"  Results: W={_cg(wins_w)} B={_cg(wins_b)} D/unfinished={_cy(draws)}{resign_suffix}")
             if result.use_playout_cap:
                 print(f"  Playout cap: {result.full_search_turns}/{result.total_turns} full-search turns "
                       f"({100*result.full_search_turns/max(result.total_turns,1):.0f}%)")
@@ -197,8 +210,12 @@ class SelfPlayTrainer:
             for epoch in range(epochs_per_iter):
                 losses = self.trainer.train_epoch(replay_buffer, batch_size=batch_size)
                 lr = self.trainer._current_lr
-                print(f"  Epoch {epoch + 1}: loss={losses['total_loss']:.4f} "
-                      f"(policy={losses['policy_loss']:.4f}, value={losses['value_loss']:.4f}, lr={lr})")
+                total_s = f"{losses['total_loss']:.4f}"
+                policy_s = f"{losses['policy_loss']:.4f}"
+                value_s = f"{losses['value_loss']:.4f}"
+                print(f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
+                      f"(policy={_cy(policy_s)}, value={_cy(value_s)}, lr={lr})")
+            _print_vram("post-train")
 
             # Log to TSV
             self._log.write(f"{iteration}\tMCTS\t{simulations}\t"
@@ -289,7 +306,7 @@ class SelfPlayTrainer:
                 winner_label = engine2.name
                 shutil.copy2(prev_ckpt, best_model_path)
             shutil.copy2(best_model_path, self.model_path)
-            print(f"  {w}W/{d}D/{l}L → best model: {winner_label}")
+            print(f"  {_cg(w)}W/{_cy(d)}D/{_cr(l)}L → best model: {winner_label}")
             self._log.write(f"{iteration}\tpit-bootstrap\t{simulations}\t{w}\t{l}\t{d}\t0\t0\t"
                             f"{score:.6f}\t0\t0\t0\t0\n")
             self._log.flush()
@@ -317,7 +334,7 @@ class SelfPlayTrainer:
 
         score = summary["engine1_score"]
         w, d, l = summary["engine1_wins"], summary["draws"], summary["engine2_wins"]
-        print(f"  {w}W/{d}D/{l}L (score: {score:.0%})", end="")
+        print(f"  {_cg(w)}W/{_cy(d)}D/{_cr(l)}L (score: {_cc(f'{score:.0%}')})", end="")
 
         if score >= WIN_THRESHOLD:
             save_checkpoint(self.model, best_model_path, iteration)
@@ -370,11 +387,11 @@ class SelfPlayTrainer:
             if replay_buffer is not None and samples:
                 for bt, rv, pv, vt, wt in samples:
                     replay_buffer.add_sample(bt, rv, pv, vt, wt)
-                print(f"  vs {summary['engine2']}: {w}W/{d}D/{l}L "
-                      f"(score: {score:.0%}, {len(samples)} samples -> buffer)")
+                print(f"  vs {summary['engine2']}: {_cg(w)}W/{_cy(d)}D/{_cr(l)}L "
+                      f"(score: {_cc(f'{score:.0%}')}, {len(samples)} samples -> buffer)")
             else:
-                print(f"  vs {summary['engine2']}: {w}W/{d}D/{l}L "
-                      f"(score: {score:.0%})")
+                print(f"  vs {summary['engine2']}: {_cg(w)}W/{_cy(d)}D/{_cr(l)}L "
+                      f"(score: {_cc(f'{score:.0%}')})")
 
             # Log to TSV
             self._log.write(f"{iteration}\teval\t{eval_config['simulations']}\t{w}\t{l}\t{d}\t{len(samples)}\t"
@@ -385,6 +402,22 @@ class SelfPlayTrainer:
             print(f"  Eval failed: {e}")
         finally:
             self.model.train()
+
+
+def _print_vram(label: str, enabled: bool = False) -> None:
+    """Print VRAM usage and warn if spilling into shared memory."""
+    if not torch.cuda.is_available():
+        return
+    free, total = torch.cuda.mem_get_info()
+    alloc = torch.cuda.memory_allocated()
+    reserv = torch.cuda.memory_reserved()
+    spill = max(0, reserv - total)
+    if spill:
+        print(f"  *** WARNING [{label}]: {spill/1e9:.2f}GB spilled into shared memory "
+              f"({reserv/1e9:.2f}GB reserved > {total/1e9:.2f}GB VRAM) ***")
+    if enabled:
+        print(f"  VRAM [{label}]: {alloc/1e9:.2f}GB live, {reserv/1e9:.2f}GB reserved, "
+              f"{free/1e9:.2f}GB free / {total/1e9:.2f}GB")
 
 
 def _render_boards_horizontally(board_strings: list[str], labels: list[str] | None = None, sep: str = "   ") -> str:
