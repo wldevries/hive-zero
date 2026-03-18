@@ -54,7 +54,8 @@ class SelfPlayTrainer:
             resign_moves: int = 5,
             calibration_frac: float = 0.1,
             playout_cap_p: float = 0.0,
-            fast_cap: int = 20):
+            fast_cap: int = 20,
+            replay_window: int = 8):
         """Run the full training loop.
 
         Args:
@@ -92,7 +93,7 @@ class SelfPlayTrainer:
                 self._run_checkpoint_eval(self.start_iteration, eval_sims, eval_games)
 
         # Replay buffer: keep last `replay_window` iterations of data (worst case: all games hit max_moves)
-        replay_buffer = HiveDataset(max_size=50_000)
+        replay_buffer = HiveDataset(max_size=replay_window * games_per_iter * max_moves)
 
         cap_label = ""
         if playout_cap_p > 0:
