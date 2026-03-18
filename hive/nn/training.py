@@ -84,65 +84,22 @@ class HiveDataset(Dataset):
 
 
 class Trainer:
-    """Trains the HiveNet model on self-play data.
-
-    Uses SGD with momentum and cosine annealing with warm restarts:
-      - LR decays from lr_max to lr_min following a cosine curve
-      - Every T_0 iterations, LR jumps back to lr_max (warm restart)
-      - Restarts help escape sharp local minima for better generalization
-    """
+    """Trains the HiveNet model on self-play data using SGD with momentum."""
 
     def __init__(self, model: Optional[HiveNet] = None,
                  weight_decay: float = 1e-4, device: str = "cpu",
-                 lr_max: float = 0.05, lr_min: float = 1e-5,
-                 t_0: int = 30, t_mult: int = 1):
+                 lr: float = 0.02):
         self.device = torch.device(device)
         self.model = model or create_model()
         self.model.to(self.device)
-        self.lr_max = lr_max
-        self.lr_min = lr_min
-        self.t_0 = t_0
-        self.t_mult = t_mult
         self.optimizer = optim.SGD(
-            self.model.parameters(), lr=lr_max,
+            self.model.parameters(), lr=lr,
             momentum=0.9, weight_decay=weight_decay,
         )
-        self._current_lr = lr_max
-        self._last_restart = 0
-        self._current_t = t_0
 
-    def fast_forward_lr(self, iteration: int):
-        """Fast-forward cosine schedule state to given iteration (for resume)."""
-        # Replay restart boundaries to find current cycle state
-        last_restart = 0
-        current_t = self.t_0
-        while last_restart + current_t <= iteration:
-            last_restart += current_t
-            current_t = current_t * self.t_mult
-        self._last_restart = last_restart
-        self._current_t = current_t
-        self.update_lr(iteration)
-
-    def update_lr(self, iteration: int):
-        """Update learning rate using cosine annealing with warm restarts."""
-        import math
-        # How far into the current restart cycle
-        elapsed = iteration - self._last_restart
-        if elapsed >= self._current_t:
-            # Warm restart
-            self._last_restart = iteration
-            self._current_t = self._current_t * self.t_mult
-            elapsed = 0
-        # Cosine decay within current cycle
-        target_lr = self.lr_min + 0.5 * (self.lr_max - self.lr_min) * (
-            1 + math.cos(math.pi * elapsed / self._current_t)
-        )
-        if abs(target_lr - self._current_lr) > 1e-8:
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = target_lr
-            if elapsed == 0 and iteration > 0:
-                print(f"  LR warm restart: {self._current_lr:.6f} -> {target_lr:.6f}")
-            self._current_lr = target_lr
+    @property
+    def _current_lr(self) -> float:
+        return self.optimizer.param_groups[0]['lr']
 
     def train_epoch(self, dataset: HiveDataset, batch_size: int = 64) -> dict:
         """Train one epoch. Returns loss dict."""

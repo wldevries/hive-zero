@@ -18,7 +18,7 @@ class SelfPlayTrainer:
 
     def __init__(self, model_path: str = "model.pt", device: str = "cpu",
                  num_blocks: int = 6, channels: int = 64,
-                 checkpoint_dir: str = "checkpoints"):
+                 checkpoint_dir: str = "checkpoints", lr: float = 0.02):
         self.model_path = model_path
         self.checkpoint_dir = checkpoint_dir
         self.device = device
@@ -35,11 +35,7 @@ class SelfPlayTrainer:
             print(f"Created new model ({num_blocks} blocks, {channels} channels)")
 
         self.model.to(device)
-        self.trainer = Trainer(self.model, device=device)
-        if self.start_iteration > 0:
-            # Start a fresh cosine cycle from the resume point
-            self.trainer._last_restart = self.start_iteration
-            self.trainer.update_lr(self.start_iteration)
+        self.trainer = Trainer(self.model, device=device, lr=lr)
 
     def run(self, num_iterations: int | None = None, games_per_iter: int = 10,
             simulations: int = 100, epochs_per_iter: int = 1,
@@ -187,9 +183,6 @@ class SelfPlayTrainer:
                     board_strs.append(render_board(g))
                 rendered = _render_boards_horizontally(board_strs, labels=labels)
                 print('\n'.join('    ' + line for line in rendered.split('\n')))
-
-            # Update learning rate based on schedule
-            self.trainer.update_lr(iteration)
 
             # Train on replay buffer
             for epoch in range(epochs_per_iter):

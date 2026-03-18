@@ -52,6 +52,8 @@ def main():
                               help="MCTS simulations per move during eval")
     train_parser.add_argument("--mzinga-path", type=str, default="mzinga/MzingaEngine.exe",
                               help="Path to MzingaEngine for evaluation")
+    train_parser.add_argument("--lr", type=float, default=0.02,
+                              help="Learning rate for SGD optimizer (default: 0.02)")
     train_parser.add_argument("--mzinga-time", type=int, default=2,
                               help="Mzinga search time in seconds per move during eval")
 
@@ -116,7 +118,7 @@ def main():
         from hive.selfplay.selfplay import SelfPlayTrainer
         trainer = SelfPlayTrainer(
             model_path=args.model, device=args.device,
-            num_blocks=args.blocks, channels=args.channels
+            num_blocks=args.blocks, channels=args.channels, lr=args.lr
         )
         eval_config = None
         if args.eval_every > 0:
