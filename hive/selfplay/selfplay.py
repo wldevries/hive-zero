@@ -40,7 +40,7 @@ class SelfPlayTrainer:
             self.trainer._last_restart = self.start_iteration
             self.trainer.update_lr(self.start_iteration)
 
-    def run(self, num_iterations: int = 100, games_per_iter: int = 10,
+    def run(self, num_iterations: int | None = None, games_per_iter: int = 10,
             simulations: int = 100, epochs_per_iter: int = 1,
             batch_size: int = 64, max_moves: int = 200,
             time_limit_minutes: float | None = None,
@@ -97,7 +97,8 @@ class SelfPlayTrainer:
         if playout_cap_p > 0:
             cap_label = f" [cap p={playout_cap_p}, fast={fast_cap}]"
 
-        for i in range(num_iterations):
+        import itertools
+        for i in (range(num_iterations) if num_iterations is not None else itertools.count()):
             iteration = self.start_iteration + i + 1
 
             if time_limit_minutes is not None:

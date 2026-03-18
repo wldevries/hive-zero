@@ -13,8 +13,10 @@ def main():
 
     # Training
     train_parser = subparsers.add_parser("train", help="Run self-play training")
-    train_parser.add_argument("--iterations", type=int, default=100,
-                              help="Number of training iterations")
+    train_parser.add_argument("--iterations", type=int, default=None,
+                              help="Number of training iterations (default: infinite)")
+    train_parser.add_argument("--time-limit", type=float, default=None,
+                              help="Training time limit in minutes (stops after current iteration)")
     train_parser.add_argument("--games", type=int, default=20,
                               help="Self-play games per iteration")
     train_parser.add_argument("--simulations", type=int, default=100,
@@ -32,8 +34,6 @@ def main():
                               help="Channels in network")
     train_parser.add_argument("--max-moves", type=int, default=200,
                               help="Max moves per self-play game")
-    train_parser.add_argument("--time-limit", type=float, default=None,
-                              help="Training time limit in minutes (stops after current iteration)")
     train_parser.add_argument("--playout-cap-p", type=float, default=0.0,
                               help="Playout cap randomization: probability of full search per turn (0=disabled, 0.25=recommended)")
     train_parser.add_argument("--fast-cap", type=int, default=20,
