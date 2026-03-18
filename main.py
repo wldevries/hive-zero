@@ -34,7 +34,7 @@ def main():
                               help="Channels in network")
     train_parser.add_argument("--max-moves", type=int, default=200,
                               help="Max moves per self-play game")
-    train_parser.add_argument("--playout-cap-p", type=float, default=0.0,
+train_parser.add_argument("--playout-cap-p", type=float, default=0.0,
                               help="Playout cap randomization: probability of full search per turn (0=disabled, 0.25=recommended)")
     train_parser.add_argument("--fast-cap", type=int, default=20,
                               help="Simulations for fast-search turns when playout cap is enabled (default: 20)")

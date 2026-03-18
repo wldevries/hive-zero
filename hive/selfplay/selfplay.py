@@ -1,6 +1,7 @@
 """Self-play training loop for Hive AI."""
 
 from __future__ import annotations
+import torch
 import numpy as np
 import os
 from typing import Optional
@@ -90,12 +91,14 @@ class SelfPlayTrainer:
                 eval_games = checkpoint_eval_games if checkpoint_eval_games is not None else 2 * games_per_iter
                 self._run_checkpoint_eval(self.start_iteration, eval_sims, eval_games)
 
-        # Replay buffer: keep last ~50k positions across iterations
+        # Replay buffer: keep last `replay_window` iterations of data (worst case: all games hit max_moves)
         replay_buffer = HiveDataset(max_size=50_000)
 
         cap_label = ""
         if playout_cap_p > 0:
-            cap_label = f" [cap p={playout_cap_p}, fast={fast_cap}]"
+            cap_label = f" [sims={simulations}, fast={fast_cap}, p={playout_cap_p}]"
+        else:
+            cap_label = f" [sims={simulations}]"
 
         import itertools
         for i in (range(num_iterations) if num_iterations is not None else itertools.count()):
@@ -112,10 +115,15 @@ class SelfPlayTrainer:
             from .rust_selfplay import RustParallelSelfPlay
 
             mode_label = "MCTS"
-            print(f"\n=== Iteration {iteration} [{mode_label}]{cap_label} [Rust]{elapsed_str} ===")
+            print(f"\n=== Iteration {iteration} [{mode_label}]{cap_label}{elapsed_str} ===")
 
             # Generate self-play games
             iter_start = time.time()
+            torch.cuda.empty_cache()
+            free, total = torch.cuda.mem_get_info()
+            alloc, reserv = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
+            spill = max(0, reserv - total)
+            print(f"  VRAM: {alloc/1e9:.2f}GB live, {reserv/1e9:.2f}GB reserved, {free/1e9:.2f}GB free / {total/1e9:.2f}GB" + (f", {spill/1e9:.2f}GB spill" if spill else ""))
 
             sp = RustParallelSelfPlay(
                 model=self.model, device=self.device,
@@ -176,7 +184,8 @@ class SelfPlayTrainer:
                     move_count = g.move_count if hasattr(g, 'move_count') else len(g.move_history)
                     labels.append(f"{winner} wins ({move_count} moves)")
                     board_strs.append(render_board(g))
-                print(_render_boards_horizontally(board_strs, labels=labels))
+                rendered = _render_boards_horizontally(board_strs, labels=labels)
+                print('\n'.join('    ' + line for line in rendered.split('\n')))
 
             # Update learning rate based on schedule
             self.trainer.update_lr(iteration)
