@@ -28,6 +28,8 @@ class Piece(NamedTuple):
     number: int  # 1-indexed (Queen is always 1)
 
     def __str__(self) -> str:
+        if self.piece_type == PieceType.QUEEN:
+            return f"{self.color.value}{self.piece_type.value}"
         return f"{self.color.value}{self.piece_type.value}{self.number}"
 
     @staticmethod

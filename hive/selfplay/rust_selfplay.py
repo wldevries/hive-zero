@@ -25,7 +25,7 @@ class RustParallelSelfPlay:
                  calibration_frac: float = 0.1,
                  playout_cap_p: float = 0.0,
                  fast_cap: int = 20,
-                 leaf_batch_size: int = 512,
+                 leaf_batch_size: int = 1,
                  **kwargs):
         self.model = model
         self.device = device

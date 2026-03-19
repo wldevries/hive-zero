@@ -263,11 +263,14 @@ class Game:
     def game_string(self) -> str:
         """Full UHP GameString."""
         parts = [self.game_type_string, self.state.value, self.turn_string]
+        replay = Game()
         for piece, from_pos, to_pos in self.move_history:
             if piece is None:
+                replay.play_pass()
                 parts.append("pass")
             else:
-                parts.append(self._move_to_uhp(piece, from_pos, to_pos))
+                replay.play_move(piece, from_pos, to_pos)
+                parts.append(replay._encode_move_string(piece, from_pos, to_pos))
         return ";".join(parts)
 
     def _move_to_uhp(self, piece: Piece, from_pos: Optional[Hex], to_pos: Hex) -> str:
@@ -324,10 +327,10 @@ class Game:
         dir_to_uhp = {
             0: ("", "-"),    # E:  refPiece-
             1: ("", "/"),    # NE: refPiece/
-            2: ("", "\\"),   # NW: refPiece\\  (but UHP shows this as just \)
+            2: ("\\", ""),   # NW: \refPiece  (prefix \)
             3: ("-", ""),    # W:  -refPiece
             4: ("/", ""),    # SW: /refPiece
-            5: ("\\", ""),   # SE: \\refPiece
+            5: ("", "\\"),   # SE: refPiece\  (suffix \)
         }
 
         for i, d in enumerate(DIRECTIONS):

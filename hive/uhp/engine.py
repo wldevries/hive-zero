@@ -17,9 +17,12 @@ ENGINE_VERSION = "0.1.0"
 class UHPEngine:
     """UHP-compliant engine communicating over stdin/stdout."""
 
-    def __init__(self):
+    def __init__(self, model=None, device: str = "cpu", simulations: int = 800):
         self.game: Optional[Game] = None
         self._running = True
+        self.model = model
+        self.device = device
+        self.simulations = simulations
 
     def run(self):
         """Main loop: read commands from stdin, write responses to stdout."""
@@ -172,52 +175,80 @@ class UHPEngine:
             self._respond("err Game is over")
             return
 
-        # Parse time or depth constraint
-        parts = args.strip().split()
-        if len(parts) >= 2:
-            constraint_type = parts[0].lower()
-            constraint_value = parts[1]
-        else:
-            constraint_type = "depth"
-            constraint_value = "1"
-
-        # For now, just pick the first valid move (placeholder for MCTS)
         valid = self.game.valid_moves()
         if not valid:
             self._respond("pass")
             return
 
-        # Determine simulations count
-        if constraint_type == "depth":
-            max_sims = int(constraint_value) * 100
-        else:
-            max_sims = 800
-
-        # Try Rust MCTS first, then Python MCTS, then fallback
+        # Build RustGame by replaying move history
         try:
-            from hive_engine import RustGame, RustMCTS
-            # Convert current game state to RustGame by replaying moves
-            rust_game = RustGame()
-            for hist_piece, hist_from, hist_to in self.game.move_history:
-                if hist_piece is None:
-                    rust_game.play_pass()
-                else:
-                    p_str = str(hist_piece)
-                    f = (hist_from.q, hist_from.r) if hist_from is not None else None
-                    t = (hist_to.q, hist_to.r)
-                    rust_game.play_move(p_str, f, t)
+            from hive_engine import RustGame, RustBatchMCTS
+        except ImportError:
+            piece, from_pos, to_pos = valid[0]
+            self._respond(self._format_move(piece, from_pos, to_pos))
+            return
 
-            mcts = RustMCTS()
-            # Uniform policy eval (no model loaded in UHP engine)
-            import numpy as np
+        rust_game = RustGame()
+        for hist_piece, hist_from, hist_to in self.game.move_history:
+            if hist_piece is None:
+                rust_game.play_pass()
+            else:
+                p_str = str(hist_piece)
+                f = (hist_from.q, hist_from.r) if hist_from is not None else None
+                t = (hist_to.q, hist_to.r)
+                rust_game.play_move(p_str, f, t)
+
+        import numpy as np
+
+        if self.model is not None:
+            import torch
             from ..encoding.move_encoder import POLICY_SIZE
+
+            model = self.model
+            device = self.device
+
+            def eval_fn(board_batch, reserve_batch):
+                b = torch.tensor(np.asarray(board_batch)).to(device)
+                r = torch.tensor(np.asarray(reserve_batch)).to(device)
+                with torch.no_grad():
+                    policy_logits, values = model(b, r)
+                policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
+                vals = values.cpu().numpy().flatten()
+                return policy.astype(np.float32), vals.astype(np.float32)
+
+            bt, rv = rust_game.encode_board()
+            bt = np.asarray(bt)
+            rv = np.asarray(rv)
+            init_policy, _ = eval_fn(bt.reshape(1, *bt.shape), rv.reshape(1, -1))
+
+            batch_mcts = RustBatchMCTS(num_games=1, c_puct=1.5, leaf_batch_size=16)
+            batch_mcts.init_searches([rust_game], init_policy)
+            batch_mcts.run_simulations([0], [self.simulations], eval_fn)
+
+            moves, probs = batch_mcts.visit_distributions([0])[0]
+            if not moves:
+                self._respond("pass")
+                return
+
+            best_idx = int(np.argmax(probs))
+            piece_str, from_pos, to_pos = moves[best_idx]
+            if piece_str == "pass":
+                self._respond("pass")
+                return
+            self._respond(rust_game.format_move_uhp(piece_str, from_pos, to_pos))
+        else:
+            # No model: uniform random MCTS via RustMCTS
+            from hive_engine import RustMCTS
+            from ..encoding.move_encoder import POLICY_SIZE
+
             def uniform_eval(board_batch, reserve_batch):
-                n = board_batch.shape[0]
+                n = np.asarray(board_batch).shape[0]
                 policy = np.ones((n, POLICY_SIZE), dtype=np.float32) / POLICY_SIZE
                 value = np.zeros(n, dtype=np.float32)
                 return policy, value
 
-            result = mcts.search(rust_game, uniform_eval, max_sims)
+            mcts = RustMCTS()
+            result = mcts.search(rust_game, uniform_eval, 200)
             if result is None:
                 self._respond("pass")
             else:
@@ -226,13 +257,6 @@ class UHPEngine:
                 fp = Hex(*from_pos) if from_pos is not None else None
                 tp = Hex(*to_pos)
                 self._respond(self._format_move(piece, fp, tp))
-            return
-        except ImportError:
-            pass
-
-        # Fallback: first valid move
-        piece, from_pos, to_pos = valid[0]
-        self._respond(self._format_move(piece, from_pos, to_pos))
 
     def _cmd_undo(self, args: str):
         if self.game is None:
