@@ -94,6 +94,8 @@ def main():
     pretrain_parser.add_argument("--checkpoint-dir", default="checkpoints")
     pretrain_parser.add_argument("--verbose-samples", action="store_true",
                                  help="Print skipped moves (useful for diagnosing bad SGFs)")
+    pretrain_parser.add_argument("--exclude-players", nargs="*", default=["Dumbot"],
+                                 help="Players to exclude from training data (default: Dumbot)")
 
     # Evaluation
     eval_parser = subparsers.add_parser("eval", help="Evaluate model against Mzinga")
@@ -124,6 +126,7 @@ def main():
         games = load_filtered_games(
             args.games_csv, args.elo_csv,
             min_elo=args.min_elo, min_games=args.min_games,
+            exclude_players=set(args.exclude_players),
         )
         print(f"  {len(games)} qualifying games (ELO≥{args.min_elo}, games≥{args.min_games})")
         print("Indexing zip archives...")

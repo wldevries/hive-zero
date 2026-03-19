@@ -246,6 +246,7 @@ def load_filtered_games(
     elo_csv: str,
     min_elo: float = 1600.0,
     min_games: int = 20,
+    exclude_players: set[str] | None = None,
 ) -> list[tuple[str, str, str]]:
     """Return a filtered list of (zip_file, sgf_name, result) tuples.
 
@@ -258,6 +259,9 @@ def load_filtered_games(
             if int(row["games"]) >= min_games and float(row["elo"]) >= min_elo:
                 qualified.add(row["player"])
 
+    if exclude_players is None:
+        exclude_players = set()
+
     games: list[tuple[str, str, str]] = []
     with open(games_csv, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
@@ -266,6 +270,8 @@ def load_filtered_games(
                 and row["result"] in ("p0_wins", "p1_wins", "draw")
                 and row["p0"] in qualified
                 and row["p1"] in qualified
+                and row["p0"] not in exclude_players
+                and row["p1"] not in exclude_players
             ):
                 games.append((row["zip_file"], row["sgf_name"], row["result"]))
 
@@ -378,52 +384,41 @@ class Pretrainer:
             epoch_start = time.time()
             losses: dict = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
 
-            # Group by zip so each archive is opened once per epoch.
-            from itertools import groupby as _groupby
-            games_sorted = sorted(games, key=lambda g: g[0])
-
             games_done = 0
-            for zip_file, group in _groupby(games_sorted, key=lambda g: g[0]):
+            for zip_file, sgf_name, result in games:
+                games_done += 1
                 zip_path = zip_index.get(zip_file)
-                group_list = list(group)
 
-                try:
-                    zf = zipfile.ZipFile(zip_path, "r") if zip_path else None
-                except Exception:
-                    zf = None
-
-                for _, sgf_name, result in group_list:
-                    games_done += 1
-
-                    if zf is None:
-                        errors_this_epoch += 1
-                    else:
-                        try:
+                if zip_path is None:
+                    errors_this_epoch += 1
+                else:
+                    try:
+                        with zipfile.ZipFile(zip_path, "r") as zf:
                             content = zf.read(sgf_name).decode("iso-8859-1")
-                            samples = game_to_samples(content, result, verbose=verbose_samples, game_name=sgf_name)
-                        except Exception:
-                            errors_this_epoch += 1
-                            samples = []
+                        samples = game_to_samples(content, result, verbose=verbose_samples, game_name=sgf_name)
+                    except Exception:
+                        errors_this_epoch += 1
+                        samples = []
 
-                        for board, reserve, policy, value in samples:
-                            dataset.add_sample(board, reserve, policy, float(value))
-                            total_positions += 1
-                            positions_this_epoch += 1
+                    for board, reserve, policy, value in samples:
+                        dataset.add_sample(board, reserve, policy, float(value))
+                        total_positions += 1
+                        positions_this_epoch += 1
 
-                    # Loading progress (overwrite line with \r).
-                    if games_done % 100 == 0 or len(dataset) >= buffer_size:
-                        elapsed_load = time.time() - epoch_start
-                        print(
-                            f"\r  loading  games={games_done}/{total_games} "
-                            f"buf={len(dataset)}/{buffer_size} "
-                            f"[{elapsed_load:.1f}s]",
-                            end="", flush=True,
-                        )
+                # Loading progress (overwrite line with \r).
+                if games_done % 100 == 0 or len(dataset) >= buffer_size:
+                    elapsed_load = time.time() - epoch_start
+                    print(
+                        f"\r  loading  games={games_done}/{total_games} "
+                        f"buf={len(dataset)}/{buffer_size} "
+                        f"[{elapsed_load:.1f}s]",
+                        end="", flush=True,
+                    )
 
-                    # Train when the buffer is full (or at end of epoch).
-                    buffer_full = len(dataset) >= buffer_size
-                    last_game = games_done == total_games
-                    if (buffer_full or last_game) and len(dataset) > 0:
+                # Train when the buffer is full (or at end of epoch).
+                buffer_full = len(dataset) >= buffer_size
+                last_game = games_done == total_games
+                if (buffer_full or last_game) and len(dataset) > 0:
                         print()  # newline after \r loading line
                         chunk_idx += 1
                         chunk_start = time.time()
@@ -473,9 +468,6 @@ class Pretrainer:
                                  "value_loss": losses["value_loss"]},
                             )
                             print(f"  Checkpoint → {ckpt_path}")
-
-                if zf is not None:
-                    zf.close()
 
             total_errors += errors_this_epoch
             elapsed = time.time() - epoch_start
