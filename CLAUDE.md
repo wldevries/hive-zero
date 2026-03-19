@@ -9,12 +9,12 @@ All game logic, MCTS, and encoding run in Rust (`hive_engine` via PyO3) for perf
 ```
 hive/
   core/        - Game logic: hex coords, pieces, board, movement rules, game state, renderer
-  encoding/    - Board-to-tensor and move encoding for neural network I/O + symmetry augmentation
+  encoding/    - Board-to-tensor and move encoding for neural network I/O
   nn/          - PyTorch AlphaZero-style model (policy + value heads), training loop
   uhp/         - UHP stdin/stdout protocol engine
   selfplay/    - Self-play training loop (Rust-only, no Python MCTS)
-    selfplay.py       - SelfPlayTrainer orchestrator, fast/full MCTS scheduling, warmup
-    rust_selfplay.py  - RustFastSelfPlay + RustParallelSelfPlay (rayon-parallel batched MCTS)
+    selfplay.py       - SelfPlayTrainer orchestrator, playout cap randomization
+    rust_selfplay.py  - RustParallelSelfPlay (rayon-parallel batched MCTS, playout cap)
 rust/
   src/         - Rust game engine (PyO3 extension module `hive_engine`)
     board.rs          - Board state, 23x23 grid, hex-to-grid conversion
@@ -39,14 +39,13 @@ rust/
 - **Rust-only engine**: All game logic, MCTS, and encoding in Rust. Python handles NN inference and training only. When editing move encoding or board encoding, update both Python and Rust versions.
 
 ## Training Pipeline
-- **SGD + momentum 0.9** with cosine annealing + warm restarts (T_0=30, lr_max=0.05, lr_min=1e-5)
+- **SGD + momentum 0.9**, constant LR (default 0.02, set via --lr). Previously tried cosine annealing with warm restarts — removed in favour of manual LR adjustment.
 - **1 epoch** per iteration (avoids overfitting on stale replay buffer data)
-- **Warmup phase**: fills replay buffer (default 10k positions) before first training
-- **Buffer clears** on fast→MCTS transition to avoid diluting MCTS policy targets
-- **Symmetry augmentation** at buffer insertion time (12 hex symmetries), not during training
+- **Playout cap randomization**: per-turn random fast/full search (KataGo-style), fast turns train value only
+- **Symmetry augmentation**: previously implemented (12 hex symmetries) but removed — not in use.
 - **Replay buffer**: 50k positions max, deque-based O(1) eviction
-- **Fast mode policy targets**: uniform over legal moves (not model output, which would be circular)
-- **Heuristic value** for unfinished games: queen neighbor pressure + beetle-on-queen bonus
+- **Fast-cap turns**: no Dirichlet noise, play strongest move, added to buffer with value-only training (policy loss masked)
+- **Heuristic value** for unfinished games: queen neighbor pressure + beetle-on-queen bonus (no draw penalty)
 - **Rayon parallelism**: MCTS tree ops (select, encode, expand, backprop) parallelized across games
 - **RustBatchMCTS.run_simulations**: full simulation loop in Rust with single Python GPU callback per round
 

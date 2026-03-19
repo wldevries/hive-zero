@@ -13,15 +13,17 @@ def main():
 
     # Training
     train_parser = subparsers.add_parser("train", help="Run self-play training")
-    train_parser.add_argument("--iterations", type=int, default=100,
-                              help="Number of training iterations")
+    train_parser.add_argument("--iterations", type=int, default=None,
+                              help="Number of training iterations (default: infinite)")
+    train_parser.add_argument("--time-limit", type=float, default=None,
+                              help="Training time limit in minutes (stops after current iteration)")
     train_parser.add_argument("--games", type=int, default=20,
                               help="Self-play games per iteration")
     train_parser.add_argument("--simulations", type=int, default=100,
                               help="MCTS simulations per move")
     train_parser.add_argument("--epochs", type=int, default=1,
                               help="Training epochs per iteration")
-    train_parser.add_argument("--batch-size", type=int, default=512)
+    train_parser.add_argument("--training-batch-size", type=int, default=512)
     train_parser.add_argument("--model", type=str, default="model.pt",
                               help="Model file path")
     train_parser.add_argument("--device", type=str, default="cuda",
@@ -32,14 +34,16 @@ def main():
                               help="Channels in network")
     train_parser.add_argument("--max-moves", type=int, default=200,
                               help="Max moves per self-play game")
-    train_parser.add_argument("--time-limit", type=float, default=None,
-                              help="Training time limit in minutes (stops after current iteration)")
-    train_parser.add_argument("--mcts-after", type=int, default=0,
-                              help="Use fast self-play until this iteration, then switch to full MCTS (0=always MCTS)")
-    train_parser.add_argument("--warmup-positions", type=int, default=10_000,
-                              help="Fill buffer to this many positions before training (0=skip)")
+    train_parser.add_argument("--replay-window", type=int, default=8,
+                              help="Replay buffer size in iterations (buffer = replay-window * games * max-moves)")
+    train_parser.add_argument("--playout-cap-p", type=float, default=0.0,
+                              help="Playout cap randomization: probability of full search per turn (0=disabled, 0.25=recommended)")
+    train_parser.add_argument("--fast-cap", type=int, default=20,
+                              help="Simulations for fast-search turns when playout cap is enabled (default: 20)")
     train_parser.add_argument("--checkpoint-every", type=int, default=10,
-                              help="Save checkpoint and run self-eval every N iterations (default: 10)")
+                              help="Save checkpoint every N iterations (default: 10)")
+    train_parser.add_argument("--checkpoint-eval", action="store_true",
+                              help="Run model-vs-best eval at each checkpoint")
     train_parser.add_argument("--eval-every", type=int, default=0,
                               help="Run evaluation vs Mzinga every N iterations (0=disabled)")
     train_parser.add_argument("--eval-games", type=int, default=6,
@@ -48,6 +52,16 @@ def main():
                               help="MCTS simulations per move during eval")
     train_parser.add_argument("--mzinga-path", type=str, default="mzinga/MzingaEngine.exe",
                               help="Path to MzingaEngine for evaluation")
+    train_parser.add_argument("--play-batch-size", type=int, default=512,
+                              help="Leaf batch size for self-play GPU inference (default: 512)")
+    train_parser.add_argument("--lr", type=float, default=0.02,
+                              help="Learning rate for SGD optimizer (default: 0.02)")
+    train_parser.add_argument("--resign-threshold", type=float, default=-0.97,
+                              help="Resign when value < threshold for N consecutive moves (default: -0.97)")
+    train_parser.add_argument("--resign-min-moves", type=int, default=20,
+                              help="Minimum move count before resign can trigger (default: 20)")
+    train_parser.add_argument("--comment", type=str, default="",
+                              help="Comment to append to every row in the training log")
     train_parser.add_argument("--mzinga-time", type=int, default=2,
                               help="Mzinga search time in seconds per move during eval")
 
@@ -109,10 +123,12 @@ def main():
                   max_moves=args.max_moves, verbose=args.verbose)
 
     elif args.command == "train":
+        if args.resign_threshold > 0:
+            parser.error(f"--resign-threshold must be negative (e.g. -0.95), got {args.resign_threshold}")
         from hive.selfplay.selfplay import SelfPlayTrainer
         trainer = SelfPlayTrainer(
             model_path=args.model, device=args.device,
-            num_blocks=args.blocks, channels=args.channels
+            num_blocks=args.blocks, channels=args.channels, lr=args.lr
         )
         eval_config = None
         if args.eval_every > 0:
@@ -126,12 +142,18 @@ def main():
         trainer.run(
             num_iterations=args.iterations, games_per_iter=args.games,
             simulations=args.simulations, epochs_per_iter=args.epochs,
-            batch_size=args.batch_size, max_moves=args.max_moves,
+            batch_size=args.training_batch_size, max_moves=args.max_moves,
             time_limit_minutes=args.time_limit,
-            mcts_after=args.mcts_after,
-            warmup_positions=args.warmup_positions,
             eval_config=eval_config,
             checkpoint_every=args.checkpoint_every,
+            checkpoint_eval=args.checkpoint_eval,
+            playout_cap_p=args.playout_cap_p,
+            fast_cap=args.fast_cap,
+            replay_window=args.replay_window,
+            leaf_batch_size=args.play_batch_size,
+            resign_threshold=args.resign_threshold,
+            resign_min_moves=args.resign_min_moves,
+            comment=args.comment,
         )
     else:
         # Default: UHP engine

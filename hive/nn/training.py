@@ -33,18 +33,40 @@ class HiveDataset(Dataset):
         self.policy_targets = np.zeros((max_size, POLICY_SIZE), dtype=np.float32)
         self.value_targets = np.zeros(max_size, dtype=np.float32)
         self.weights = np.ones(max_size, dtype=np.float32)
+        self.value_only = np.zeros(max_size, dtype=np.bool_)
+        self.policy_only = np.zeros(max_size, dtype=np.bool_)
 
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
                    policy_target: np.ndarray, value_target: float,
-                   weight: float = 1.0):
+                   weight: float = 1.0, value_only: bool = False, policy_only: bool = False):
         idx = self._count % self.max_size
         self.board_tensors[idx] = board_tensor
         self.reserve_vectors[idx] = reserve_vector
         self.policy_targets[idx] = policy_target
         self.value_targets[idx] = value_target
         self.weights[idx] = weight
+        self.value_only[idx] = value_only
+        self.policy_only[idx] = policy_only
         self._count += 1
         self._size = min(self._size + 1, self.max_size)
+
+    def add_batch(self, board_tensors: np.ndarray, reserve_vectors: np.ndarray,
+                  policy_targets: np.ndarray, value_targets: np.ndarray,
+                  weights: np.ndarray, value_only: list[bool], policy_only: list[bool]):
+        """Bulk insert from contiguous arrays. Much faster than per-sample add."""
+        n = board_tensors.shape[0]
+        boards_flat = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
+        for i in range(n):
+            idx = self._count % self.max_size
+            self.board_tensors[idx] = boards_flat[i]
+            self.reserve_vectors[idx] = reserve_vectors[i]
+            self.policy_targets[idx] = policy_targets[i]
+            self.value_targets[idx] = value_targets[i]
+            self.weights[idx] = weights[i]
+            self.value_only[idx] = value_only[i]
+            self.policy_only[idx] = policy_only[i]
+            self._count += 1
+            self._size = min(self._size + 1, self.max_size)
 
     def clear(self):
         self._count = 0
@@ -60,69 +82,28 @@ class HiveDataset(Dataset):
             torch.from_numpy(self.policy_targets[idx].copy()),
             torch.tensor(self.value_targets[idx], dtype=torch.float32),
             torch.tensor(self.weights[idx], dtype=torch.float32),
+            torch.tensor(self.value_only[idx], dtype=torch.bool),
+            torch.tensor(self.policy_only[idx], dtype=torch.bool),
         )
 
 
 class Trainer:
-    """Trains the HiveNet model on self-play data.
-
-    Uses SGD with momentum and cosine annealing with warm restarts:
-      - LR decays from lr_max to lr_min following a cosine curve
-      - Every T_0 iterations, LR jumps back to lr_max (warm restart)
-      - Restarts help escape sharp local minima for better generalization
-    """
+    """Trains the HiveNet model on self-play data using SGD with momentum."""
 
     def __init__(self, model: Optional[HiveNet] = None,
                  weight_decay: float = 1e-4, device: str = "cpu",
-                 lr_max: float = 0.05, lr_min: float = 1e-5,
-                 t_0: int = 30, t_mult: int = 1):
+                 lr: float = 0.02):
         self.device = torch.device(device)
         self.model = model or create_model()
         self.model.to(self.device)
-        self.lr_max = lr_max
-        self.lr_min = lr_min
-        self.t_0 = t_0
-        self.t_mult = t_mult
         self.optimizer = optim.SGD(
-            self.model.parameters(), lr=lr_max,
+            self.model.parameters(), lr=lr,
             momentum=0.9, weight_decay=weight_decay,
         )
-        self._current_lr = lr_max
-        self._last_restart = 0
-        self._current_t = t_0
 
-    def fast_forward_lr(self, iteration: int):
-        """Fast-forward cosine schedule state to given iteration (for resume)."""
-        # Replay restart boundaries to find current cycle state
-        last_restart = 0
-        current_t = self.t_0
-        while last_restart + current_t <= iteration:
-            last_restart += current_t
-            current_t = current_t * self.t_mult
-        self._last_restart = last_restart
-        self._current_t = current_t
-        self.update_lr(iteration)
-
-    def update_lr(self, iteration: int):
-        """Update learning rate using cosine annealing with warm restarts."""
-        import math
-        # How far into the current restart cycle
-        elapsed = iteration - self._last_restart
-        if elapsed >= self._current_t:
-            # Warm restart
-            self._last_restart = iteration
-            self._current_t = self._current_t * self.t_mult
-            elapsed = 0
-        # Cosine decay within current cycle
-        target_lr = self.lr_min + 0.5 * (self.lr_max - self.lr_min) * (
-            1 + math.cos(math.pi * elapsed / self._current_t)
-        )
-        if abs(target_lr - self._current_lr) > 1e-8:
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = target_lr
-            if elapsed == 0 and iteration > 0:
-                print(f"  LR warm restart: {self._current_lr:.6f} -> {target_lr:.6f}")
-            self._current_lr = target_lr
+    @property
+    def _current_lr(self) -> float:
+        return self.optimizer.param_groups[0]['lr']
 
     def train_epoch(self, dataset: HiveDataset, batch_size: int = 64) -> dict:
         """Train one epoch. Returns loss dict."""
@@ -134,23 +115,27 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
-        for board, reserve, policy_target, value_target, weight in loader:
+        for board, reserve, policy_target, value_target, weight, vo_mask, po_mask in loader:
             board = board.to(self.device)
             reserve = reserve.to(self.device)
             policy_target = policy_target.to(self.device)
             value_target = value_target.to(self.device).unsqueeze(1)
             weight = weight.to(self.device)
+            vo_mask = vo_mask.to(self.device)
+            po_mask = po_mask.to(self.device)
 
             policy_logits, value = self.model(board, reserve)
 
-            # Policy loss: weighted cross-entropy with target distribution
+            # Policy loss: weighted cross-entropy, masked for value-only samples
             log_probs = torch.log_softmax(policy_logits, dim=1)
             per_sample_policy = -(policy_target * log_probs).sum(dim=1)
-            policy_loss = (per_sample_policy * weight).mean()
+            policy_weight = weight * (~vo_mask).float()
+            policy_loss = (per_sample_policy * policy_weight).mean()
 
-            # Value loss: weighted MSE
+            # Value loss: weighted MSE, masked for policy-only samples (zero-heuristic draws)
             per_sample_value = (value.squeeze(1) - value_target.squeeze(1)) ** 2
-            value_loss = (per_sample_value * weight).mean()
+            value_weight = weight * (~po_mask).float()
+            value_loss = (per_sample_value * value_weight).mean()
 
             # Combined loss
             loss = policy_loss + value_loss

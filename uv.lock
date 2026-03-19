@@ -16,12 +16,14 @@ name = "hive-zero"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "colorama" },
     { name = "numpy" },
     { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "colorama", specifier = ">=0.4.6" },
     { name = "numpy", specifier = ">=2.4.3" },
     { name = "pytest", specifier = ">=9.0.2" },
 ]
