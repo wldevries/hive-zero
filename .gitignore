@@ -8,6 +8,7 @@ __pycache__/
 *.pth
 checkpoints/
 training_log.tsv
+pretrain_log.tsv
 *.sgf
 *.zip
 games/**/*.csv

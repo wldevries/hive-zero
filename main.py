@@ -65,6 +65,36 @@ def main():
     train_parser.add_argument("--mzinga-time", type=int, default=2,
                               help="Mzinga search time in seconds per move during eval")
 
+    # Supervised pre-training
+    pretrain_parser = subparsers.add_parser(
+        "pretrain", help="Supervised pre-training from human game archives"
+    )
+    pretrain_parser.add_argument("--games-csv", default="games/game_outcomes.csv")
+    pretrain_parser.add_argument("--elo-csv", default="games/player_elo.csv")
+    pretrain_parser.add_argument("--boardspace-dir", default="games/boardspace")
+    pretrain_parser.add_argument("--min-elo", type=float, default=1600.0,
+                                 help="Minimum ELO for both players (default: 1600)")
+    pretrain_parser.add_argument("--min-games", type=int, default=20,
+                                 help="Minimum games played for ELO to count (default: 20)")
+    pretrain_parser.add_argument("--model", default="model.pt")
+    pretrain_parser.add_argument("--device", default="cuda")
+    pretrain_parser.add_argument("--blocks", type=int, default=6)
+    pretrain_parser.add_argument("--channels", type=int, default=64)
+    pretrain_parser.add_argument("--lr", type=float, default=0.005,
+                                 help="Learning rate (default: 0.005)")
+    pretrain_parser.add_argument("--epochs", type=int, default=3,
+                                 help="Full passes over the game list (default: 3)")
+    pretrain_parser.add_argument("--batch-size", type=int, default=512)
+    pretrain_parser.add_argument("--buffer-size", type=int, default=100_000,
+                                 help="Positions per training chunk (default: 100k)")
+    pretrain_parser.add_argument("--epochs-per-chunk", type=int, default=3,
+                                 help="SGD epochs per buffer fill (default: 3)")
+    pretrain_parser.add_argument("--checkpoint-every", type=int, default=10,
+                                 help="Checkpoint every N chunks (default: 10)")
+    pretrain_parser.add_argument("--checkpoint-dir", default="checkpoints")
+    pretrain_parser.add_argument("--verbose-samples", action="store_true",
+                                 help="Print skipped moves (useful for diagnosing bad SGFs)")
+
     # Evaluation
     eval_parser = subparsers.add_parser("eval", help="Evaluate model against Mzinga")
     eval_parser.add_argument("--model", type=str, default="model.pt",
@@ -88,7 +118,31 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "eval":
+    if args.command == "pretrain":
+        from hive.supervised.pretrain import load_filtered_games, build_zip_index, Pretrainer
+        print("Loading filtered game list...")
+        games = load_filtered_games(
+            args.games_csv, args.elo_csv,
+            min_elo=args.min_elo, min_games=args.min_games,
+        )
+        print(f"  {len(games)} qualifying games (ELO≥{args.min_elo}, games≥{args.min_games})")
+        print("Indexing zip archives...")
+        zip_index = build_zip_index(args.boardspace_dir)
+        print(f"  {len(zip_index)} zip files found")
+        pretrainer = Pretrainer(
+            model_path=args.model, device=args.device,
+            num_blocks=args.blocks, channels=args.channels, lr=args.lr,
+        )
+        pretrainer.run(
+            games=games, zip_index=zip_index,
+            num_epochs=args.epochs, batch_size=args.batch_size,
+            buffer_size=args.buffer_size, epochs_per_chunk=args.epochs_per_chunk,
+            checkpoint_every_chunks=args.checkpoint_every,
+            checkpoint_dir=args.checkpoint_dir,
+            verbose_samples=args.verbose_samples,
+        )
+
+    elif args.command == "eval":
         from hive.eval.engine_match import EngineConfig, UHPProcess, ModelEngine, run_match
         from hive.nn.model import load_checkpoint
 
