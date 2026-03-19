@@ -79,7 +79,7 @@ impl PyGame {
     /// Get all valid moves as list of (piece_str, from_pos_or_None, to_pos).
     fn valid_moves(&self) -> Vec<(String, Option<(i8, i8)>, (i8, i8))> {
         self.game.valid_moves().iter().map(|mv| {
-            let piece_str = mv.piece.unwrap().to_string();
+            let piece_str = mv.piece.unwrap().to_uhp_string();
             let from = mv.from;
             let to = mv.to.unwrap();
             (piece_str, from, to)
@@ -126,7 +126,7 @@ impl PyGame {
         let (mask, indexed_moves) = move_encoding::get_legal_move_mask(&self.game);
         let mask_array = make_array1(py, &mask);
         let moves_list: Vec<_> = indexed_moves.iter().map(|(idx, mv)| {
-            let piece_str = mv.piece.unwrap().to_string();
+            let piece_str = mv.piece.unwrap().to_uhp_string();
             (*idx, piece_str, mv.from, mv.to.unwrap())
         }).collect();
         (mask_array, moves_list)
@@ -165,10 +165,10 @@ impl PyGame {
     }
 
     /// All (hex, top_piece_str) pairs for occupied positions.
-    /// Returns list of ((q, r), piece_str) e.g. [((0, 0), "wQ1"), ((-1, 0), "bA1")].
+    /// Returns list of ((q, r), piece_str) e.g. [((0, 0), "wQ"), ((-1, 0), "bA1")].
     fn all_top_pieces(&self) -> Vec<((i8, i8), String)> {
         self.game.board.all_top_pieces().iter().map(|(hex, piece)| {
-            (*hex, piece.to_string())
+            (*hex, piece.to_uhp_string())
         }).collect()
     }
 
@@ -176,7 +176,7 @@ impl PyGame {
     #[pyo3(signature = (q, r))]
     fn stack_at(&self, q: i8, r: i8) -> Vec<String> {
         let slot = self.game.board.stack_at((q, r));
-        slot.iter().map(|p| p.to_string()).collect()
+        slot.iter().map(|p| p.to_uhp_string()).collect()
     }
 
     /// Heuristic value for unfinished games.
@@ -255,7 +255,7 @@ impl PyMCTS {
         }
 
         self.search.best_move().map(|mv| {
-            let piece_str = mv.piece.unwrap().to_string();
+            let piece_str = mv.piece.unwrap().to_uhp_string();
             (piece_str, mv.from, mv.to.unwrap())
         })
     }
@@ -296,7 +296,7 @@ impl PyMCTS {
 
         let moves: Vec<_> = dist.iter().map(|(mv, _)| {
             match mv.piece {
-                Some(p) => (p.to_string(), mv.from, mv.to.unwrap()),
+                Some(p) => (p.to_uhp_string(), mv.from, mv.to.unwrap()),
                 None => ("pass".to_string(), None, (0, 0)),
             }
         }).collect();
@@ -394,7 +394,7 @@ impl PyMCTS {
         let dist = self.search.get_visit_distribution();
         let moves: Vec<_> = dist.iter().map(|(mv, _)| {
             match mv.piece {
-                Some(p) => (p.to_string(), mv.from, mv.to.unwrap()),
+                Some(p) => (p.to_uhp_string(), mv.from, mv.to.unwrap()),
                 None => ("pass".to_string(), None, (0, 0)),
             }
         }).collect();
@@ -866,7 +866,7 @@ impl PyBatchMCTS {
             };
             let moves: Vec<_> = dist.iter().map(|(mv, _)| {
                 match mv.piece {
-                    Some(p) => (p.to_string(), mv.from, mv.to.unwrap()),
+                    Some(p) => (p.to_uhp_string(), mv.from, mv.to.unwrap()),
                     None => ("pass".to_string(), None, (0, 0)),
                 }
             }).collect();

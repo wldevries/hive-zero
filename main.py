@@ -9,7 +9,13 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
     # UHP engine (default)
-    subparsers.add_parser("uhp", help="Run UHP engine (stdin/stdout)")
+    uhp_parser = subparsers.add_parser("uhp", help="Run UHP engine (stdin/stdout)")
+    uhp_parser.add_argument("--model", type=str, default=None,
+                            help="Model file path (optional; uses random MCTS if omitted)")
+    uhp_parser.add_argument("--device", type=str, default="cuda",
+                            help="Device: cuda or cpu (default: cuda)")
+    uhp_parser.add_argument("--simulations", type=int, default=800,
+                            help="MCTS simulations per move (default: 800)")
 
     # Training
     train_parser = subparsers.add_parser("train", help="Run self-play training")
@@ -52,8 +58,10 @@ def main():
                               help="MCTS simulations per move during eval")
     train_parser.add_argument("--mzinga-path", type=str, default="mzinga/MzingaEngine.exe",
                               help="Path to MzingaEngine for evaluation")
-    train_parser.add_argument("--play-batch-size", type=int, default=512,
-                              help="Leaf batch size for self-play GPU inference (default: 512)")
+    train_parser.add_argument("--play-batch-size", type=int, default=1,
+                              help="Rounds of leaf selection to accumulate before a GPU inference "
+                                   "call during self-play MCTS. 1 (default) = flush every round "
+                                   "(batch ≈ active game count). N > 1 = N × active games per call.")
     train_parser.add_argument("--lr", type=float, default=0.02,
                               help="Learning rate for SGD optimizer (default: 0.02)")
     train_parser.add_argument("--resign-threshold", type=float, default=-0.97,
@@ -158,7 +166,20 @@ def main():
     else:
         # Default: UHP engine
         from hive.uhp.engine import UHPEngine
-        engine = UHPEngine()
+        model = None
+        device = "cuda"
+        simulations = 800
+        if hasattr(args, "model") and args.model is not None:
+            from hive.nn.model import load_checkpoint
+            import torch
+            device = args.device if hasattr(args, "device") else "cuda"
+            if device == "cuda" and not torch.cuda.is_available():
+                device = "cpu"
+            model, _ = load_checkpoint(args.model)
+            model.to(device)
+            model.eval()
+            simulations = args.simulations if hasattr(args, "simulations") else 800
+        engine = UHPEngine(model=model, device=device, simulations=simulations)
         engine.run()
 
 
