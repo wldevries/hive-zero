@@ -358,12 +358,18 @@ class Pretrainer:
         """
         os.makedirs(checkpoint_dir, exist_ok=True)
 
-        log_path = "pretrain_log.tsv"
-        log = open(log_path, "w", buffering=1)
-        log.write(
-            "epoch\tgames_done\ttotal_positions\tchunk\t"
-            "policy_loss\tvalue_loss\ttotal_loss\tlr\n"
-        )
+        model_name = os.path.splitext(os.path.basename(self.model_path))[0]
+        log_path = f"{model_name}_log.csv"
+        header = ("iter,mode,simulations,wins_w,wins_b,draws,positions,buffer,"
+                  "loss,policy_loss,value_loss,lr,play_s,comment\n")
+        needs_header = True
+        if os.path.exists(log_path):
+            with open(log_path) as f:
+                first = f.readline()
+            needs_header = not first.startswith("iter,")
+        log = open(log_path, "a", buffering=1)
+        if needs_header:
+            log.write(header)
 
         total_games = len(games)
         print(f"Dataset: {total_games} games | buffer: {buffer_size} | "
@@ -446,9 +452,10 @@ class Pretrainer:
                             f"lr={lr} [{chunk_elapsed:.1f}s]"
                         )
                         log.write(
-                            f"{epoch}\t{games_done}\t{total_positions}\t{chunk_idx}\t"
-                            f"{losses['policy_loss']:.6f}\t{losses['value_loss']:.6f}\t"
-                            f"{losses['total_loss']:.6f}\t{lr:.8f}\n"
+                            f"{chunk_idx},pretrain,0,0,0,0,{games_done},{total_positions},"
+                            f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
+                            f"{losses['value_loss']:.6f},{lr:.8f},{chunk_elapsed:.1f},"
+                            f"epoch={epoch}\n"
                         )
 
                         # Save model.pt after every chunk.
@@ -460,7 +467,7 @@ class Pretrainer:
 
                         if chunk_idx % checkpoint_every_chunks == 0:
                             ckpt_path = os.path.join(
-                                checkpoint_dir, f"pretrain_chunk{chunk_idx:04d}.pt"
+                                checkpoint_dir, f"{model_name}_iter{chunk_idx}.pt"
                             )
                             self._save_checkpoint(
                                 self.model, ckpt_path, chunk_idx,

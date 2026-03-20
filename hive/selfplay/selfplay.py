@@ -35,6 +35,7 @@ class SelfPlayTrainer:
                  num_blocks: int = 6, channels: int = 64,
                  checkpoint_dir: str = "checkpoints", lr: float = 0.02):
         self.model_path = model_path
+        self.model_name = os.path.splitext(os.path.basename(model_path))[0]
         self.checkpoint_dir = checkpoint_dir
         self.device = device
         self.num_blocks = num_blocks
@@ -95,14 +96,22 @@ class SelfPlayTrainer:
 
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-        # Training log (TSV, truncated on fresh start)
-        log_path = "training_log.tsv"
+        # Training log (CSV, truncated on fresh start)
+        log_path = f"{self.model_name}_log.csv"
+        header = ("iter,mode,simulations,wins_w,wins_b,draws,positions,buffer,"
+                  "loss,policy_loss,value_loss,lr,play_s,comment\n")
         if self.start_iteration == 0:
             self._log = open(log_path, "w")
-            self._log.write("iter\tmode\tsimulations\twins_w\twins_b\tdraws\tpositions\tbuffer\t"
-                            "loss\tpolicy_loss\tvalue_loss\tlr\tplay_s\tcomment\n")
+            self._log.write(header)
         else:
+            needs_header = True
+            if os.path.exists(log_path):
+                with open(log_path) as f:
+                    first = f.readline()
+                needs_header = not first.startswith("iter,")
             self._log = open(log_path, "a")
+            if needs_header:
+                self._log.write(header)
         self._log.flush()
 
         # Bootstrap eval: if best_model.pt doesn't exist, run it immediately
@@ -221,12 +230,12 @@ class SelfPlayTrainer:
                       f"(policy={_cy(policy_s)}, value={_cy(value_s)}, lr={lr})")
             _print_vram("post-train")
 
-            # Log to TSV
-            self._log.write(f"{iteration}\tMCTS\t{simulations}\t"
-                            f"{wins_w}\t{wins_b}\t{draws}\t{total_positions}\t"
-                            f"{len(replay_buffer)}\t{losses['total_loss']:.6f}\t"
-                            f"{losses['policy_loss']:.6f}\t{losses['value_loss']:.6f}\t"
-                            f"{lr:.8f}\t{play_time:.1f}\t{self._comment}\n")
+            # Log to CSV
+            self._log.write(f"{iteration},MCTS,{simulations},"
+                            f"{wins_w},{wins_b},{draws},{total_positions},"
+                            f"{len(replay_buffer)},{losses['total_loss']:.6f},"
+                            f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
+                            f"{lr:.8f},{play_time:.1f},{self._comment}\n")
             self._comment = ""
             self._log.flush()
 
@@ -240,7 +249,7 @@ class SelfPlayTrainer:
             save_checkpoint(self.model, self.model_path, iteration, metadata)
 
             if iteration % checkpoint_every == 0:
-                ckpt_path = os.path.join(self.checkpoint_dir, f"model_iter{iteration:04d}.pt")
+                ckpt_path = os.path.join(self.checkpoint_dir, f"{self.model_name}_iter{iteration}.pt")
                 save_checkpoint(self.model, ckpt_path, iteration, metadata)
                 print(f"  Checkpoint saved to {ckpt_path}")
                 if checkpoint_eval:
@@ -258,12 +267,13 @@ class SelfPlayTrainer:
     def _find_prev_checkpoint(self, current_iteration: int) -> str | None:
         """Return path of the latest checkpoint strictly before current_iteration, or None."""
         import glob as _glob
-        pattern = os.path.join(self.checkpoint_dir, "model_iter*.pt")
+        prefix = f"{self.model_name}_iter"
+        pattern = os.path.join(self.checkpoint_dir, f"{prefix}*.pt")
         candidates = []
         for path in _glob.glob(pattern):
             name = os.path.basename(path)
             try:
-                iter_num = int(name[len("model_iter"):-len(".pt")])
+                iter_num = int(name[len(prefix):-len(".pt")])
                 if iter_num < current_iteration:
                     candidates.append((iter_num, path))
             except ValueError:
@@ -312,8 +322,8 @@ class SelfPlayTrainer:
                 shutil.copy2(prev_ckpt, best_model_path)
             shutil.copy2(best_model_path, self.model_path)
             print(f"  {_cg(w)}W/{_cy(d)}D/{_cr(l)}L → best model: {winner_label}")
-            self._log.write(f"{iteration}\tpit-bootstrap\t{simulations}\t{w}\t{l}\t{d}\t0\t0\t"
-                            f"{score:.6f}\t0\t0\t0\t0\t{self._comment}\n")
+            self._log.write(f"{iteration},pit-bootstrap,{simulations},{w},{l},{d},0,0,"
+                            f"{score:.6f},0,0,0,0,{self._comment}\n")
             self._log.flush()
             return
 
@@ -350,8 +360,8 @@ class SelfPlayTrainer:
         # model.pt always mirrors best_model.pt so fresh restarts use the best known weights
         shutil.copy2(best_model_path, self.model_path)
 
-        self._log.write(f"{iteration}\tpit\t{simulations}\t{w}\t{l}\t{d}\t0\t0\t"
-                        f"{score:.6f}\t0\t0\t0\t0\t{self._comment}\n")
+        self._log.write(f"{iteration},pit,{simulations},{w},{l},{d},0,0,"
+                        f"{score:.6f},0,0,0,0,{self._comment}\n")
         self._log.flush()
 
     def _run_eval(self, eval_config: dict, iteration: int, replay_buffer=None):
@@ -398,10 +408,10 @@ class SelfPlayTrainer:
                 print(f"  vs {summary['engine2']}: {_cg(w)}W/{_cy(d)}D/{_cr(l)}L "
                       f"(score: {_cc(f'{score:.0%}')})")
 
-            # Log to TSV
-            self._log.write(f"{iteration}\teval\t{eval_config['simulations']}\t{w}\t{l}\t{d}\t{len(samples)}\t"
-                            f"{len(replay_buffer) if replay_buffer else 0}\t"
-                            f"{score:.6f}\t0\t0\t0\t0\t{self._comment}\n")
+            # Log to CSV
+            self._log.write(f"{iteration},eval,{eval_config['simulations']},{w},{l},{d},{len(samples)},"
+                            f"{len(replay_buffer) if replay_buffer else 0},"
+                            f"{score:.6f},0,0,0,0,{self._comment}\n")
             self._log.flush()
         except Exception as e:
             print(f"  Eval failed: {e}")
