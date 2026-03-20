@@ -440,6 +440,7 @@ class Pretrainer:
                                 f"loss={_cr(tl)} (pol={_cy(pl)} val={_cy(vl)}) [{elapsed:.1f}s]"
                             )
                         chunk_elapsed = time.time() - chunk_start
+                        chunk_positions = len(dataset)
                         dataset.clear()
 
                         lr = self.trainer._current_lr
@@ -453,7 +454,7 @@ class Pretrainer:
                             f"lr={lr} [{chunk_elapsed:.1f}s]"
                         )
                         log.write(
-                            f"{chunk_idx},pretrain,0,0,0,0,0,{games_done},{total_positions},"
+                            f"{chunk_idx},pretrain,0,0,0,0,0,{total_positions},{chunk_positions},"
                             f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
                             f"{losses['value_loss']:.6f},{lr:.8f},{chunk_elapsed:.1f},"
                             f"epoch={epoch}\n"

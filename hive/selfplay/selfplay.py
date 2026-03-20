@@ -222,6 +222,7 @@ class SelfPlayTrainer:
                 print('\n'.join('    ' + line for line in rendered.split('\n')))
 
             # Train on replay buffer
+            train_start = time.time()
             for epoch in range(epochs_per_iter):
                 losses = self.trainer.train_epoch(replay_buffer, batch_size=batch_size)
                 lr = self.trainer._current_lr
@@ -230,6 +231,7 @@ class SelfPlayTrainer:
                 value_s = f"{losses['value_loss']:.4f}"
                 print(f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
                       f"(policy={_cy(policy_s)}, value={_cy(value_s)}, lr={lr})")
+            train_time = time.time() - train_start
             _print_vram("post-train")
 
             # Log to CSV
@@ -237,7 +239,7 @@ class SelfPlayTrainer:
                             f"{wins_w},{wins_b},{draws},{resignations},{total_positions},"
                             f"{len(replay_buffer)},{losses['total_loss']:.6f},"
                             f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
-                            f"{lr:.8f},{play_time:.1f},{self._comment}\n")
+                            f"{lr:.8f},{play_time + train_time:.1f},{self._comment}\n")
             self._comment = ""
             self._log.flush()
 
