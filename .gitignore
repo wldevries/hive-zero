@@ -12,6 +12,7 @@ pretrain_log.tsv
 *.sgf
 *.zip
 games/**/*.csv
+*_log.csv
 
 # Rust
 rust/target/
