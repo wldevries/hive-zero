@@ -521,11 +521,15 @@ impl PySelfPlaySession {
                 let total_m: u32 = move_counts.iter().sum();
                 let num_resigned = resigned_as.iter().filter(|r| r.is_some()).count() as u32;
                 let num_active = active.iter().filter(|&&a| a).count() as u32;
-                let max_turn: u32 = move_counts.iter().zip(active.iter())
-                    .filter(|(_, &a)| a)
-                    .map(|(&m, _)| m)
-                    .max()
-                    .unwrap_or(0);
+                let max_turn: u32 = if num_active > 0 {
+                    move_counts.iter().zip(active.iter())
+                        .filter(|(_, &a)| a)
+                        .map(|(&m, _)| m)
+                        .max()
+                        .unwrap_or(0)
+                } else {
+                    move_counts.iter().copied().max().unwrap_or(0)
+                };
                 let _ = pfn.call1((finished_count, num_games as u32, num_active, total_m, num_resigned, max_turn));
             }
         }
