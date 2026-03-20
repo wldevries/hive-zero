@@ -76,7 +76,7 @@ def parse_uhp_move(
     if not parts:
         raise ValueError("empty move string")
 
-    # Normalize piece name: UHP omits the number for the Queen (wQ → wQ1 internally).
+    # Normalize piece name to UHP form used by the Rust engine (e.g. wQ1 → wQ).
     piece_str = _normalize_piece(parts[0])
 
     # Build piece-name → (q, r) map covering ALL pieces, including those buried
@@ -105,7 +105,7 @@ def parse_uhp_move(
         ref_str = pos_str[:-1]
     # else: no direction → beetle climbing on top of ref piece
 
-    # Normalize reference piece name (e.g. wQ → wQ1).
+    # Normalize reference piece name to UHP form (e.g. wQ1 → wQ).
     ref_str = _normalize_piece(ref_str)
 
     ref_pos = piece_pos.get(ref_str)
@@ -135,24 +135,24 @@ _BASE_PIECE_RE = _re.compile(r'^[wb][QBASG][123]?$')
 
 
 def _is_base_piece(piece_str: str) -> bool:
-    """Return True iff piece_str is a valid base-game piece (e.g. wQ, wQ1, bA2)."""
+    """Return True iff piece_str is a valid base-game piece (e.g. wQ, bA2)."""
     return bool(_BASE_PIECE_RE.match(piece_str))
 
 
 def _normalize_piece(piece_str: str) -> str:
-    """Normalise a piece name to the form expected by the Rust engine.
+    """Normalise a piece name to UHP form (as returned by the Rust engine).
 
-    Handles two old-format quirks:
+    Handles old-format quirks:
     - lowercase piece type: 'wg1' → 'wG1'
-    - missing number on single-instance pieces: 'wQ' → 'wQ1'
+    - queen with number: 'wQ1' → 'wQ' (queen has no number in UHP)
     """
     if len(piece_str) < 2 or piece_str[0] not in "wb":
         return piece_str
     # Uppercase the piece-type character.
     normalized = piece_str[0] + piece_str[1].upper() + piece_str[2:]
-    # Append '1' if the number is missing.
-    if len(normalized) == 2:
-        normalized += "1"
+    # Queen: strip any trailing number (UHP omits it).
+    if normalized[1] == 'Q':
+        return normalized[:2]
     return normalized
 
 
