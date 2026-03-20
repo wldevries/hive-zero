@@ -10,6 +10,8 @@ Value target  : +1 win / 0 draw / −1 loss from the current player's POV.
 from __future__ import annotations
 
 import csv
+
+from ..training_log import LOG_HEADER
 import os
 import random
 import time
@@ -360,8 +362,7 @@ class Pretrainer:
 
         model_name = os.path.splitext(os.path.basename(self.model_path))[0]
         log_path = f"{model_name}_log.csv"
-        header = ("iter,mode,simulations,wins_w,wins_b,draws,positions,buffer,"
-                  "loss,policy_loss,value_loss,lr,play_s,comment\n")
+        header = LOG_HEADER
         needs_header = True
         if os.path.exists(log_path):
             with open(log_path) as f:
@@ -452,7 +453,7 @@ class Pretrainer:
                             f"lr={lr} [{chunk_elapsed:.1f}s]"
                         )
                         log.write(
-                            f"{chunk_idx},pretrain,0,0,0,0,{games_done},{total_positions},"
+                            f"{chunk_idx},pretrain,0,0,0,0,0,{games_done},{total_positions},"
                             f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
                             f"{losses['value_loss']:.6f},{lr:.8f},{chunk_elapsed:.1f},"
                             f"epoch={epoch}\n"
