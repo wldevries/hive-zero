@@ -85,7 +85,7 @@ pub struct PySelfPlayResult {
 #[pymethods]
 impl PySelfPlayResult {
     /// Get training data as numpy arrays.
-    /// Returns (boards[N,23,23,23], reserves[N,10], policies[N,6348],
+    /// Returns (boards[N,23,23,23], reserves[N,10], policies[N,5819],
     ///          values[N], weights[N], value_only[N], policy_only[N])
     fn training_data<'py>(&self, py: Python<'py>) -> (
         Bound<'py, PyArray2<f32>>,

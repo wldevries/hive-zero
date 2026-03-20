@@ -1,35 +1,49 @@
 """Encode/decode Hive moves for neural network policy output.
 
-Policy layout: 12 channels x 23 x 23 grid = 6,348 total policy logits.
+Policy layout: 11 channels x 23 x 23 grid = 5,819 total policy logits.
 
-Channels 0-5:  Movement by sliding/jumping. The destination cell stores the logit.
-               Channel index = direction FROM which the piece came:
-               0=from E, 1=from NE, 2=from NW, 3=from W, 4=from SW, 5=from SE
-               (i.e., the piece at dest+DIRECTIONS[ch] moves to dest)
-Channel 6:     Beetle stacking / staying on same hex (piece moves onto occupied dest)
-Channels 7-11: Placement (piece from reserve). 7=Queen, 8=Spider, 9=Beetle,
-               10=Grasshopper, 11=Ant. Destination cell stores the logit.
+Channel = piece index within current player (0-10), for both placement and movement.
+Destination cell stores the logit. Piece identity is the only discriminator — no
+direction encoding, no separate placement channels.
+
+Channel mapping (mirrors Rust Piece::linear_index() % PIECES_PER_PLAYER):
+  0: Queen
+  1: Spider1,  2: Spider2
+  3: Beetle1,  4: Beetle2
+  5: Grasshopper1, 6: Grasshopper2, 7: Grasshopper3
+  8: Ant1, 9: Ant2, 10: Ant3
+
+Canonical placement ordering is enforced by valid_moves(): only the lowest-numbered
+piece of each type in reserve is offered, so piece numbers are unambiguous.
 """
 
 from __future__ import annotations
 import numpy as np
-from typing import Optional
 
-from ..core.hex import Hex, DIRECTIONS
-from ..core.pieces import Piece, PieceColor, PieceType, PIECE_COUNTS
+from ..core.pieces import Piece, PieceType, PIECE_COUNTS
 from ..core.game import Game
-from .board_encoder import GRID_SIZE, GRID_CENTER, hex_to_grid, grid_to_hex, in_grid
+from .board_encoder import GRID_SIZE, hex_to_grid
 
-NUM_POLICY_CHANNELS = 12
-POLICY_SIZE = NUM_POLICY_CHANNELS * GRID_SIZE * GRID_SIZE  # 6,348
+NUM_POLICY_CHANNELS = 11
+PIECES_PER_PLAYER = 11
+POLICY_SIZE = NUM_POLICY_CHANNELS * GRID_SIZE * GRID_SIZE  # 5,819
 
-PIECE_TYPE_CHANNEL = {
-    PieceType.QUEEN: 7,
-    PieceType.SPIDER: 8,
-    PieceType.BEETLE: 9,
-    PieceType.GRASSHOPPER: 10,
-    PieceType.ANT: 11,
-}
+# Cumulative offsets for piece type within a player, matching PIECE_COUNTS order.
+# Q=1, S=2, B=2, G=3, A=3 → offsets [0, 1, 3, 5, 8]
+_BASE_TYPES = [PieceType.QUEEN, PieceType.SPIDER, PieceType.BEETLE, PieceType.GRASSHOPPER, PieceType.ANT]
+_TYPE_OFFSET: dict[PieceType, int] = {}
+_offset = 0
+for _pt, _count in zip(_BASE_TYPES, [PIECE_COUNTS[pt] for pt in _BASE_TYPES]):
+    _TYPE_OFFSET[_pt] = _offset
+    _offset += _count
+
+
+def _piece_channel(piece: Piece) -> int:
+    """Channel for a piece: its index within the current player (0-10).
+
+    Mirrors Rust: piece.linear_index() % PIECES_PER_PLAYER.
+    """
+    return _TYPE_OFFSET[piece.piece_type] + (piece.number - 1)
 
 
 def _policy_index(channel: int, row: int, col: int) -> int:
@@ -37,22 +51,10 @@ def _policy_index(channel: int, row: int, col: int) -> int:
     return channel * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col
 
 
-def encode_move(piece: Piece, from_pos: Optional[Hex], to_pos: Hex) -> int:
+def encode_move(piece: Piece, from_pos, to_pos) -> int:  # noqa: ARG001 (from_pos unused — source is implicit in piece identity)
     """Encode a move as a flat policy index."""
     dest_row, dest_col = hex_to_grid(to_pos)
-
-    if from_pos is None:
-        # Placement move
-        channel = PIECE_TYPE_CHANNEL[piece.piece_type]
-    else:
-        # Movement move - find which direction the piece came from
-        diff = from_pos - to_pos  # vector from dest to source
-        channel = 6  # default: stacking (beetle on top, or grasshopper landing)
-        for i, d in enumerate(DIRECTIONS):
-            if diff == d:
-                channel = i
-                break
-
+    channel = _piece_channel(piece)
     return _policy_index(channel, dest_row, dest_col)
 
 
@@ -85,7 +87,7 @@ def get_legal_move_mask(game: Game) -> tuple[np.ndarray, list]:
     return mask, indexed_moves
 
 
-def policy_to_moves(policy: np.ndarray, game: Game) -> list[tuple[float, Piece, Optional[Hex], Hex]]:
+def policy_to_moves(policy: np.ndarray, game: Game) -> list[tuple]:
     """Convert masked policy distribution to sorted (prob, piece, from, to) list."""
     mask, indexed_moves = get_legal_move_mask(game)
 

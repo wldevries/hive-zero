@@ -31,7 +31,7 @@ rust/
 ## Key Design Decisions
 - **Hex coordinates**: Axial (q, r) system. Flat-top hexagons.
 - **Board encoding**: 23x23 grid with 23 channels (piece type x color, stack depths, reserves).
-- **Move encoding**: (source, destination) hex pairs in flat policy space (12 channels x 23 x 23 = 6348). Placement moves use fixed off-board source slots per piece type. Movement uses direction channels (6 directions + 1 stacking).
+- **Move encoding**: Per-piece policy space (11 channels x 23 x 23 = 5819). Channel = piece index within current player (0=Queen, 1-2=Spider, 3-4=Beetle, 5-7=Grasshopper, 8-10=Ant). Destination cell stores the logit. Same channel scheme covers both placement and movement — no direction encoding. Canonical placement ordering enforced in valid_moves(): only lowest-numbered reserve piece per type is offered.
 - **Base game only**: Queen, Beetle, Grasshopper, Spider, Ant. No expansions.
 - **Beetle stacking**: Up to depth 7.
 - **One Hive Rule**: All pieces must remain connected after any move.

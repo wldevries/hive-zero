@@ -48,10 +48,10 @@ class HiveNet(nn.Module):
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
 
         # Policy head - convolutional to avoid giant linear layer
-        # Outputs per-cell logits: one channel per "move direction" plus placement slots
-        # 6 directions (slide/jump to neighbor offset) + 1 stay (beetle stack) = 7 movement
-        # + 5 placement types = 12 total policy channels per cell
-        self.num_policy_channels = 12
+        # Outputs per-cell logits: one channel per piece (11 pieces per player).
+        # Channel = piece index (0=Queen, 1-2=Spider, 3-4=Beetle, 5-7=Grasshopper, 8-10=Ant).
+        # Covers both placement and movement — no separate direction channels.
+        self.num_policy_channels = 11
         self.policy_conv = nn.Conv2d(channels, channels, 1, bias=False)
         self.policy_bn = nn.BatchNorm2d(channels)
         self.policy_out = nn.Conv2d(channels, self.num_policy_channels, 1)
