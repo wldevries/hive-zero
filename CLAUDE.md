@@ -43,7 +43,7 @@ rust/
 - **1 epoch** per iteration (avoids overfitting on stale replay buffer data)
 - **Playout cap randomization**: per-turn random fast/full search (KataGo-style), fast turns train value only
 - **Symmetry augmentation**: previously implemented (12 hex symmetries) but removed — not in use.
-- **Replay buffer**: 50k positions max, deque-based O(1) eviction
+- **Replay buffer**: in-memory only, not persisted to disk. Lost on process exit. Pretrain and selfplay run as separate processes so the buffer is always empty at the start of selfplay.
 - **Fast-cap turns**: no Dirichlet noise, play strongest move, added to buffer with value-only training (policy loss masked)
 - **Heuristic value** for unfinished games: queen neighbor pressure + beetle-on-queen bonus (no draw penalty)
 - **Rayon parallelism**: MCTS tree ops (select, encode, expand, backprop) parallelized across games
