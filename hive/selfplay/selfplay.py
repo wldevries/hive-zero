@@ -162,7 +162,8 @@ class SelfPlayTrainer:
             mode_label = "MCTS"
             opening_label = ""
             if opening_book:
-                opening_label = f" [book={boardspace_frac:.0%}]"
+                rand_str = f"{random_opening_moves[0]}-{random_opening_moves[1]}" if isinstance(random_opening_moves, tuple) else random_opening_moves
+                opening_label = f" [book={boardspace_frac:.0%} rand={rand_str}]" if random_opening_moves else f" [book={boardspace_frac:.0%}]"
             elif random_opening_moves:
                 rand_str = f"{random_opening_moves[0]}-{random_opening_moves[1]}" if isinstance(random_opening_moves, tuple) else random_opening_moves
                 opening_label = f" [rand={rand_str}]"
