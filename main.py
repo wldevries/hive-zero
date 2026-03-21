@@ -74,6 +74,12 @@ def main():
                               help="Mzinga search time in seconds per move during eval")
     train_parser.add_argument("--random-opening-moves", type=int, default=0,
                               help="Play N random moves at the start of each game before MCTS (not recorded to training buffer)")
+    train_parser.add_argument("--opening-book", type=str, default=None,
+                              help="Path to game_outcomes.csv to enable boardspace opening positions")
+    train_parser.add_argument("--opening-boardspace-dir", type=str, default="games/boardspace",
+                              help="Directory containing boardspace SGF zip archives (default: games/boardspace)")
+    train_parser.add_argument("--boardspace-frac", type=float, default=1.0,
+                              help="Fraction of games using book openings; remainder use --random-opening-moves (default: 1.0)")
 
     # Supervised pre-training
     pretrain_parser = subparsers.add_parser(
@@ -221,6 +227,9 @@ def main():
             resign_threshold=args.resign_threshold,
             resign_min_moves=args.resign_min_moves,
             random_opening_moves=args.random_opening_moves,
+            opening_games_csv=args.opening_book,
+            opening_boardspace_dir=args.opening_boardspace_dir,
+            boardspace_frac=args.boardspace_frac,
             comment=args.comment,
         )
     else:

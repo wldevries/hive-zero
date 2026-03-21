@@ -66,8 +66,12 @@ class RustParallelSelfPlay:
 
         return eval_fn
 
-    def play_games(self, num_games: int):
-        """Play num_games entirely in Rust. Returns SelfPlayResult."""
+    def play_games(self, num_games: int, opening_sequences: list[list[str]] | None = None):
+        """Play num_games entirely in Rust. Returns SelfPlayResult.
+
+        opening_sequences: per-game UHP move lists to replay before MCTS.
+            Empty inner list (or None) means use random_opening_moves for that game.
+        """
         from hive_engine import RustSelfPlaySession
 
         session = RustSelfPlaySession(
@@ -93,7 +97,8 @@ class RustParallelSelfPlay:
                   f"{active} active (turn {max_turn}), "
                   f"{moves} total moves{resign_str}", end="", flush=True)
 
-        result = session.play_games(self._eval_fn(), progress)
+        result = session.play_games(self._eval_fn(), progress,
+                                    opening_sequences=opening_sequences)
         print()  # newline after progress
         return result
 

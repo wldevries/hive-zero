@@ -205,13 +205,16 @@ impl PySelfPlaySession {
 
     /// Play all games to completion. Only calls eval_fn for GPU inference.
     /// progress_fn(finished, total, active, total_moves, resigned) is called each turn.
-    #[pyo3(signature = (eval_fn, progress_fn=None))]
+    /// opening_sequences: per-game UHP move lists to replay before MCTS (empty list = use random_opening_moves).
+    #[pyo3(signature = (eval_fn, progress_fn=None, opening_sequences=None))]
     fn play_games(
         &self,
         py: Python<'_>,
         eval_fn: &Bound<'_, PyAny>,
         progress_fn: Option<&Bound<'_, PyAny>>,
+        opening_sequences: Option<Vec<Vec<String>>>,
     ) -> PySelfPlayResult {
+        let opening_sequences = opening_sequences.unwrap_or_default();
         let cfg = &self.config;
         let num_games = cfg.num_games;
         let use_playout_cap = cfg.playout_cap_p > 0.0;
@@ -234,6 +237,9 @@ impl PySelfPlaySession {
         // Contiguous training data buffers (grow as we go)
         let mut board_buf: Vec<f32> = Vec::new();
         let mut reserve_buf: Vec<f32> = Vec::new();
+
+        // Opening sequence state: tracks games that have abandoned their sequence early
+        let mut opening_done: Vec<bool> = vec![false; num_games];
 
         // Resignation state
         let mut resign_counters: Vec<u32> = vec![0; num_games];
@@ -267,8 +273,28 @@ impl PySelfPlaySession {
             for gi in 0..num_games {
                 if !active[gi] { continue; }
 
-                // Random opening phase: play a single random move, don't record to history
-                if move_counts[gi] < cfg.random_opening_moves {
+                // Opening phase: boardspace sequence or random moves (not recorded to history)
+                let game_seq = opening_sequences.get(gi).filter(|s| !s.is_empty());
+                if let Some(seq) = game_seq {
+                    // Boardspace opening: replay next move from sequence
+                    if !opening_done[gi] && (move_counts[gi] as usize) < seq.len() {
+                        let move_str = &seq[move_counts[gi] as usize];
+                        let valid = games[gi].valid_moves();
+                        if let Some(mv) = valid.iter().find(|m| games[gi].format_move_uhp(m) == *move_str) {
+                            games[gi].play_move(mv);
+                            move_counts[gi] += 1;
+                            if games[gi].is_game_over() || move_counts[gi] >= cfg.max_moves {
+                                active[gi] = false;
+                                finished_count += 1;
+                            }
+                        } else {
+                            // Move not found in valid moves — sequence desync, switch to MCTS
+                            opening_done[gi] = true;
+                        }
+                        continue;
+                    }
+                } else if move_counts[gi] < cfg.random_opening_moves {
+                    // Random opening phase: play a single random move
                     let valid = games[gi].valid_moves();
                     if valid.is_empty() {
                         games[gi].play_pass();

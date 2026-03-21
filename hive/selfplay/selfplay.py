@@ -80,6 +80,10 @@ class SelfPlayTrainer:
             replay_window: int = 8,
             leaf_batch_size: int = 512,
             random_opening_moves: int = 0,
+            opening_games_csv: str | None = None,
+            opening_boardspace_dir: str | None = None,
+            boardspace_frac: float = 1.0,
+            opening_min_elo: float = 1600.0,
             comment: str = ""):
         """Run the full training loop.
 
@@ -128,6 +132,13 @@ class SelfPlayTrainer:
         # Replay buffer: keep last `replay_window` iterations of data (worst case: all games hit max_moves)
         replay_buffer = HiveDataset(max_size=replay_window * games_per_iter * max_moves)
 
+        # Opening book: load boardspace game sequences if configured
+        opening_book: list[list[str]] = []
+        if opening_games_csv and opening_boardspace_dir:
+            opening_book = self._load_opening_book(
+                opening_games_csv, opening_boardspace_dir, opening_min_elo,
+            )
+
         cap_label = ""
         if playout_cap_p > 0:
             cap_label = f" [sims={simulations}, fast={fast_cap}, p={playout_cap_p}]"
@@ -149,12 +160,21 @@ class SelfPlayTrainer:
             from .rust_selfplay import RustParallelSelfPlay
 
             mode_label = "MCTS"
-            print(f"\n=== Iteration {iteration} [{mode_label}]{cap_label}{elapsed_str} ===")
+            opening_label = ""
+            if opening_book:
+                opening_label = f" [book={boardspace_frac:.0%}]"
+            elif random_opening_moves:
+                opening_label = f" [rand={random_opening_moves}]"
+            print(f"\n=== Iteration {iteration} [{mode_label}]{cap_label}{opening_label}{elapsed_str} ===")
 
             # Generate self-play games
             iter_start = time.time()
             torch.cuda.empty_cache()
             _print_vram("pre-play")
+
+            opening_sequences = _make_opening_sequences(
+                games_per_iter, opening_book, boardspace_frac, random_opening_moves,
+            ) if opening_book else None
 
             sp = RustParallelSelfPlay(
                 model=self.model, device=self.device,
@@ -169,7 +189,7 @@ class SelfPlayTrainer:
                 random_opening_moves=random_opening_moves,
             )
 
-            result = sp.play_games(games_per_iter)
+            result = sp.play_games(games_per_iter, opening_sequences=opening_sequences)
             play_time = time.time() - iter_start
             _print_vram("post-play")
 
@@ -269,6 +289,42 @@ class SelfPlayTrainer:
             if eval_config and iteration % eval_config["every"] == 0:
                 self._run_eval(eval_config, iteration, replay_buffer)
 
+
+    def _load_opening_book(
+        self, games_csv: str, boardspace_dir: str, min_elo: float = 1600.0,
+    ) -> list[list[str]]:
+        """Load boardspace game move sequences for use as opening positions.
+
+        Returns a list of move-string lists (one per game), normalized to Rust
+        canonical UHP format. Short games (< 12 moves) are skipped.
+        """
+        import zipfile
+        from tqdm import tqdm
+        from ..supervised.pretrain import load_filtered_games, build_zip_index
+        from ..sgf import parse_moves
+
+        elo_csv = os.path.join(os.path.dirname(games_csv) or ".", "player_elo.csv")
+        games = load_filtered_games(games_csv, elo_csv, min_elo=min_elo, min_games=20)
+        zip_index = build_zip_index(boardspace_dir)
+
+        sequences: list[list[str]] = []
+        errors = 0
+        for zip_file, sgf_name, _result in tqdm(games, desc="Loading opening book", unit="game"):
+            zip_path = zip_index.get(zip_file)
+            if not zip_path:
+                continue
+            try:
+                with zipfile.ZipFile(zip_path) as zf:
+                    content = zf.read(sgf_name).decode('iso-8859-1')
+                moves = [_normalize_uhp_move(m) for m in parse_moves(content)
+                         if m != 'pass']
+                if len(moves) >= 12:
+                    sequences.append(moves)
+            except Exception:
+                errors += 1
+
+        print(f"  Opening book: {len(sequences)} games loaded ({errors} errors)")
+        return sequences
 
     def _find_prev_checkpoint(self, current_iteration: int) -> str | None:
         """Return path of the latest checkpoint strictly before current_iteration, or None."""
@@ -423,6 +479,37 @@ class SelfPlayTrainer:
             print(f"  Eval failed: {e}")
         finally:
             self.model.train()
+
+
+from ..uhp import normalize_move as _normalize_uhp_move
+
+
+def _make_opening_sequences(
+    num_games: int,
+    book: list[list[str]],
+    boardspace_frac: float,
+    opening_moves: int,
+) -> list[list[str]]:
+    """Generate per-game opening sequences from the book.
+
+    boardspace_frac fraction of games get a boardspace prefix of exactly
+    opening_moves moves (sampled from a random human game); the rest get an
+    empty list (Rust will fall back to random_opening_moves for those games).
+    Games shorter than opening_moves are skipped.
+    """
+    import random as _random
+    eligible = [g for g in book if len(g) > opening_moves]
+    sequences = []
+    for _ in range(num_games):
+        if eligible and _random.random() < boardspace_frac:
+            game_moves = _random.choice(eligible)
+            # Pick a random start offset so we don't always replay from move 0
+            max_start = len(game_moves) - opening_moves
+            start = _random.randint(0, max_start)
+            sequences.append(game_moves[start:start + opening_moves])
+        else:
+            sequences.append([])
+    return sequences
 
 
 def _print_vram(label: str, enabled: bool = False) -> None:

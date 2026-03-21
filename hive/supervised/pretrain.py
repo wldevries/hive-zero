@@ -29,6 +29,7 @@ _cy = lambda v: f"{colorama.Fore.YELLOW}{_B}{v}{_R}"   # policy / value loss
 _cc = lambda v: f"{colorama.Fore.CYAN}{_B}{v}{_R}"     # chunk / epoch labels
 
 from ..sgf import parse_moves
+from ..uhp import normalize_piece as _normalize_piece
 
 # Heavy imports (torch, hive_engine) are deferred to class/function bodies
 # so that `main.py` can be imported without torch installed or the Rust
@@ -138,22 +139,6 @@ def _is_base_piece(piece_str: str) -> bool:
     """Return True iff piece_str is a valid base-game piece (e.g. wQ, bA2)."""
     return bool(_BASE_PIECE_RE.match(piece_str))
 
-
-def _normalize_piece(piece_str: str) -> str:
-    """Normalise a piece name to UHP form (as returned by the Rust engine).
-
-    Handles old-format quirks:
-    - lowercase piece type: 'wg1' → 'wG1'
-    - queen with number: 'wQ1' → 'wQ' (queen has no number in UHP)
-    """
-    if len(piece_str) < 2 or piece_str[0] not in "wb":
-        return piece_str
-    # Uppercase the piece-type character.
-    normalized = piece_str[0] + piece_str[1].upper() + piece_str[2:]
-    # Queen: strip any trailing number (UHP omits it).
-    if normalized[1] == 'Q':
-        return normalized[:2]
-    return normalized
 
 
 # ---------------------------------------------------------------------------
