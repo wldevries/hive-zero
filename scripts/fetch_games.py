@@ -7,7 +7,7 @@ import urllib.request
 from pathlib import Path
 
 BASE_URL = "https://www.boardspace.net/hive/hivegames"
-DEST = Path(__file__).parent / "games" / "boardspace"
+DEST = Path(__file__).parent.parent / "games" / "boardspace"
 
 YEARS = range(2006, 2027)
 

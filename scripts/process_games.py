@@ -13,12 +13,12 @@ import sys
 import zipfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from hive.sgf import game_type, parse_moves
 from hive.core.game import Game, GameState
 from hive.uhp.engine import UHPEngine
 
-GAMES_DIR = Path(__file__).parent / "games"
+GAMES_DIR = Path(__file__).parent.parent / "games"
 OUTCOMES_CSV = GAMES_DIR / "game_outcomes.csv"
 ELO_CSV = GAMES_DIR / "player_elo.csv"
 

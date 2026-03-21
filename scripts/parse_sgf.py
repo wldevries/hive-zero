@@ -4,7 +4,7 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hive.core.game import Game
 from hive.core.render import render_board
@@ -55,7 +55,7 @@ def render_game(sgf_path: str):
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        games_dir = Path(__file__).parent / 'games'
+        games_dir = Path(__file__).parent.parent / 'games'
         sgf_files = sorted(games_dir.rglob('*.sgf'))
         if not sgf_files:
             print("No SGF files found.")
