@@ -72,6 +72,8 @@ def main():
                               help="Comment to append to every row in the training log")
     train_parser.add_argument("--mzinga-time", type=int, default=2,
                               help="Mzinga search time in seconds per move during eval")
+    train_parser.add_argument("--random-opening-moves", type=int, default=0,
+                              help="Play N random moves at the start of each game before MCTS (not recorded to training buffer)")
 
     # Supervised pre-training
     pretrain_parser = subparsers.add_parser(
@@ -218,6 +220,7 @@ def main():
             leaf_batch_size=args.play_batch_size,
             resign_threshold=args.resign_threshold,
             resign_min_moves=args.resign_min_moves,
+            random_opening_moves=args.random_opening_moves,
             comment=args.comment,
         )
     else:

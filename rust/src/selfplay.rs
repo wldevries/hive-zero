@@ -50,6 +50,7 @@ struct SelfPlayConfig {
     resign_moves: u32,
     resign_min_moves: u32,
     calibration_frac: f32,
+    random_opening_moves: u32,
 }
 
 /// Result of a self-play session, returned to Python.
@@ -174,6 +175,7 @@ impl PySelfPlaySession {
         resign_moves = 5,
         resign_min_moves = 20,
         calibration_frac = 0.1,
+        random_opening_moves = 0,
     ))]
     fn new(
         num_games: usize,
@@ -189,12 +191,14 @@ impl PySelfPlaySession {
         resign_moves: u32,
         resign_min_moves: u32,
         calibration_frac: f32,
+        random_opening_moves: u32,
     ) -> Self {
         PySelfPlaySession {
             config: SelfPlayConfig {
                 num_games, simulations, max_moves, temperature, temp_threshold,
                 playout_cap_p, fast_cap, c_puct, leaf_batch_size,
                 resign_threshold, resign_moves, resign_min_moves, calibration_frac,
+                random_opening_moves,
             },
         }
     }
@@ -256,10 +260,30 @@ impl PySelfPlaySession {
 
         // --- Main game loop ---
         while active.iter().any(|&a| a) {
+            let mut rng = rand::thread_rng();
+
             // Collect games that need MCTS search this turn
             let mut mcts_games: Vec<usize> = Vec::new();
             for gi in 0..num_games {
                 if !active[gi] { continue; }
+
+                // Random opening phase: play a single random move, don't record to history
+                if move_counts[gi] < cfg.random_opening_moves {
+                    let valid = games[gi].valid_moves();
+                    if valid.is_empty() {
+                        games[gi].play_pass();
+                    } else {
+                        let idx = rng.gen_range(0..valid.len());
+                        games[gi].play_move(&valid[idx]);
+                    }
+                    move_counts[gi] += 1;
+                    if games[gi].is_game_over() || move_counts[gi] >= cfg.max_moves {
+                        active[gi] = false;
+                        finished_count += 1;
+                    }
+                    continue;
+                }
+
                 if games[gi].valid_moves().is_empty() {
                     games[gi].play_pass();
                     move_counts[gi] += 1;
@@ -277,7 +301,6 @@ impl PySelfPlaySession {
             let n = mcts_games.len();
 
             // --- Decide fast vs full per game ---
-            let mut rng = rand::thread_rng();
             let is_full: Vec<bool> = if use_playout_cap {
                 (0..n).map(|_| rng.gen::<f32>() < cfg.playout_cap_p).collect()
             } else {

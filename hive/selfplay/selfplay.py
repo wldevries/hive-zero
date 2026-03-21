@@ -79,6 +79,7 @@ class SelfPlayTrainer:
             fast_cap: int = 20,
             replay_window: int = 8,
             leaf_batch_size: int = 512,
+            random_opening_moves: int = 0,
             comment: str = ""):
         """Run the full training loop.
 
@@ -165,6 +166,7 @@ class SelfPlayTrainer:
                 playout_cap_p=playout_cap_p,
                 fast_cap=fast_cap,
                 leaf_batch_size=leaf_batch_size,
+                random_opening_moves=random_opening_moves,
             )
 
             result = sp.play_games(games_per_iter)

@@ -26,6 +26,7 @@ class RustParallelSelfPlay:
                  playout_cap_p: float = 0.0,
                  fast_cap: int = 20,
                  leaf_batch_size: int = 1,
+                 random_opening_moves: int = 0,
                  **kwargs):
         self.model = model
         self.device = device
@@ -40,6 +41,7 @@ class RustParallelSelfPlay:
         self.playout_cap_p = playout_cap_p
         self.fast_cap = fast_cap
         self.leaf_batch_size = leaf_batch_size
+        self.random_opening_moves = random_opening_moves
 
     def _eval_fn(self):
         """Return a callable for Rust's GPU inference callback."""
@@ -82,6 +84,7 @@ class RustParallelSelfPlay:
             resign_moves=self.resign_moves,
             resign_min_moves=self.resign_min_moves,
             calibration_frac=self.calibration_frac,
+            random_opening_moves=self.random_opening_moves,
         )
 
         def progress(finished, total, active, moves, resigned, max_turn=0):
