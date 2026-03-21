@@ -10,20 +10,27 @@ from ..core.game import Game
 GRID_SIZE = 23
 GRID_CENTER = GRID_SIZE // 2  # 11
 
-# Channel layout (all channels are current-player-relative):
-# 0-4:   Current player's pieces on top (Q, S, B, G, A) - binary
-# 5-9:   Opponent's pieces on top (Q, S, B, G, A) - binary
-# 10-14: Current player's pieces in stack (count)
-# 15-19: Opponent's pieces in stack (count)
-# 20:    Stack height (normalized by /7)
-# 21:    Current player's pieces marker (1 = current player's top piece)
-# Total: 22 channels
+# Channel layout (all channels current-player-relative):
+#
+# Base layer — piece at depth 0 of each hex (binary, one per piece):
+#   0-10:  Current player's pieces  (Q, S1, S2, B1, B2, G1, G2, G3, A1, A2, A3)
+#   11-21: Opponent's pieces
+#
+# Stacked beetles — beetle at depth D above the base (binary):
+#   22-25: Current player's Beetle1 at depths 1-4
+#   26-29: Current player's Beetle2 at depths 1-4
+#   30-33: Opponent's Beetle1 at depths 1-4
+#   34-37: Opponent's Beetle2 at depths 1-4
+#
+#   Channel = 22 + player_offset(0 or 8) + (beetle_number-1)*4 + (depth-1)
+#
+# 38: Stack height (normalized /7)
 #
 # Reserve vector (current-player-relative):
-# 0-4:   Current player's reserve counts (normalized)
-# 5-9:   Opponent's reserve counts (normalized)
+#   0-4:  Current player's reserve counts (normalized by max)
+#   5-9:  Opponent's reserve counts
 
-NUM_CHANNELS = 22
+NUM_CHANNELS = 39
 
 PIECE_TYPE_INDEX = {
     PieceType.QUEEN: 0,
@@ -35,6 +42,24 @@ PIECE_TYPE_INDEX = {
 
 # Reserve vector: 5 piece types x 2 colors = 10 values
 RESERVE_SIZE = 10
+
+# Cumulative piece-index offsets within a player (matches Piece::linear_index() % 11)
+# Q=1, S=2, B=2, G=3, A=3 → offsets [0, 1, 3, 5, 8]
+_BASE_TYPES = [PieceType.QUEEN, PieceType.SPIDER, PieceType.BEETLE,
+               PieceType.GRASSHOPPER, PieceType.ANT]
+_TYPE_OFFSET: dict[PieceType, int] = {}
+_off = 0
+for _pt, _cnt in zip(_BASE_TYPES, [PIECE_COUNTS[pt] for pt in _BASE_TYPES]):
+    _TYPE_OFFSET[_pt] = _off
+    _off += _cnt
+
+_STACKED_BEETLE_BASE = 22
+_STACK_HEIGHT_CH = 38
+
+
+def _piece_idx(piece: Piece) -> int:
+    """Piece index within its player (0-10). Mirrors Rust linear_index() % 11."""
+    return _TYPE_OFFSET[piece.piece_type] + (piece.number - 1)
 
 
 def hex_to_grid(h: Hex) -> tuple[int, int]:
@@ -56,18 +81,14 @@ def in_grid(row: int, col: int) -> bool:
 def encode_board(game: Game) -> tuple[np.ndarray, np.ndarray]:
     """Encode game state as (board_tensor, reserve_vector).
 
-    All channels are current-player-relative: channel 0-4 are always the
-    current player's pieces, channels 5-9 are always the opponent's.
-
     Returns:
         board_tensor: shape (NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
         reserve_vector: shape (RESERVE_SIZE,) normalized counts
     """
     board = game.board
     tensor = np.zeros((NUM_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
-    is_white_turn = game.turn_color == PieceColor.WHITE
-    cur_color = PieceColor.WHITE if is_white_turn else PieceColor.BLACK
-    opp_color = PieceColor.BLACK if is_white_turn else PieceColor.WHITE
+    cur_color = game.turn_color
+    opp_color = PieceColor.BLACK if cur_color == PieceColor.WHITE else PieceColor.WHITE
 
     def is_mine(color: PieceColor) -> bool:
         return color == cur_color
@@ -77,28 +98,29 @@ def encode_board(game: Game) -> tuple[np.ndarray, np.ndarray]:
         if not in_grid(row, col):
             continue
 
-        # Top piece — current player's in 0-4, opponent's in 5-9
-        top = stack[-1]
-        offset = 0 if is_mine(top.color) else 5
-        ch = PIECE_TYPE_INDEX[top.piece_type]
-        tensor[offset + ch, row, col] = 1.0
-
-        # All pieces in stack — current player's in 10-14, opponent's in 15-19
-        for piece in stack:
-            offset2 = 10 if is_mine(piece.color) else 15
-            ch2 = PIECE_TYPE_INDEX[piece.piece_type]
-            tensor[offset2 + ch2, row, col] += 1.0
-
         # Stack height
-        tensor[20, row, col] = len(stack) / 7.0
+        tensor[_STACK_HEIGHT_CH, row, col] = len(stack) / 7.0
 
-        # Current player's piece marker
-        if is_mine(top.color):
-            tensor[21, row, col] = 1.0
+        # stack[0] = depth 0 (base piece), stack[-1] = top
+        for depth, piece in enumerate(stack):
+            mine = is_mine(piece.color)
+            idx = _piece_idx(piece)
+
+            if depth == 0:
+                # Base layer
+                ch = idx if mine else 11 + idx
+                tensor[ch, row, col] = 1.0
+            else:
+                # Stacked beetle
+                player_offset = 0 if mine else 8
+                beetle_offset = (piece.number - 1) * 4
+                depth_offset = min(depth - 1, 3)  # depths 1-4 → offsets 0-3
+                ch = _STACKED_BEETLE_BASE + player_offset + beetle_offset + depth_offset
+                tensor[ch, row, col] = 1.0
 
     # Reserve vector — current player first (0-4), opponent second (5-9)
     reserve = np.zeros(RESERVE_SIZE, dtype=np.float32)
-    for i, pt in enumerate(PIECE_TYPE_INDEX):
+    for i, pt in enumerate(_BASE_TYPES):
         max_count = PIECE_COUNTS[pt]
         cur_count = sum(1 for p in game.reserve(cur_color) if p.piece_type == pt)
         reserve[i] = cur_count / max_count if max_count > 0 else 0.0

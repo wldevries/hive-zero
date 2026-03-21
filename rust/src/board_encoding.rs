@@ -3,70 +3,82 @@
 
 use crate::board::{GRID_SIZE, hex_to_grid};
 use crate::game::Game;
-use crate::piece::{PieceColor, ALL_PIECE_TYPES, PIECE_COUNTS};
+use crate::piece::{PieceColor, ALL_PIECE_TYPES, PIECE_COUNTS, PIECES_PER_PLAYER};
 
 /// Number of board encoding channels.
-pub const NUM_CHANNELS: usize = 22;
+pub const NUM_CHANNELS: usize = 39;
 /// Reserve vector size: 5 piece types x 2 colors.
 pub const RESERVE_SIZE: usize = 10;
 
-/// Channel layout (all channels are current-player-relative):
-/// 0-4:   Current player's pieces on top (Q, S, B, G, A) - binary
-/// 5-9:   Opponent's pieces on top (Q, S, B, G, A) - binary
-/// 10-14: Current player's pieces in stack (count)
-/// 15-19: Opponent's pieces in stack (count)
-/// 20:    Stack height (normalized /7)
-/// 21:    Current player's pieces (1 = current player's top piece)
+/// Channel layout (all channels current-player-relative):
+///
+/// Base layer — piece at depth 0 of each hex (binary, one per piece):
+///   0-10:  Current player's pieces  (Q, S1, S2, B1, B2, G1, G2, G3, A1, A2, A3)
+///   11-21: Opponent's pieces
+///
+/// Stacked beetles — beetle at depth D above the base (binary):
+///   22-25: Current player's Beetle1 at depths 1-4
+///   26-29: Current player's Beetle2 at depths 1-4
+///   30-33: Opponent's Beetle1 at depths 1-4
+///   34-37: Opponent's Beetle2 at depths 1-4
+///
+///   Channel = 22 + player_offset(0 or 8) + (beetle_number-1)*4 + (depth-1)
+///
+/// 38: Stack height (normalized /7)
 ///
 /// Reserve vector (current-player-relative):
-/// 0-4:   Current player's reserve counts (normalized)
-/// 5-9:   Opponent's reserve counts (normalized)
+///   0-4:  Current player's reserve counts (normalized by max)
+///   5-9:  Opponent's reserve counts
+
+const STACKED_BEETLE_BASE: usize = 22;
+const STACK_HEIGHT_CH: usize = 38;
+
+#[inline]
+fn piece_idx(piece: crate::piece::Piece) -> usize {
+    piece.linear_index() % PIECES_PER_PLAYER
+}
 
 /// Encode a game state into board tensor and reserve vector.
-/// Board tensor shape: (NUM_CHANNELS, GRID_SIZE, GRID_SIZE) = (22, 23, 23)
+/// Board tensor shape: (NUM_CHANNELS, GRID_SIZE, GRID_SIZE) = (39, 23, 23)
 /// Reserve vector shape: (RESERVE_SIZE,) = (10,)
 pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32]) {
     debug_assert!(board_out.len() == NUM_CHANNELS * GRID_SIZE * GRID_SIZE);
     debug_assert!(reserve_out.len() == RESERVE_SIZE);
 
-    // Zero out
     board_out.fill(0.0);
     reserve_out.fill(0.0);
 
     let is_white_turn = game.turn_color == PieceColor::White;
+    let is_mine = |color: PieceColor| (color == PieceColor::White) == is_white_turn;
 
-    // Helper: is this piece the current player's?
-    let is_mine = |color: PieceColor| -> bool {
-        (color == PieceColor::White) == is_white_turn
-    };
-
-    // Iterate over occupied positions
     for (pos, stack) in game.board.iter_occupied() {
         let (row, col) = match hex_to_grid(pos) {
             Some(rc) => rc,
             None => continue,
         };
-
-        // Top piece — current player's in 0-4, opponent's in 5-9
-        let top = stack.top().unwrap();
-        let offset = if is_mine(top.color()) { 0 } else { 5 };
-        let ch = top.piece_type().index();
-        board_out[(offset + ch) * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col] = 1.0;
-
-        // All pieces in stack — current player's in 10-14, opponent's in 15-19
-        for piece in stack.iter() {
-            let offset2 = if is_mine(piece.color()) { 10 } else { 15 };
-            let ch2 = piece.piece_type().index();
-            board_out[(offset2 + ch2) * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col] += 1.0;
-        }
+        let cell = row * GRID_SIZE + col;
 
         // Stack height
-        board_out[20 * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col] =
+        board_out[STACK_HEIGHT_CH * GRID_SIZE * GRID_SIZE + cell] =
             stack.height() as f32 / 7.0;
 
-        // Current player's piece marker
-        if is_mine(top.color()) {
-            board_out[21 * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col] = 1.0;
+        // stack.iter() goes bottom-to-top; depth 0 = base piece
+        for (depth, piece) in stack.iter().enumerate() {
+            let mine = is_mine(piece.color());
+            let idx = piece_idx(piece);
+
+            if depth == 0 {
+                // Base layer: any piece type, current-player-relative
+                let ch = if mine { idx } else { 11 + idx };
+                board_out[ch * GRID_SIZE * GRID_SIZE + cell] = 1.0;
+            } else {
+                // Stacked piece — must be a beetle
+                let player_offset = if mine { 0 } else { 8 };
+                let beetle_offset = (piece.number() as usize - 1) * 4;
+                let depth_offset = (depth - 1).min(3); // depths 1-4 → offsets 0-3
+                let ch = STACKED_BEETLE_BASE + player_offset + beetle_offset + depth_offset;
+                board_out[ch * GRID_SIZE * GRID_SIZE + cell] = 1.0;
+            }
         }
     }
 
@@ -89,91 +101,102 @@ pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32])
 mod tests {
     use super::*;
     use crate::piece::{Piece, PieceType};
-    use crate::game::Game;
+    use crate::game::{Game, Move};
+
+    fn encode(game: &Game) -> (Vec<f32>, Vec<f32>) {
+        let mut bt = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
+        let mut rv = vec![0.0f32; RESERVE_SIZE];
+        encode_board(game, &mut bt, &mut rv);
+        (bt, rv)
+    }
+
+    fn at(bt: &[f32], ch: usize, row: usize, col: usize) -> f32 {
+        bt[ch * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col]
+    }
 
     #[test]
-    fn test_encode_empty_board() {
+    fn test_empty_board() {
         let game = Game::new();
-        let mut board_tensor = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
-        let mut reserve_vec = vec![0.0f32; RESERVE_SIZE];
-        encode_board(&game, &mut board_tensor, &mut reserve_vec);
-
-        // Empty board — all board channels should be zero
-        assert!(board_tensor.iter().all(|&v| v == 0.0));
-
+        let (bt, rv) = encode(&game);
+        assert!(bt.iter().all(|&v| v == 0.0));
         // All pieces in reserve for both players
         for i in 0..RESERVE_SIZE {
-            assert_eq!(reserve_vec[i], 1.0);
+            assert_eq!(rv[i], 1.0);
         }
     }
 
     #[test]
-    fn test_encode_one_piece() {
+    fn test_base_layer_current_player_relative() {
         let mut game = Game::new();
         let wq = Piece::new(PieceColor::White, PieceType::Queen, 1);
-        game.play_move(&crate::game::Move::placement(wq, (0, 0)));
-        // Now it's black's turn — white queen is the *opponent's* piece
+        game.play_move(&Move::placement(wq, (0, 0)));
+        // Black's turn — white queen is opponent's piece (channel 11 = opponent Q)
 
-        let mut board_tensor = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
-        let mut reserve_vec = vec![0.0f32; RESERVE_SIZE];
-        encode_board(&game, &mut board_tensor, &mut reserve_vec);
+        let (bt, rv) = encode(&game);
+        // White queen at center (11,11) — opponent's piece, index 0 → channel 11
+        assert_eq!(at(&bt, 11, 11, 11), 1.0);
+        // Not in current player's channels
+        assert_eq!(at(&bt, 0, 11, 11), 0.0);
+        // Opponent (white) queen used → reserve slot 5 (opponent Q) = 0
+        assert_eq!(rv[5], 0.0);
+        // Current player (black) queen still in reserve
+        assert_eq!(rv[0], 1.0);
+    }
 
-        let row = 11;
-        let col = 11;
-        // Channel 5 = opponent's queen on top (black is current player, white queen is opponent's)
-        assert_eq!(
-            board_tensor[5 * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col],
-            1.0
-        );
-        // Channel 0 (current player on top) should be 0
-        assert_eq!(
-            board_tensor[0 * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col],
-            0.0
-        );
-        // Channel 15 = opponent's queen in stack
-        assert_eq!(
-            board_tensor[15 * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col],
-            1.0
-        );
-        // Stack height = 1/7
-        let h = board_tensor[20 * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col];
-        assert!((h - 1.0 / 7.0).abs() < 1e-6);
+    #[test]
+    fn test_stacked_beetle() {
+        let mut game = Game::new();
+        let wq  = Piece::new(PieceColor::White, PieceType::Queen, 1);
+        let wb1 = Piece::new(PieceColor::White, PieceType::Beetle, 1);
+        let bq  = Piece::new(PieceColor::Black, PieceType::Queen, 1);
+        let bb1 = Piece::new(PieceColor::Black, PieceType::Beetle, 1);
 
-        // Reserve: black (current player) has all pieces, white (opponent) missing queen
-        // current player reserve[0] (queen) = 1.0 (black queen still in reserve)
-        assert_eq!(reserve_vec[0], 1.0);
-        // opponent reserve[0] (queen) = 0.0 (white queen placed)
-        assert_eq!(reserve_vec[5], 0.0);
+        // Place pieces to set up a stack: wQ at (0,0), bQ adjacent, then move beetles on top
+        game.play_move(&Move::placement(wq, (0, 0)));
+        game.play_move(&Move::placement(bq, (1, 0)));
+        game.play_move(&Move::placement(wb1, (-1, 0)));
+        game.play_move(&Move::placement(bb1, (2, 0)));
+        // Move wb1 onto wQ — stack at (0,0): [wQ, wB1], white's turn
+        game.play_move(&Move::movement(wb1, (-1, 0), (0, 0)));
+        // Now black's turn. Stack at (0,0) from black's perspective:
+        // base = wQ (opponent's Q, channel 11), stacked = wB1 (opponent's B1 at depth 1)
+        // Opponent's B1 at depth 1: channel = 22 + 8 + 0*4 + 0 = 30
+
+        let (bt, _) = encode(&game);
+        // base at (0,0) = opponent's queen → channel 11
+        assert_eq!(at(&bt, 11, 11, 11), 1.0);
+        // opponent's B1 at depth 1 → channel 30
+        assert_eq!(at(&bt, 30, 11, 11), 1.0);
+        // stack height = 2/7
+        let h = at(&bt, 38, 11, 11);
+        assert!((h - 2.0 / 7.0).abs() < 1e-6);
     }
 
     #[test]
     fn test_symmetric_encoding() {
-        // A position encoded from white's turn should look the same as the
-        // color-mirrored position encoded from black's turn.
-        // We verify this by placing white's queen and checking that the
-        // "current player on top" channel (0) fires when it's white's turn
-        // but not when it's black's turn.
-        let mut game = Game::new();
+        // After placing wQ, encoding from black's turn should show it in opponent's channels.
+        // After placing bQ (mirrored), encoding from white's turn should show it the same way.
+        let mut game_a = Game::new();
         let wq = Piece::new(PieceColor::White, PieceType::Queen, 1);
+        let bq = Piece::new(PieceColor::Black, PieceType::Queen, 1);
 
-        // White's first turn: encode before placing (white is current player, reserve only)
-        let mut bt = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
-        let mut rv = vec![0.0f32; RESERVE_SIZE];
-        encode_board(&game, &mut bt, &mut rv);
-        // All reserve, current player (white) has full reserve at indices 0-4
-        assert_eq!(rv[0], 1.0); // white queen in reserve
+        game_a.play_move(&Move::placement(wq, (0, 0)));
+        // Black's turn: wQ is opponent at center
+        let (bt_a, _) = encode(&game_a);
 
-        game.play_move(&crate::game::Move::placement(wq, (0, 0)));
-        // Now black's turn — white queen is opponent's piece
-        let mut bt2 = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
-        let mut rv2 = vec![0.0f32; RESERVE_SIZE];
-        encode_board(&game, &mut bt2, &mut rv2);
+        let mut game_b = Game::new();
+        // Skip to black's first move by placing wQ somewhere else first
+        let wa1 = Piece::new(PieceColor::White, PieceType::Ant, 1);
+        game_b.play_move(&Move::placement(wa1, (0, 0)));
+        game_b.play_move(&Move::placement(bq, (1, 0)));
+        // White's turn: bQ is opponent at (1,0)
+        let (bt_b, _) = encode(&game_b);
 
-        // Opponent (white) queen is placed → opponent reserve[0] = 0
-        assert_eq!(rv2[5], 0.0);
-        // Current player (black) queen still in reserve → current reserve[0] = 1
-        assert_eq!(rv2[0], 1.0);
-        // Opponent queen on top at center → channel 5
-        assert_eq!(bt2[5 * GRID_SIZE * GRID_SIZE + 11 * GRID_SIZE + 11], 1.0);
+        // Both cases: opponent's queen in channel 11
+        assert_eq!(at(&bt_a, 11, 11, 11), 1.0); // wQ at center, black's turn
+        assert_eq!(at(&bt_b, 11, 11, 12), 1.0); // bQ at (1,0)=(row11,col12), white's turn
+        // Neither appears in current player's channels (0-10)
+        assert_eq!(at(&bt_a, 0, 11, 11), 0.0);
+        assert_eq!(at(&bt_b, 0, 11, 12), 0.0);
     }
 }

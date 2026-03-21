@@ -30,7 +30,7 @@ rust/
 
 ## Key Design Decisions
 - **Hex coordinates**: Axial (q, r) system. Flat-top hexagons.
-- **Board encoding**: 23x23 grid with 22 channels, current-player-relative. Channels 0-4: current player's pieces on top; 5-9: opponent's on top; 10-14: current player's in stack; 15-19: opponent's in stack; 20: stack height; 21: current player marker. Reserve vector also current-player-relative (0-4: mine, 5-9: opponent's).
+- **Board encoding**: 23x23 grid with 39 channels, fully current-player-relative and piece-identity-aware. Channels 0-10: current player's pieces at base (Q,S1,S2,B1,B2,G1,G2,G3,A1,A2,A3); 11-21: opponent's pieces at base; 22-37: stacked beetles by identity and depth (4 beetles × 4 depths, channel=22+player_offset(0/8)+(beetle_num-1)*4+(depth-1)); 38: stack height. Reserve vector current-player-relative (0-4: mine, 5-9: opponent's). Policy head also uses piece-identity channels 0-10 (same indexing).
 - **Move encoding**: Per-piece policy space (11 channels x 23 x 23 = 5819). Channel = piece index within current player (0=Queen, 1-2=Spider, 3-4=Beetle, 5-7=Grasshopper, 8-10=Ant). Destination cell stores the logit. Same channel scheme covers both placement and movement — no direction encoding. Canonical placement ordering enforced in valid_moves(): only lowest-numbered reserve piece per type is offered.
 - **Base game only**: Queen, Beetle, Grasshopper, Spider, Ant. No expansions.
 - **Beetle stacking**: Up to depth 7.
