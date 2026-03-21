@@ -79,7 +79,7 @@ class SelfPlayTrainer:
             fast_cap: int = 20,
             replay_window: int = 8,
             leaf_batch_size: int = 512,
-            random_opening_moves: int = 0,
+            random_opening_moves: int | tuple[int, int] = 0,
             opening_games_csv: str | None = None,
             opening_boardspace_dir: str | None = None,
             boardspace_frac: float = 1.0,
@@ -164,7 +164,8 @@ class SelfPlayTrainer:
             if opening_book:
                 opening_label = f" [book={boardspace_frac:.0%}]"
             elif random_opening_moves:
-                opening_label = f" [rand={random_opening_moves}]"
+                rand_str = f"{random_opening_moves[0]}-{random_opening_moves[1]}" if isinstance(random_opening_moves, tuple) else random_opening_moves
+                opening_label = f" [rand={rand_str}]"
             print(f"\n=== Iteration {iteration} [{mode_label}]{cap_label}{opening_label}{elapsed_str} ===")
 
             # Generate self-play games
@@ -172,8 +173,9 @@ class SelfPlayTrainer:
             torch.cuda.empty_cache()
             _print_vram("pre-play")
 
+            _book_opening_moves = random_opening_moves[1] if isinstance(random_opening_moves, tuple) else random_opening_moves
             opening_sequences = _make_opening_sequences(
-                games_per_iter, opening_book, boardspace_frac, random_opening_moves,
+                games_per_iter, opening_book, boardspace_frac, _book_opening_moves,
             ) if opening_book else None
 
             sp = RustParallelSelfPlay(
@@ -495,18 +497,15 @@ def _make_opening_sequences(
     boardspace_frac fraction of games get a boardspace prefix of exactly
     opening_moves moves (sampled from a random human game); the rest get an
     empty list (Rust will fall back to random_opening_moves for those games).
-    Games shorter than opening_moves are skipped.
+    Games shorter than opening_moves moves are skipped.
     """
     import random as _random
-    eligible = [g for g in book if len(g) > opening_moves]
+    eligible = [g for g in book if len(g) >= opening_moves]
     sequences = []
     for _ in range(num_games):
         if eligible and _random.random() < boardspace_frac:
             game_moves = _random.choice(eligible)
-            # Pick a random start offset so we don't always replay from move 0
-            max_start = len(game_moves) - opening_moves
-            start = _random.randint(0, max_start)
-            sequences.append(game_moves[start:start + opening_moves])
+            sequences.append(game_moves[:opening_moves])
         else:
             sequences.append([])
     return sequences

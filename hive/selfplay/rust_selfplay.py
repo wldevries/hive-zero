@@ -26,7 +26,7 @@ class RustParallelSelfPlay:
                  playout_cap_p: float = 0.0,
                  fast_cap: int = 20,
                  leaf_batch_size: int = 1,
-                 random_opening_moves: int = 0,
+                 random_opening_moves: int | tuple[int, int] = 0,
                  **kwargs):
         self.model = model
         self.device = device
@@ -88,7 +88,8 @@ class RustParallelSelfPlay:
             resign_moves=self.resign_moves,
             resign_min_moves=self.resign_min_moves,
             calibration_frac=self.calibration_frac,
-            random_opening_moves=self.random_opening_moves,
+            random_opening_moves_min=self.random_opening_moves[0] if isinstance(self.random_opening_moves, tuple) else self.random_opening_moves,
+            random_opening_moves_max=self.random_opening_moves[1] if isinstance(self.random_opening_moves, tuple) else self.random_opening_moves,
         )
 
         from tqdm import tqdm

@@ -50,7 +50,8 @@ struct SelfPlayConfig {
     resign_moves: u32,
     resign_min_moves: u32,
     calibration_frac: f32,
-    random_opening_moves: u32,
+    random_opening_moves_min: u32,
+    random_opening_moves_max: u32,
 }
 
 /// Result of a self-play session, returned to Python.
@@ -175,7 +176,8 @@ impl PySelfPlaySession {
         resign_moves = 5,
         resign_min_moves = 20,
         calibration_frac = 0.1,
-        random_opening_moves = 0,
+        random_opening_moves_min = 0,
+        random_opening_moves_max = 0,
     ))]
     fn new(
         num_games: usize,
@@ -191,14 +193,15 @@ impl PySelfPlaySession {
         resign_moves: u32,
         resign_min_moves: u32,
         calibration_frac: f32,
-        random_opening_moves: u32,
+        random_opening_moves_min: u32,
+        random_opening_moves_max: u32,
     ) -> Self {
         PySelfPlaySession {
             config: SelfPlayConfig {
                 num_games, simulations, max_moves, temperature, temp_threshold,
                 playout_cap_p, fast_cap, c_puct, leaf_batch_size,
                 resign_threshold, resign_moves, resign_min_moves, calibration_frac,
-                random_opening_moves,
+                random_opening_moves_min, random_opening_moves_max,
             },
         }
     }
@@ -237,6 +240,18 @@ impl PySelfPlaySession {
         // Contiguous training data buffers (grow as we go)
         let mut board_buf: Vec<f32> = Vec::new();
         let mut reserve_buf: Vec<f32> = Vec::new();
+
+        // Per-game random opening move counts (sampled once per game from [min, max])
+        let mut game_random_opening_moves: Vec<u32> = {
+            let mut rng = rand::thread_rng();
+            (0..num_games).map(|_| {
+                if cfg.random_opening_moves_max > cfg.random_opening_moves_min {
+                    rng.gen_range(cfg.random_opening_moves_min..=cfg.random_opening_moves_max)
+                } else {
+                    cfg.random_opening_moves_min
+                }
+            }).collect()
+        };
 
         // Opening sequence state: tracks games that have abandoned their sequence early
         let mut opening_done: Vec<bool> = vec![false; num_games];
@@ -293,7 +308,7 @@ impl PySelfPlaySession {
                         }
                         continue;
                     }
-                } else if move_counts[gi] < cfg.random_opening_moves {
+                } else if move_counts[gi] < game_random_opening_moves[gi] {
                     // Random opening phase: play a single random move
                     let valid = games[gi].valid_moves();
                     if valid.is_empty() {

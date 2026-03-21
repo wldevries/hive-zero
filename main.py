@@ -72,8 +72,13 @@ def main():
                               help="Comment to append to every row in the training log")
     train_parser.add_argument("--mzinga-time", type=int, default=2,
                               help="Mzinga search time in seconds per move during eval")
-    train_parser.add_argument("--random-opening-moves", type=int, default=0,
-                              help="Play N random moves at the start of each game before MCTS (not recorded to training buffer)")
+    def _opening_moves(s):
+        if '-' in s:
+            lo, hi = s.split('-', 1)
+            return (int(lo), int(hi))
+        return int(s)
+    train_parser.add_argument("--random-opening-moves", type=_opening_moves, default=0,
+                              help="Play N (or N-M for a random range) random moves at the start of each game before MCTS")
     train_parser.add_argument("--opening-book", type=str, default=None,
                               help="Path to game_outcomes.csv to enable boardspace opening positions")
     train_parser.add_argument("--opening-boardspace-dir", type=str, default="games/boardspace",
