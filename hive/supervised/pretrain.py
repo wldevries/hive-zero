@@ -341,7 +341,6 @@ class Pretrainer:
         batch_size: int = 512,
         buffer_size: int = 100_000,
         epochs_per_chunk: int = 3,
-        checkpoint_every_chunks: int = 10,
         checkpoint_dir: str = "checkpoints",
         verbose_samples: bool = False,
     ) -> None:
@@ -355,8 +354,7 @@ class Pretrainer:
             buffer_size: Max positions held in the training buffer before
                 training and clearing.
             epochs_per_chunk: SGD epochs run each time the buffer is trained.
-            checkpoint_every_chunks: Save a checkpoint this often.
-            checkpoint_dir: Directory for periodic checkpoints.
+            checkpoint_dir: Directory for per-epoch checkpoints.
         """
         os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -460,23 +458,6 @@ class Pretrainer:
                             f"epoch={epoch}\n"
                         )
 
-                        # Save model.pt after every chunk.
-                        self._save_checkpoint(
-                            self.model, self.model_path, chunk_idx,
-                            {"policy_loss": losses["policy_loss"],
-                             "value_loss": losses["value_loss"]},
-                        )
-
-                        if chunk_idx % checkpoint_every_chunks == 0:
-                            ckpt_path = os.path.join(
-                                checkpoint_dir, f"{model_name}_iter{chunk_idx}.pt"
-                            )
-                            self._save_checkpoint(
-                                self.model, ckpt_path, chunk_idx,
-                                {"policy_loss": losses["policy_loss"],
-                                 "value_loss": losses["value_loss"]},
-                            )
-                            print(f"  Checkpoint → {ckpt_path}")
 
             total_errors += errors_this_epoch
             elapsed = time.time() - epoch_start
@@ -486,13 +467,15 @@ class Pretrainer:
                 f"Errors: {errors_this_epoch}."
             )
 
-            # Save model after each full epoch.
-            self._save_checkpoint(
-                self.model, self.model_path, epoch,
-                {"policy_loss": losses.get("policy_loss", 0),
-                 "value_loss": losses.get("value_loss", 0)},
-            )
-            print(f"  Model saved → {self.model_path}")
+            # Save model.pt and a numbered epoch checkpoint.
+            epoch_losses = {
+                "policy_loss": losses.get("policy_loss", 0),
+                "value_loss": losses.get("value_loss", 0),
+            }
+            self._save_checkpoint(self.model, self.model_path, epoch, epoch_losses)
+            ckpt_path = os.path.join(checkpoint_dir, f"{model_name}_epoch{epoch}.pt")
+            self._save_checkpoint(self.model, ckpt_path, epoch, epoch_losses)
+            print(f"  Model saved → {self.model_path}  |  Checkpoint → {ckpt_path}")
 
         log.close()
         print(
@@ -525,8 +508,6 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--buffer-size", type=int, default=100_000)
     parser.add_argument("--epochs-per-chunk", type=int, default=3)
-    parser.add_argument("--checkpoint-every", type=int, default=10,
-                        help="Save checkpoint every N chunks")
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     args = parser.parse_args()
 
@@ -555,7 +536,6 @@ def main() -> None:
         batch_size=args.batch_size,
         buffer_size=args.buffer_size,
         epochs_per_chunk=args.epochs_per_chunk,
-        checkpoint_every_chunks=args.checkpoint_every,
         checkpoint_dir=args.checkpoint_dir,
     )
 
