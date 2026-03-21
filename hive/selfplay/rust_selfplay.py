@@ -91,15 +91,21 @@ class RustParallelSelfPlay:
             random_opening_moves=self.random_opening_moves,
         )
 
+        from tqdm import tqdm
+
+        pbar = tqdm(total=self.max_moves, unit="turn", desc="  Self-play", leave=False)
+
         def progress(finished, total, active, moves, resigned, max_turn=0):
-            resign_str = f", {resigned} resigned" if resigned else ""
-            print(f"\r  Games: {finished}/{total} done, "
-                  f"{active} active (turn {max_turn}), "
-                  f"{moves} total moves{resign_str}", end="", flush=True)
+            advance = max_turn - pbar.n
+            if advance > 0:
+                pbar.update(advance)
+            pbar.set_postfix(active=f"{active}/{total}",
+                             resigned=resigned if resigned else None)
 
         result = session.play_games(self._eval_fn(), progress,
                                     opening_sequences=opening_sequences)
-        print()  # newline after progress
+        pbar.update(pbar.total - pbar.n)
+        pbar.close()
         return result
 
 
