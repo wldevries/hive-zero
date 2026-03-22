@@ -32,32 +32,28 @@ covering per-game: ply count, winner, decisive/draw, queen-surrounded turn.
 ### Action item: Validate engine rules against boardspace corpus
 
 Replay every boardspace SGF through the Rust engine and check for rule violations or
-desync. Currently `process_games.py` already replays games via the Python `Game` wrapper
-but silently swallows errors. This action item makes errors visible and categorised:
-
-- Count and log games where replay fails (move rejected by engine rules)
-- For failed games, record the failing move and ply number
-- Distinguish between parse errors (bad SGF) and actual rule disagreements
-- Report a breakdown: total games, clean replays, parse failures, rule errors
-
-This gives confidence that the engine's movement rules (One Hive, gate blocking, beetle
-stacking, slide rules per piece type) match what boardspace enforces. Any systematic rule
-error found here is also a training bug since self-play data quality depends on correct
+desync. This gives confidence that the engine's movement rules (One Hive, gate blocking,
+beetle stacking, slide rules per piece type) match what boardspace enforces. Any systematic
+rule error found here is also a training bug since self-play data quality depends on correct
 move generation.
 
-**Implementation:**
+**Done:**
 
-1. Move UHP move string parsing out of the Python `Game`. Two options — TBD:
-   - Push into Rust (`hive_engine`) and expose via PyO3
-   - Keep in Python but consolidate into `hive/uhp/` with no dependency on `hive/core/`
-2. Move all game replay logic in `process_games.py` (and anywhere else that uses the
-   Python `Game`) to use `RustGame` from `hive_engine` instead. The Rust engine is what
-   self-play and MCTS actually run, so validation against it is the meaningful test.
-3. Once no code outside of `hive/core/` references the Python game logic, delete
-   `hive/core/rules.py`, `hive/core/game.py`, `hive/core/board.py`, `hive/core/pieces.py`,
-   and `hive/core/hex.py`. Keep only what has no Rust equivalent (e.g. `render.py`).
-4. With the above done, extend `process_games.py` to surface errors verbosely. A `--strict`
-   flag that aborts on first rule error would help with debugging.
+- UHP parsing extracted to `rust/src/uhp.rs` as free functions (no Python dependency).
+- Replay uses `play_uhp_unchecked` — skips `valid_moves()` so boardspace moves go straight
+  to the engine. Invalid moves surface as errors instead of being silently filtered.
+- Board mutations (`place_piece`, `move_piece`, `remove_piece`) return `Result` instead of
+  panicking, so OOB and stack mismatches are reported per-game.
+- Rust CLI (`hive-zero replay`) replays the full corpus with error reporting.
+
+**Remaining:**
+
+- Categorise replay errors (OOB vs stack mismatch vs parse failure) and fix underlying
+  engine bugs revealed by the corpus.
+- Migrate `process_games.py` to use `RustGame` from `hive_engine` instead of Python `Game`.
+- Once no code outside `hive/core/` references Python game logic, delete `hive/core/rules.py`,
+  `hive/core/game.py`, `hive/core/board.py`, `hive/core/pieces.py`, `hive/core/hex.py`.
+  Keep only what has no Rust equivalent (e.g. `render.py`).
 
 ## Board recentering and dynamic bounds
 

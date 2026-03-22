@@ -27,14 +27,11 @@ history. A tree with 10K nodes = ~40MB just for board clones, causing massive ca
 selection. Only the leaf needs the full game state for encoding. This is what most competitive
 MCTS implementations do.
 
-### `parse_and_play_uhp` generates all valid moves to find one (high impact for replay)
+### `parse_and_play_uhp` valid-moves bypass for replay (done)
 
-`parse_and_play_uhp` already knows the piece and destination hex from parsing the UHP string,
-but then calls `valid_moves()` — computing all placements, articulation points, and all piece
-destinations — then does a linear search for the matching move.
-
-**Fix**: Add a `play_move_direct(piece, to)` that validates the specific move without
-generating all others. For MCTS this doesn't matter since it needs all moves anyway.
+Replay used to call `valid_moves()` for every move just to validate it. Now
+`play_uhp_unchecked()` skips validation entirely — parses the UHP string and applies the
+move directly. Board mutations return `Result` so invalid moves are caught without panicking.
 
 ### Linear `.contains()` checks instead of bitset (medium impact)
 
