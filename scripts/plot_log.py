@@ -6,11 +6,12 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 
 def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
-    df = pd.read_csv(csv_path, skipinitialspace=True)
+    df = pd.read_csv(csv_path, skipinitialspace=True, on_bad_lines="warn")
 
     total = df["wins_w"] + df["wins_b"] + df["draws"]
     df["win_w_pct"] = df["wins_w"] / total * 100
@@ -26,9 +27,11 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
     ax1.plot(iters, df["win_w_pct"], label="White wins %", color="steelblue")
     ax1.plot(iters, df["win_b_pct"], label="Black wins %", color="tomato")
     ax1.plot(iters, df["draw_pct"], label="Draws %", color="gray", linestyle="--")
+    trend = np.poly1d(np.polyfit(iters, df["draw_pct"], 1))
+    ax1.plot(iters, trend(iters), color="gray", linestyle="-", linewidth=1, alpha=0.5, label="Draws trend")
     ax1.set_ylabel("Percentage")
     ax1.set_ylim(0, 100)
-    ax1.legend(loc="upper right")
+    ax1.legend(loc="lower left", bbox_to_anchor=(0, 1.02, 1, 0.1), ncol=4, mode="expand", borderaxespad=0, fontsize=8)
     ax1.grid(True, alpha=0.3)
     ax1.set_title("Game outcomes per iteration")
 
@@ -47,7 +50,7 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
     ax2.plot(iters, df["qd_loss"], label="Queen danger loss", color="mediumpurple", linewidth=1)
     ax2.set_xlabel("Iteration")
     ax2.set_ylabel("Loss")
-    ax2.legend(loc="upper right")
+    ax2.legend(loc="lower left", bbox_to_anchor=(0, 1.02, 1, 0.1), ncol=4, mode="expand", borderaxespad=0, fontsize=8)
     ax2.grid(True, alpha=0.3)
     ax2.set_title("Training losses")
 

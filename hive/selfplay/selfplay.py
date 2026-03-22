@@ -6,7 +6,7 @@ import numpy as np
 import os
 from typing import Optional
 
-from ..training_log import LOG_HEADER
+from ..training_log import LOG_HEADER, csv_comment
 
 import colorama
 colorama.init()
@@ -268,7 +268,7 @@ class SelfPlayTrainer:
                             f"{len(replay_buffer)},{losses['total_loss']:.6f},"
                             f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
                             f"{losses.get('qd_loss', 0):.6f},"
-                            f"{lr:.8f},{play_time + train_time:.1f},{self._comment}\n")
+                            f"{lr:.8f},{play_time + train_time:.1f},{csv_comment(self._comment)}\n")
             self._comment = ""
             self._log.flush()
 
@@ -392,7 +392,7 @@ class SelfPlayTrainer:
             shutil.copy2(best_model_path, self.model_path)
             print(f"  {_cg(w)}W/{_cy(d)}D/{_cr(l)}L → best model: {winner_label}")
             self._log.write(f"{iteration},pit-bootstrap,{simulations},{w},{l},{d},0,0,0,"
-                            f"{score:.6f},0,0,0,0,{self._comment}\n")
+                            f"{score:.6f},0,0,0,0,{csv_comment(self._comment)}\n")
             self._log.flush()
             return
 
@@ -430,7 +430,7 @@ class SelfPlayTrainer:
         shutil.copy2(best_model_path, self.model_path)
 
         self._log.write(f"{iteration},pit,{simulations},{w},{l},{d},0,0,0,"
-                        f"{score:.6f},0,0,0,0,{self._comment}\n")
+                        f"{score:.6f},0,0,0,0,{csv_comment(self._comment)}\n")
         self._log.flush()
 
     def _run_eval(self, eval_config: dict, iteration: int, replay_buffer=None):
@@ -480,7 +480,7 @@ class SelfPlayTrainer:
             # Log to CSV
             self._log.write(f"{iteration},eval,{eval_config['simulations']},{w},{l},{d},0,{len(samples)},"
                             f"{len(replay_buffer) if replay_buffer else 0},"
-                            f"{score:.6f},0,0,0,0,{self._comment}\n")
+                            f"{score:.6f},0,0,0,0,{csv_comment(self._comment)}\n")
             self._log.flush()
         except Exception as e:
             print(f"  Eval failed: {e}")
