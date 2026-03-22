@@ -59,6 +59,42 @@ failed (all OOB — see board recentering below). 99.7% success rate on non-skip
   `hive/core/game.py`, `hive/core/board.py`, `hive/core/pieces.py`, `hive/core/hex.py`.
   Keep only what has no Rust equivalent (e.g. `render.py`).
 
+## Additional auxiliary training heads
+
+The queen danger (QD) auxiliary head provides gradient signal on every position, even in drawn
+games, but the draw convergence problem persists. Two more auxiliary signals could help the
+network develop stronger positional understanding:
+
+### Queen escape squares
+
+Number of empty hexes the queen can legally slide to, divided by 6. Measures how trapped the
+queen is — complementary to QD. A queen with 4 occupied neighbors but 1 escape route is very
+different from 4 neighbors and 0 escapes.
+
+- **Target**: legal queen slide destinations / 6 (0 = trapped, ~0.83 = free). 0 if queen not placed.
+- **Per-position, per-player**: computed at time of play, like QD. Two outputs: my_queen_escape, opp_queen_escape.
+- **Training**: sigmoid output, MSE loss, same as QD.
+
+### Piece mobility ratio
+
+Fraction of a player's pieces on the board that have at least one legal move (not pinned by
+the one-hive rule or fully surrounded). Measures positional squeeze — a player losing mobility
+is getting outplayed.
+
+- **Target**: pieces with ≥1 legal move / total pieces on board (0 = all pinned, 1 = all mobile). 0 if no pieces placed.
+- **Per-position, per-player**: two outputs: my_mobility, opp_mobility.
+- **Training**: sigmoid output, MSE loss, same as QD.
+
+### Implementation
+
+- Extend the existing auxiliary head in the model (currently 2 QD outputs) to 6 outputs:
+  [my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility].
+- Existing trunk weights preserved via `strict=False` in `load_checkpoint`; new head layers
+  randomly initialized. Training can continue from current checkpoint.
+- Compute targets in `rust/src/selfplay.rs` alongside existing QD computation.
+- Queen escape: check slide legality for each of queen's 6 neighbor hexes.
+- Piece mobility: for each piece, check one-hive rule + has at least one destination.
+
 ## Board recentering and dynamic bounds
 
 ### Problem
