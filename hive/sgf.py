@@ -7,13 +7,21 @@ from collections import defaultdict
 from pathlib import Path
 
 
+_EXPANSION_PIECE_PAT = re.compile(r'\b[wb][MLP]\d*\b')
+
 def game_type(content: str) -> str:
-    """Return 'base' or 'expansion' based on the SU field."""
+    """Return 'base' or 'expansion'.
+
+    Checks the SU field first, then falls back to scanning move actions for
+    expansion piece names (M=Mosquito, L=Ladybug, P=Pillbug) — some older
+    files omit the expansion tag from SU but still use expansion pieces.
+    """
     m = re.search(r'SU\[([^\]]+)\]', content)
-    if not m:
-        return 'base'
-    su = m.group(1).lower()
-    return 'expansion' if re.search(r'hive-[a-z]+', su) else 'base'
+    if m and re.search(r'hive-[a-z]+', m.group(1).lower()):
+        return 'expansion'
+    if _EXPANSION_PIECE_PAT.search(content):
+        return 'expansion'
+    return 'base'
 
 
 def parse_moves(content: str):
@@ -23,11 +31,17 @@ def parse_moves(content: str):
     new format (uppercase commands, color-prefixed pieces like wB1/bA1).
     Handles Pick/Pickb + Dropb pairs, combined Move/movedone lines, and pass.
     Expansion pieces (M, L, P) are passed through as-is.
+
+    Mid-turn undo: a player may drop a piece, pick it back up, then drop it
+    at a different position before confirming with "done". Only the final drop
+    (the one before "done") is yielded.
     """
     coord_stack: dict[str, list[str]] = defaultdict(list)  # 'C-R' -> [bottom..top]
     piece_coords: dict[str, str] = {}  # piece -> 'C-R'
     move_count = 0
     pending_old_coords: str | None = None  # set by Pickb, consumed by Dropb
+    # Buffered move waiting for "done" confirmation: (piece, uhp_ref, old_coords, new_coords)
+    pending_move: tuple | None = None
 
     # Capture player index (0=white, 1=black) for inferring color in old format
     action_pat = re.compile(r';\s*P([01])\[\d+\s+(.*?)\](?:TM\[\d+\])?', re.MULTILINE)
@@ -38,6 +52,13 @@ def parse_moves(content: str):
         low = action.lower()
 
         if low.startswith('done') or low.startswith('start'):
+            # Finalise the buffered move for this turn.
+            if pending_move is not None:
+                piece, uhp_ref, old_coords, new_coords = pending_move
+                yield piece if uhp_ref == '' else f"{piece} {uhp_ref}"
+                _update_coords(coord_stack, piece_coords, piece, old_coords, new_coords)
+                move_count += 1
+                pending_move = None
             pending_old_coords = None
             continue
 
@@ -50,7 +71,15 @@ def parse_moves(content: str):
         pb = re.match(r'pickb\s+([A-Za-z])\s+(\d+)\s+(\S+)', action, re.IGNORECASE)
         if pb:
             col, row = pb.group(1).upper(), pb.group(2)
-            pending_old_coords = f"{col}-{row}"
+            picked_coords = f"{col}-{row}"
+
+            if pending_move is not None and picked_coords == pending_move[3]:
+                # Player is picking up the piece they just dropped this turn (undo).
+                # Cancel the buffered move and restore the original from-position.
+                pending_old_coords = pending_move[2]  # original from (None = was in reserve)
+                pending_move = None
+            else:
+                pending_old_coords = picked_coords
             continue
 
         # Drop: "Dropb wS1 N 13 ." (new) or "dropb A1 O 13 wB1-" (old)
@@ -64,9 +93,8 @@ def parse_moves(content: str):
 
             uhp_ref = _resolve_ref(ref_raw, new_coords, piece, move_count,
                                    coord_stack, piece_coords)
-            yield piece if uhp_ref == '' else f"{piece} {uhp_ref}"
-            _update_coords(coord_stack, piece_coords, piece, old_coords, new_coords)
-            move_count += 1
+            # Buffer until "done" — do not yield or update coords yet.
+            pending_move = (piece, uhp_ref, old_coords, new_coords)
             continue
 
         # movedone (alternate combined format): "movedone B bS1 M 12 /wS1"
@@ -113,13 +141,18 @@ def parse_moves(content: str):
 # ---- internal helpers ----
 
 def _ensure_color(piece: str, color: str) -> str:
-    """Add color prefix to piece name if not already present.
+    """Add color prefix and normalize piece type letter to uppercase.
 
-    New format already has prefix: 'wB1', 'bA1'. Old format does not: 'B1', 'A1'.
+    Handles three formats:
+      New, correct:   'bA1', 'wQ'   — color prefix + uppercase type → return as-is
+      New, lowercase: 'ba1', 'wq'   — color prefix + lowercase type → uppercase type
+      Old, no prefix: 'A1', 'a1', 'b1', 'q' — no color prefix → add color + uppercase
     """
-    if len(piece) >= 2 and piece[0] in ('w', 'b') and piece[1].isupper():
-        return piece
-    return color + piece
+    if len(piece) >= 2 and piece[0] in ('w', 'b') and piece[1].isalpha():
+        # Has color prefix — normalize type letter to uppercase.
+        return piece[0] + piece[1:].upper()
+    # No color prefix (e.g. 'A1', 'a1', 'b1', 'q') — add color and uppercase.
+    return color + piece.upper()
 
 
 def _resolve_ref(ref_raw: str, new_coords: str, piece: str, move_count: int,

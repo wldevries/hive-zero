@@ -38,13 +38,24 @@ pub struct PyGame {
 #[pymethods]
 impl PyGame {
     #[new]
-    fn new() -> Self {
-        PyGame { game: game::Game::new() }
+    #[pyo3(signature = (tournament_mode=false))]
+    fn new(tournament_mode: bool) -> Self {
+        let game = if tournament_mode {
+            game::Game::new_tournament()
+        } else {
+            game::Game::new()
+        };
+        PyGame { game }
     }
 
     /// Deep copy.
     fn copy(&self) -> PyGame {
         PyGame { game: self.game.clone() }
+    }
+
+    #[getter]
+    fn tournament_mode(&self) -> bool {
+        self.game.tournament_mode
     }
 
     /// Game state as string.
@@ -200,6 +211,14 @@ impl PyGame {
             Some(f) => game::Move::movement(piece, f, to_pos),
         };
         self.game.format_move_uhp(&mv)
+    }
+
+    /// Play a move given a UHP move string (e.g. "wQ", "wS1 wA1-", "pass").
+    /// Parses the reference piece and direction to resolve the target hex, then
+    /// finds and plays the matching valid move.
+    /// Returns True if the move was found and played, False if not valid.
+    fn play_move_uhp(&mut self, move_str: &str) -> bool {
+        self.game.parse_and_play_uhp(move_str)
     }
 }
 

@@ -15,8 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from hive.sgf import game_type, parse_moves
-from hive.core.game import Game, GameState
-from hive.uhp.engine import UHPEngine
+from hive_engine import RustGame
 
 GAMES_DIR = Path(__file__).parent.parent / "games"
 OUTCOMES_CSV = GAMES_DIR / "game_outcomes.csv"
@@ -39,23 +38,21 @@ def iter_sgf_contents():
         yield sgf.parent.name, sgf.name, sgf.read_text(encoding="iso-8859-1", errors="ignore")
 
 
-def replay_game(engine: UHPEngine, moves: list[str]) -> GameState | None:
-    """Replay UHP move strings through a fresh Python Game.
+def replay_game(moves: list[str]) -> str | None:
+    """Replay UHP move strings through a fresh RustGame.
 
-    Returns the final GameState, or None if a parse/rules error occurs.
+    Returns the final game state string ("WhiteWins", "BlackWins", "Draw",
+    "InProgress"), or None if a move was rejected by the engine.
     """
-    game = Game()
-    for move_str in moves:
-        if game.is_game_over:
-            break
-        try:
-            if move_str.lower() == "pass":
-                game.play_pass()
-            else:
-                piece, from_pos, to_pos = engine._parse_move_in_context(game, move_str)
-                game.play_move(piece, from_pos, to_pos)
-        except Exception:
-            return None
+    game = RustGame()
+    try:
+        for move_str in moves:
+            if game.is_game_over:
+                break
+            if not game.play_move_uhp(move_str):
+                return None
+    except BaseException:
+        return None
     return game.state
 
 
@@ -109,7 +106,6 @@ def update_elo(elo: dict[str, float], p0: str, p1: str, result: str) -> None:
 
 
 def main():
-    engine = UHPEngine()
     outcomes: list[tuple] = []
     elo: dict[str, float] = {}
     stats: dict[str, dict] = {}
@@ -134,26 +130,26 @@ def main():
         moves = list(parse_moves(content))
         move_count = len(moves)
 
-        final_state = replay_game(engine, moves)
+        final_state = replay_game(moves)
 
         if final_state is None:
-            # Replay error — try metadata fallback
+            # Replay error — move rejected by Rust engine, try metadata fallback
             result = result_from_metadata(content, p0, p1)
             if result == "unknown":
                 errors += 1
             else:
                 determined += 1
-        elif final_state == GameState.WHITE_WINS:
+        elif final_state == "WhiteWins":
             result = "p0_wins"   # White moves first = P0
             determined += 1
-        elif final_state == GameState.BLACK_WINS:
+        elif final_state == "BlackWins":
             result = "p1_wins"
             determined += 1
-        elif final_state == GameState.DRAW:
+        elif final_state == "Draw":
             result = "draw"
             determined += 1
         else:
-            # Game didn't reach terminal state (e.g. resign, incomplete) — use metadata
+            # InProgress — game didn't reach terminal state (e.g. resign, incomplete)
             result = result_from_metadata(content, p0, p1)
             if result != "unknown":
                 determined += 1

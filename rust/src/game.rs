@@ -161,6 +161,8 @@ pub struct Game {
     pub turn_color: PieceColor,
     pub turn_number: u16,
     pub move_count: u16,
+    /// When true, queen cannot be placed on the first move of each player.
+    pub tournament_mode: bool,
     move_history: Vec<Move>,
     reserves: Reserves,
     /// Reserve snapshots for undo.
@@ -168,6 +170,7 @@ pub struct Game {
 }
 
 impl Game {
+    /// Standard game — queen can be placed on the first move.
     pub fn new() -> Self {
         Game {
             board: Board::new(),
@@ -175,10 +178,16 @@ impl Game {
             turn_color: PieceColor::White,
             turn_number: 1,
             move_count: 0,
+            tournament_mode: false,
             move_history: Vec::new(),
             reserves: Reserves::new(),
             history_reserves: Vec::new(),
         }
+    }
+
+    /// Tournament game — queen cannot be placed on the first move.
+    pub fn new_tournament() -> Self {
+        Game { tournament_mode: true, ..Game::new() }
     }
 
     pub fn is_game_over(&self) -> bool {
@@ -232,15 +241,16 @@ impl Game {
         let placement_hexes = get_placements(color, &self.board);
         if !placement_hexes.is_empty() {
             let reserve = self.reserves.pieces_in_reserve(color);
-            // Tournament rule: cannot place queen on first move
-            let is_first_move = (color == PieceColor::White && self.move_count == 0)
-                || (color == PieceColor::Black && self.move_count == 1);
+            let is_first_move = self.tournament_mode
+                && ((color == PieceColor::White && self.move_count == 0)
+                    || (color == PieceColor::Black && self.move_count == 1));
             let mut placeable: Vec<Piece> = reserve
                 .into_iter()
                 .filter(|p| {
                     if must_queen {
                         p.piece_type() == PieceType::Queen
                     } else if is_first_move {
+                        // Tournament rule: cannot place queen on first move
                         p.piece_type() != PieceType::Queen
                     } else {
                         true
@@ -271,6 +281,7 @@ impl Game {
 
             for piece in &on_board {
                 let mut destinations = get_moves(*piece, &self.board, &aps);
+                destinations.retain(|&d| crate::board::hex_to_grid(d).is_some());
                 destinations.sort();
                 let pos = self.board.piece_position(*piece).unwrap();
                 for dest in destinations {
@@ -505,6 +516,101 @@ impl Game {
         }
 
         piece_str
+    }
+
+    /// Parse a UHP move string and play it. Returns true if the move was valid and played.
+    ///
+    /// Handles all UHP position notation:
+    ///   "wQ"          – first move, place at origin
+    ///   "wS1 wQ-"     – suffix direction: piece goes East of wQ
+    ///   "wS1 /wQ"     – prefix direction: piece goes SW of wQ
+    ///   "wB1 wQ"      – no direction: beetle stacking onto wQ
+    ///   "pass"        – pass move
+    pub fn parse_and_play_uhp(&mut self, move_str: &str) -> bool {
+        use crate::hex::DIRECTIONS;
+        use crate::piece::Piece;
+
+        if move_str.eq_ignore_ascii_case("pass") {
+            self.play_pass();
+            return true;
+        }
+
+        let parts: Vec<&str> = move_str.split_whitespace().collect();
+        if parts.is_empty() {
+            return false;
+        }
+
+        let piece = match Piece::from_str(parts[0]) {
+            Some(p) => p,
+            None => return false,
+        };
+
+        let to_pos: (i8, i8) = if parts.len() == 1 {
+            // First overall move: place at origin.
+            (0, 0)
+        } else {
+            let ref_str = parts[1];
+            let bytes = ref_str.as_bytes();
+            let first = bytes[0] as char;
+            let last = bytes[bytes.len() - 1] as char;
+
+            let is_dir_char = |c: char| matches!(c, '-' | '/' | '\\');
+
+            if is_dir_char(first) {
+                // Prefix notation: e.g. "/wQ" = SW of wQ
+                let dir = match first {
+                    '-'  => DIRECTIONS[3], // W
+                    '/'  => DIRECTIONS[4], // SW
+                    '\\' => DIRECTIONS[2], // NW
+                    _    => return false,
+                };
+                let ref_piece = match Piece::from_str(&ref_str[1..]) {
+                    Some(p) => p,
+                    None => return false,
+                };
+                let ref_pos = match self.board.piece_position(ref_piece) {
+                    Some(pos) => pos,
+                    None => return false,
+                };
+                (ref_pos.0 + dir.0, ref_pos.1 + dir.1)
+            } else if is_dir_char(last) {
+                // Suffix notation: e.g. "wQ-" = East of wQ
+                let dir = match last {
+                    '-'  => DIRECTIONS[0], // E
+                    '/'  => DIRECTIONS[1], // NE
+                    '\\' => DIRECTIONS[5], // SE
+                    _    => return false,
+                };
+                let ref_piece = match Piece::from_str(&ref_str[..ref_str.len() - 1]) {
+                    Some(p) => p,
+                    None => return false,
+                };
+                let ref_pos = match self.board.piece_position(ref_piece) {
+                    Some(pos) => pos,
+                    None => return false,
+                };
+                (ref_pos.0 + dir.0, ref_pos.1 + dir.1)
+            } else {
+                // No direction character: beetle stacking onto the reference piece.
+                let ref_piece = match Piece::from_str(ref_str) {
+                    Some(p) => p,
+                    None => return false,
+                };
+                match self.board.piece_position(ref_piece) {
+                    Some(pos) => pos,
+                    None => return false,
+                }
+            }
+        };
+
+        let valid = self.valid_moves();
+        if let Some(mv) = valid.iter().find(|m| m.piece == Some(piece) && m.to == Some(to_pos)) {
+            let mv = mv.clone();
+            self.play_move(&mv);
+            true
+        } else {
+            false
+        }
     }
 
     /// Turn string like "White[1]".

@@ -6,16 +6,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hive.core.game import Game
 from hive.core.render import render_board
-from hive.uhp.engine import UHPEngine
 from hive.sgf import game_type, parse_moves, read_sgf
+from hive_engine import RustGame
 
 
 def render_game(sgf_path: str):
+    import re
     content = read_sgf(sgf_path)
 
-    import re
     m = re.search(r'RE\[([^\]]+)\]', content)
     result = m.group(1) if m else 'Unknown'
     m = re.search(r'P0\[id "([^"]+)"', content)
@@ -29,28 +28,22 @@ def render_game(sgf_path: str):
     print(f"Result: {result}")
     print(f"{'='*60}")
 
-    engine = UHPEngine()
-    engine.game = Game()
+    game = RustGame()
     errors = 0
 
     for i, move_str in enumerate(parse_moves(content)):
         color = 'White' if i % 2 == 0 else 'Black'
         print(f"\n--- Move {i + 1} ({color}): {move_str} ---")
-        try:
-            if move_str.lower() == 'pass':
-                engine.game.play_pass()
-            else:
-                piece, from_pos, to_pos = engine._parse_move(move_str)
-                engine.game.play_move(piece, from_pos, to_pos)
-            print(render_board(engine.game.board))
-        except Exception as e:
-            print(f"  ERROR: {e}")
+        if not game.play_move_uhp(move_str):
+            print(f"  ERROR: move rejected by engine: {move_str!r}")
             errors += 1
             if errors >= 3:
                 print("  Too many errors, stopping.")
                 break
+            continue
+        print(render_board(game))
 
-    print(f"\nFinal state: {engine.game.state.value}")
+    print(f"\nFinal state: {game.state}")
 
 
 if __name__ == '__main__':
