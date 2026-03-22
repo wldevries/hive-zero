@@ -390,6 +390,60 @@ fn run_debug(zip_path: &str, sgf_name: &str) {
     }
 }
 
+fn run_mcts(simulations: u32, batch_size: usize) {
+    use hive_engine::mcts::search::MctsSearch;
+    use hive_engine::move_encoding::POLICY_SIZE;
+    use hive_engine::uhp::format_move_uhp;
+
+    let mut game = Game::new();
+    let uniform_policy = vec![1.0 / POLICY_SIZE as f32; POLICY_SIZE];
+    let mut search = MctsSearch::new(100_000);
+    search.init(&game, &uniform_policy);
+
+    let rounds = simulations / batch_size as u32;
+
+    let valid_moves = game.valid_moves();
+    println!("Running MCTS benchmark: {simulations} simulations, batch_size={batch_size}");
+    println!("Legal moves at root: {}", valid_moves.len());
+    println!();
+
+    let start = std::time::Instant::now();
+
+    for _ in 0..rounds {
+        let leaves = search.select_leaves(batch_size);
+        if leaves.is_empty() {
+            break;
+        }
+        let policies: Vec<Vec<f32>> = leaves.iter().map(|_| uniform_policy.clone()).collect();
+        let values: Vec<f32> = vec![0.0; leaves.len()];
+        search.expand_and_backprop(&leaves, &policies, &values);
+    }
+
+    let elapsed = start.elapsed();
+    let root = search.arena.get(search.root);
+    let sims_per_sec = root.visit_count as f64 / elapsed.as_secs_f64();
+
+    println!("Root visits: {}", root.visit_count);
+    println!("Root value:  {:.4}", root.value());
+    println!("Time:        {:.3}s", elapsed.as_secs_f64());
+    println!("Throughput:  {:.0} sims/s", sims_per_sec);
+    println!();
+
+    let dist = search.get_visit_distribution();
+    println!("Top moves by visit share:");
+    let mut sorted = dist.clone();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    for (mv, prob) in sorted.iter().take(10) {
+        let uhp = format_move_uhp(&game, mv);
+        println!("  {uhp:>20}  {prob:.4}");
+    }
+
+    if let Some(best) = search.best_move() {
+        let uhp = format_move_uhp(&game, &best);
+        println!("\nBest move: {uhp}");
+    }
+}
+
 fn run_random(n: u32) {
     use rand::Rng;
 
@@ -446,11 +500,17 @@ fn main() {
             let sgf_name = args.get(3).expect("need sgf name");
             run_debug(zip_path, sgf_name);
         }
+        "mcts" => {
+            let sims: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(800);
+            let batch: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
+            run_mcts(sims, batch);
+        }
         _ => {
-            eprintln!("Usage: hive-zero <random [N]|replay [path]|debug <zip> <sgf>>");
-            eprintln!("  random [N]     - play N random games (default 100)");
-            eprintln!("  replay [path]  - replay boardspace games from zip dir/file");
-            eprintln!("  debug <z> <s>  - verbose replay of a single game from zip");
+            eprintln!("Usage: hive-zero <random [N]|replay [path]|debug <zip> <sgf>|mcts [sims] [batch]>");
+            eprintln!("  random [N]        - play N random games (default 100)");
+            eprintln!("  replay [path]     - replay boardspace games from zip dir/file");
+            eprintln!("  debug <z> <s>     - verbose replay of a single game from zip");
+            eprintln!("  mcts [sims] [batch] - MCTS benchmark with uniform policy (default 800 sims, batch 8)");
             std::process::exit(1);
         }
     }
