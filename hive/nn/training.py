@@ -152,8 +152,9 @@ class Trainer:
             value_loss = (per_sample_value * value_weight).mean()
 
             # Auxiliary queen danger loss: MSE on both heads, always active
-            qd_loss = 0.15 * ((my_qd - mqd_target) ** 2).mean() + \
-                      0.15 * ((opp_qd - oqd_target) ** 2).mean()
+            qd_mse = ((my_qd - mqd_target) ** 2).mean() + \
+                      ((opp_qd - oqd_target) ** 2).mean()
+            qd_loss = 0.15 * qd_mse
 
             # Combined loss
             loss = policy_loss + value_loss + qd_loss
@@ -164,7 +165,7 @@ class Trainer:
 
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
-            total_qd_loss += qd_loss.item()
+            total_qd_loss += qd_mse.item()
             total_loss += loss.item()
             num_batches += 1
 
