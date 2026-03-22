@@ -897,10 +897,26 @@ impl PyBatchMCTS {
     }
 }
 
+/// Parse SGF content and return list of UHP move strings.
+#[pyfunction]
+fn parse_sgf_moves(content: &str) -> PyResult<Vec<String>> {
+    let mut game = Game::new();
+    let mut moves = Vec::new();
+    crate::sgf::replay_into_game_verbose(content, &mut game, |g, mv| {
+        if mv.piece.is_none() {
+            moves.push("pass".to_string());
+        } else {
+            moves.push(crate::uhp::format_move_uhp(g, mv));
+        }
+    }).map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+    Ok(moves)
+}
+
 /// Register Python module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGame>()?;
     m.add_class::<PyMCTS>()?;
     m.add_class::<PyBatchMCTS>()?;
+    m.add_function(wrap_pyfunction!(parse_sgf_moves, m)?)?;
     Ok(())
 }

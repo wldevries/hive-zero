@@ -28,7 +28,7 @@ _cr = lambda v: f"{colorama.Fore.RED}{_B}{v}{_R}"       # total loss
 _cy = lambda v: f"{colorama.Fore.YELLOW}{_B}{v}{_R}"   # policy / value loss
 _cc = lambda v: f"{colorama.Fore.CYAN}{_B}{v}{_R}"     # chunk / epoch labels
 
-from ..sgf import parse_moves
+from hive_engine import parse_sgf_moves as parse_moves
 from ..uhp import normalize_piece as _normalize_piece
 
 # Heavy imports (torch, hive_engine) are deferred to class/function bodies

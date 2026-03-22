@@ -1,6 +1,6 @@
-mod sgf;
 mod replay;
 
+use hive_engine::sgf;
 use hive_engine::game::Game;
 use hive_engine::piece::{PieceColor, player_pieces, PIECES_PER_PLAYER};
 

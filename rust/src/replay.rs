@@ -1,7 +1,7 @@
 /// Replay Boardspace Hive games through the Rust engine.
 
 use hive_engine::game::Game;
-use crate::sgf;
+use hive_engine::sgf;
 
 pub struct ReplayResult {
     pub turns_played: usize,

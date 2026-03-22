@@ -2,9 +2,9 @@
 ///
 /// Port of hive/sgf.py to Rust.
 
-use hive_engine::game::{Game, Move};
-use hive_engine::hex::Hex;
-use hive_engine::piece::{Piece, PieceColor, PieceType};
+use crate::game::{Game, Move};
+use crate::hex::Hex;
+use crate::piece::{Piece, PieceColor, PieceType};
 
 /// Check if content contains expansion pieces (M=Mosquito, L=Ladybug, P=Pillbug).
 fn has_expansion_pieces(content: &str) -> bool {

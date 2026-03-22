@@ -308,7 +308,7 @@ class SelfPlayTrainer:
         import zipfile
         from tqdm import tqdm
         from ..supervised.pretrain import load_filtered_games, build_zip_index
-        from ..sgf import parse_moves
+        from hive_engine import parse_sgf_moves as parse_moves
 
         elo_csv = os.path.join(os.path.dirname(games_csv) or ".", "player_elo.csv")
         games = load_filtered_games(games_csv, elo_csv, min_elo=min_elo, min_games=20)
