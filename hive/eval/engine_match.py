@@ -323,7 +323,7 @@ class ModelEngine:
             b = torch.tensor(board_4d).to(device)
             r = torch.tensor(reserves).to(device)
             with torch.no_grad():
-                policy_logits, values = model(b, r)
+                policy_logits, values, _, _ = model(b, r)
             policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
             vals = values.cpu().numpy().flatten()
             return policy.astype(np.float32), vals.astype(np.float32)
@@ -501,7 +501,7 @@ def run_parallel_match(
             bt = torch.tensor(board_4d).to(device)
             rv = torch.tensor(reserves).to(device)
             with torch.no_grad():
-                policy_logits, values = model(bt, rv)
+                policy_logits, values, _, _ = model(bt, rv)
             policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
             vals = values.cpu().numpy().flatten()
             return policy.astype(np.float32), vals.astype(np.float32)

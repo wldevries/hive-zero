@@ -439,7 +439,8 @@ class Pretrainer:
                         log.write(
                             f"{chunk_idx},pretrain,0,0,0,0,0,{total_positions},{chunk_positions},"
                             f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
-                            f"{losses['value_loss']:.6f},{lr:.8f},{chunk_elapsed:.1f},"
+                            f"{losses['value_loss']:.6f},{losses.get('qd_loss', 0):.6f},"
+                            f"{lr:.8f},{chunk_elapsed:.1f},"
                             f"epoch={epoch}\n"
                         )
 

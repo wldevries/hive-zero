@@ -200,8 +200,8 @@ class SelfPlayTrainer:
 
             # Insert training data into replay buffer
             buf_start = time.time()
-            boards, reserves, policies, values, weights, value_only_flags, policy_only_flags = result.training_data()
-            replay_buffer.add_batch(boards, reserves, policies, values, weights, value_only_flags, policy_only_flags)
+            boards, reserves, policies, values, weights, value_only_flags, policy_only_flags, mqd, oqd = result.training_data()
+            replay_buffer.add_batch(boards, reserves, policies, values, weights, value_only_flags, policy_only_flags, mqd, oqd)
             buf_time = time.time() - buf_start
 
             total_positions = result.num_samples
@@ -256,8 +256,9 @@ class SelfPlayTrainer:
                 total_s = f"{losses['total_loss']:.4f}"
                 policy_s = f"{losses['policy_loss']:.4f}"
                 value_s = f"{losses['value_loss']:.4f}"
+                qd_s = f"{losses.get('qd_loss', 0):.4f}"
                 print(f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
-                      f"(policy={_cy(policy_s)}, value={_cy(value_s)}, lr={lr})")
+                      f"(policy={_cy(policy_s)}, value={_cy(value_s)}, qd={_cy(qd_s)}, lr={lr})")
             train_time = time.time() - train_start
             _print_vram("post-train")
 
@@ -266,6 +267,7 @@ class SelfPlayTrainer:
                             f"{wins_w},{wins_b},{draws},{resignations},{total_positions},"
                             f"{len(replay_buffer)},{losses['total_loss']:.6f},"
                             f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
+                            f"{losses.get('qd_loss', 0):.6f},"
                             f"{lr:.8f},{play_time + train_time:.1f},{self._comment}\n")
             self._comment = ""
             self._log.flush()

@@ -46,8 +46,21 @@ rust/
 - **Replay buffer**: in-memory only, not persisted to disk. Lost on process exit. Pretrain and selfplay run as separate processes so the buffer is always empty at the start of selfplay.
 - **Fast-cap turns**: no Dirichlet noise, play strongest move, added to buffer with value-only training (policy loss masked)
 - **Heuristic value** for unfinished games: queen neighbor pressure + beetle-on-queen bonus (no draw penalty)
+- **Auxiliary queen danger heads**: Two extra outputs from the value head's shared hidden layer predicting current-player and opponent queen danger (neighbors/6 + beetle-on-top bonus, sigmoid, 0–1). Trained with MSE weighted at 0.15 each, always active (not masked). Provides gradient signal on every position even in drawn games.
+- **Opening diversity**: Two mechanisms to avoid early-game convergence:
+  - `--random-opening-moves MIN-MAX`: play N random moves (uniform in [min, max]) before MCTS takes over
+  - `--opening-book PATH`: use boardspace game openings, with `--boardspace-frac` controlling the mix vs random openings
+- **Resignation**: `--resign-threshold` (default -0.95) with `--resign-min-moves` safety. Calibration games (10%) play to completion to measure false positive rate.
+- **Skip timeout games**: `--skip-timeout-games` discards all training data from games that hit the move cap
 - **Rayon parallelism**: MCTS tree ops (select, encode, expand, backprop) parallelized across games
 - **RustBatchMCTS.run_simulations**: full simulation loop in Rust with single Python GPU callback per round
+
+### Known issue: self-play draw convergence
+From-scratch self-play converges to draws within a few iterations. The network can't learn to win
+(surrounding the queen requires coordinated attacks), so games hit the move cap, value targets are ~0,
+and the value head learns to predict 0 everywhere. Tried mitigations: draw penalty, heuristic values
+for unfinished games, opening randomization (helps somewhat), pretraining on boardspace games (delays
+but doesn't prevent). See `docs/IDEAS.md` for analysis.
 
 ## Package Manager
 Use `uv` for all dependency management. Do NOT use pip directly.

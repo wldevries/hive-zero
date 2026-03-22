@@ -35,10 +35,13 @@ class HiveDataset(Dataset):
         self.weights = np.ones(max_size, dtype=np.float32)
         self.value_only = np.zeros(max_size, dtype=np.bool_)
         self.policy_only = np.zeros(max_size, dtype=np.bool_)
+        self.my_queen_danger = np.zeros(max_size, dtype=np.float32)
+        self.opp_queen_danger = np.zeros(max_size, dtype=np.float32)
 
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
                    policy_target: np.ndarray, value_target: float,
-                   weight: float = 1.0, value_only: bool = False, policy_only: bool = False):
+                   weight: float = 1.0, value_only: bool = False, policy_only: bool = False,
+                   my_queen_danger: float = 0.0, opp_queen_danger: float = 0.0):
         idx = self._count % self.max_size
         self.board_tensors[idx] = board_tensor
         self.reserve_vectors[idx] = reserve_vector
@@ -47,12 +50,16 @@ class HiveDataset(Dataset):
         self.weights[idx] = weight
         self.value_only[idx] = value_only
         self.policy_only[idx] = policy_only
+        self.my_queen_danger[idx] = my_queen_danger
+        self.opp_queen_danger[idx] = opp_queen_danger
         self._count += 1
         self._size = min(self._size + 1, self.max_size)
 
     def add_batch(self, board_tensors: np.ndarray, reserve_vectors: np.ndarray,
                   policy_targets: np.ndarray, value_targets: np.ndarray,
-                  weights: np.ndarray, value_only: list[bool], policy_only: list[bool]):
+                  weights: np.ndarray, value_only: list[bool], policy_only: list[bool],
+                  my_queen_danger: np.ndarray | None = None,
+                  opp_queen_danger: np.ndarray | None = None):
         """Bulk insert from contiguous arrays. Much faster than per-sample add."""
         n = board_tensors.shape[0]
         boards_flat = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
@@ -65,6 +72,8 @@ class HiveDataset(Dataset):
             self.weights[idx] = weights[i]
             self.value_only[idx] = value_only[i]
             self.policy_only[idx] = policy_only[i]
+            self.my_queen_danger[idx] = my_queen_danger[i] if my_queen_danger is not None else 0.0
+            self.opp_queen_danger[idx] = opp_queen_danger[i] if opp_queen_danger is not None else 0.0
             self._count += 1
             self._size = min(self._size + 1, self.max_size)
 
@@ -84,6 +93,8 @@ class HiveDataset(Dataset):
             torch.tensor(self.weights[idx], dtype=torch.float32),
             torch.tensor(self.value_only[idx], dtype=torch.bool),
             torch.tensor(self.policy_only[idx], dtype=torch.bool),
+            torch.tensor(self.my_queen_danger[idx], dtype=torch.float32),
+            torch.tensor(self.opp_queen_danger[idx], dtype=torch.float32),
         )
 
 
@@ -112,10 +123,11 @@ class Trainer:
 
         total_policy_loss = 0.0
         total_value_loss = 0.0
+        total_qd_loss = 0.0
         total_loss = 0.0
         num_batches = 0
 
-        for board, reserve, policy_target, value_target, weight, vo_mask, po_mask in loader:
+        for board, reserve, policy_target, value_target, weight, vo_mask, po_mask, mqd_target, oqd_target in loader:
             board = board.to(self.device)
             reserve = reserve.to(self.device)
             policy_target = policy_target.to(self.device)
@@ -123,8 +135,10 @@ class Trainer:
             weight = weight.to(self.device)
             vo_mask = vo_mask.to(self.device)
             po_mask = po_mask.to(self.device)
+            mqd_target = mqd_target.to(self.device).unsqueeze(1)
+            oqd_target = oqd_target.to(self.device).unsqueeze(1)
 
-            policy_logits, value = self.model(board, reserve)
+            policy_logits, value, my_qd, opp_qd = self.model(board, reserve)
 
             # Policy loss: weighted cross-entropy, masked for value-only samples
             log_probs = torch.log_softmax(policy_logits, dim=1)
@@ -137,8 +151,12 @@ class Trainer:
             value_weight = weight * (~po_mask).float()
             value_loss = (per_sample_value * value_weight).mean()
 
+            # Auxiliary queen danger loss: MSE on both heads, always active
+            qd_loss = 0.15 * ((my_qd - mqd_target) ** 2).mean() + \
+                      0.15 * ((opp_qd - oqd_target) ** 2).mean()
+
             # Combined loss
-            loss = policy_loss + value_loss
+            loss = policy_loss + value_loss + qd_loss
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -146,14 +164,16 @@ class Trainer:
 
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
+            total_qd_loss += qd_loss.item()
             total_loss += loss.item()
             num_batches += 1
 
         if num_batches == 0:
-            return {"policy_loss": 0, "value_loss": 0, "total_loss": 0}
+            return {"policy_loss": 0, "value_loss": 0, "qd_loss": 0, "total_loss": 0}
 
         return {
             "policy_loss": total_policy_loss / num_batches,
             "value_loss": total_value_loss / num_batches,
+            "qd_loss": total_qd_loss / num_batches,
             "total_loss": total_loss / num_batches,
         }

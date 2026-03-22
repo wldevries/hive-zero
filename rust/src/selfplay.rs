@@ -10,9 +10,10 @@ use rayon::prelude::*;
 use crate::board::GRID_SIZE;
 use crate::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE};
 use crate::game::{Game, GameState};
+use crate::hex::hex_neighbors;
 use crate::mcts::search::MctsSearch;
 use crate::move_encoding::{self, POLICY_SIZE, encode_game_move};
-use crate::piece::PieceColor;
+use crate::piece::{Piece, PieceColor, PieceType};
 
 use rand::Rng;
 use rand::distributions::WeightedIndex;
@@ -33,6 +34,28 @@ struct TurnRecord {
     turn_color: PieceColor,
     is_value_only: bool,
     policy_vector: Vec<f32>, // POLICY_SIZE, zeroed for value-only
+    my_queen_danger: f32,    // current player's queen danger [0, 1]
+    opp_queen_danger: f32,   // opponent's queen danger [0, 1]
+}
+
+/// Compute queen danger score for a given color.
+/// Returns value in [0, 1]: neighbor count / 6, plus bonus if any piece is on top of queen.
+/// Returns 0.0 if queen is not on the board.
+fn queen_danger(game: &Game, color: PieceColor) -> f32 {
+    let queen = Piece::new(color, PieceType::Queen, 1);
+    match game.board.piece_position(queen) {
+        None => 0.0,
+        Some(pos) => {
+            let neighbors = hex_neighbors(pos).iter()
+                .filter(|&&n| game.board.is_occupied(n))
+                .count() as f32;
+            let beetle_on_top = {
+                let stack = game.board.stack_at(pos);
+                stack.height() > 1
+            };
+            ((neighbors / 6.0) + if beetle_on_top { 0.15 } else { 0.0 }).min(1.0)
+        }
+    }
 }
 
 /// Configuration for self-play session.
@@ -66,6 +89,8 @@ pub struct PySelfPlayResult {
     weights: Vec<f32>,
     value_only_flags: Vec<bool>,
     policy_only_flags: Vec<bool>,
+    my_queen_danger: Vec<f32>,   // [total_samples] auxiliary target
+    opp_queen_danger: Vec<f32>,  // [total_samples] auxiliary target
     num_samples: usize,
     // Stats
     wins_w: u32,
@@ -89,7 +114,8 @@ pub struct PySelfPlayResult {
 impl PySelfPlayResult {
     /// Get training data as numpy arrays.
     /// Returns (boards[N,23,23,23], reserves[N,10], policies[N,5819],
-    ///          values[N], weights[N], value_only[N], policy_only[N])
+    ///          values[N], weights[N], value_only[N], policy_only[N],
+    ///          my_queen_danger[N], opp_queen_danger[N])
     fn training_data<'py>(&self, py: Python<'py>) -> (
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
@@ -98,6 +124,8 @@ impl PySelfPlayResult {
         Bound<'py, PyArray1<f32>>,
         Vec<bool>,
         Vec<bool>,
+        Bound<'py, PyArray1<f32>>,
+        Bound<'py, PyArray1<f32>>,
     ) {
         let n = self.num_samples;
         let boards = numpy::ndarray::Array2::from_shape_vec(
@@ -111,6 +139,8 @@ impl PySelfPlayResult {
         ).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
         let weights = numpy::ndarray::Array1::from(self.weights.clone());
+        let mqd = numpy::ndarray::Array1::from(self.my_queen_danger.clone());
+        let oqd = numpy::ndarray::Array1::from(self.opp_queen_danger.clone());
 
         (
             PyArray2::from_owned_array_bound(py, boards),
@@ -120,6 +150,8 @@ impl PySelfPlayResult {
             PyArray1::from_owned_array_bound(py, weights),
             self.value_only_flags.clone(),
             self.policy_only_flags.clone(),
+            PyArray1::from_owned_array_bound(py, mqd),
+            PyArray1::from_owned_array_bound(py, oqd),
         )
     }
 
@@ -547,6 +579,10 @@ impl PySelfPlaySession {
 
                 // Record training data
                 let turn_color = games[gi].turn_color;
+                let opp_color = match turn_color {
+                    PieceColor::White => PieceColor::Black,
+                    PieceColor::Black => PieceColor::White,
+                };
                 let is_value_only = !is_full[i];
                 if is_full[i] { full_search_turns += 1; }
                 total_turns += 1;
@@ -557,6 +593,8 @@ impl PySelfPlaySession {
                     turn_color,
                     is_value_only,
                     policy_vector,
+                    my_queen_danger: queen_danger(&games[gi], turn_color),
+                    opp_queen_danger: queen_danger(&games[gi], opp_color),
                 });
 
                 // Sample and play move
@@ -609,6 +647,8 @@ impl PySelfPlaySession {
         let mut result_weights: Vec<f32> = Vec::new();
         let mut result_value_only: Vec<bool> = Vec::new();
         let mut result_policy_only: Vec<bool> = Vec::new();
+        let mut result_my_queen_danger: Vec<f32> = Vec::new();
+        let mut result_opp_queen_danger: Vec<f32> = Vec::new();
         let mut num_samples = 0usize;
 
         let mut wins_w: u32 = 0;
@@ -661,6 +701,8 @@ impl PySelfPlaySession {
                 result_weights.push(weight);
                 result_value_only.push(record.is_value_only);
                 result_policy_only.push(policy_only);
+                result_my_queen_danger.push(record.my_queen_danger);
+                result_opp_queen_danger.push(record.opp_queen_danger);
                 num_samples += 1;
             }
         }
@@ -688,6 +730,8 @@ impl PySelfPlaySession {
             weights: result_weights,
             value_only_flags: result_value_only,
             policy_only_flags: result_policy_only,
+            my_queen_danger: result_my_queen_danger,
+            opp_queen_danger: result_opp_queen_danger,
             num_samples,
             wins_w, wins_b, draws, resignations,
             total_moves: move_counts.iter().sum(),
