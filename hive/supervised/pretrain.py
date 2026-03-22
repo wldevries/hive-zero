@@ -441,7 +441,8 @@ class Pretrainer:
                             f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
                             f"{losses['value_loss']:.6f},{losses.get('qd_loss', 0):.6f},"
                             f"{lr:.8f},{chunk_elapsed:.1f},"
-                            f"epoch={epoch}\n"
+                            f"epoch={epoch},"
+                            f"{losses.get('qe_loss', 0):.6f},{losses.get('mob_loss', 0):.6f}\n"
                         )
 
 

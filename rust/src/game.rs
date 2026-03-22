@@ -206,7 +206,7 @@ impl Game {
         self.reserves.pieces_in_reserve(color)
     }
 
-    fn queen_placed(&self, color: PieceColor) -> bool {
+    pub fn queen_placed(&self, color: PieceColor) -> bool {
         let queen = Piece::new(color, PieceType::Queen, 1);
         !self.reserves.has(queen)
     }

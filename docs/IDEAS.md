@@ -87,13 +87,87 @@ is getting outplayed.
 
 ### Implementation
 
-- Extend the existing auxiliary head in the model (currently 2 QD outputs) to 6 outputs:
-  [my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility].
-- Existing trunk weights preserved via `strict=False` in `load_checkpoint`; new head layers
-  randomly initialized. Training can continue from current checkpoint.
-- Compute targets in `rust/src/selfplay.rs` alongside existing QD computation.
-- Queen escape: check slide legality for each of queen's 6 neighbor hexes.
-- Piece mobility: for each piece, check one-hive rule + has at least one destination.
+**Done.** Auxiliary head extended from 2 to 6 outputs:
+[my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility].
+
+- Trunk weights preserved via shape-filtered `load_state_dict`; `qd_fc2` (64→2 → 64→6)
+  reinitialized, all other weights kept. QD loss recovered within 1 iteration.
+- QE and mobility targets computed in `rust/src/selfplay.rs` per-position.
+- Queen escape: checks slide legality, gate blocking, one-hive (articulation point), adjacency.
+- Piece mobility: iterates pieces, checks one-hive + `get_moves()` for each.
+- All 6 aux targets packed into a single [N, 6] numpy array from Rust → Python.
+- CSV log: `qe_loss` and `mob_loss` columns appended at end (backward compatible).
+
+### Observations
+
+All three aux losses converged quickly (within 2-3 iterations) because the trunk already
+encodes the relevant spatial features. However, the auxiliary signals haven't noticeably
+improved the decisive game rate — the network recognizes positional patterns but still
+struggles with multi-move attacking sequences. The bottleneck appears to be planning depth
+(policy + MCTS search), not position evaluation.
+
+## Supervised intermezzo during self-play
+
+The network has good pattern recognition (aux losses converge quickly) but the policy head
+can't learn attacking sequences from self-play alone — 500 simulations is too shallow to
+discover 5-6 move queen-surrounding sequences in a 30+ branching factor game.
+
+### Idea
+
+Periodically inject a few epochs of supervised training on boardspace games between self-play
+iterations. The network already understands the game; supervised data teaches the policy head
+"this is what winning move sequences look like" on top of existing trunk features.
+
+### Key constraints
+
+A full pretrain run (8 chunks × 3 epochs × 100k positions) would overwrite self-play learning.
+The intermezzo must be gentle:
+
+- **Small batch**: 1-2 chunks (10-20k positions) instead of 800k
+- **1 epoch**: same as self-play, no repeated passes
+- **Low LR**: same or lower than self-play LR (≤ 0.0025)
+- **Mix with replay buffer**: interleave supervised positions with recent self-play data
+  to prevent catastrophic forgetting
+- **Decisive games only**: filter boardspace data for games that ended in wins, not draws
+- **Frequency**: every N self-play iterations (e.g. every 10)
+
+### Expected benefit
+
+The policy head sees real examples of how human players close out wins — move sequences that
+create queen pressure, beetle climbs, grasshopper jumps to fill gaps. These patterns are
+exactly what self-play fails to discover on its own.
+
+## Curriculum for opening book
+
+Currently boardspace openings are replayed verbatim but not trained on (not recorded to
+history). The network learns good midgame play from these positions but never learns the
+opening moves that created them.
+
+### Idea: taper opening book reliance
+
+Gradually reduce boardspace fraction and random opening moves over training:
+- Early training: heavy book usage (0.7 frac, 0-8 random moves) — diverse positions
+- Mid training: reduce to 0.3 frac, 0-4 random moves — force network to find own openings
+- Late training: minimal or no book — fully self-play
+
+This teaches the value head to distinguish "this opening leads to decisive games" from
+"this opening leads to draws," which it can only learn from self-generated openings.
+
+## Expansion pieces (transfer learning)
+
+The base-game trunk has learned spatial reasoning, connectivity, and piece relationships that
+transfer directly to expansion pieces (Mosquito, Ladybug, Pillbug).
+
+### Approach
+
+1. Expand input conv channels (39 → +expansion piece channels)
+2. Expand policy head (11 → 14 piece channels)
+3. Expand reserve vector (10 → 16)
+4. Keep res blocks unchanged — trunk features are game-general
+5. Train on expansion games (boardspace has 92k skipped expansion games)
+
+Expected to converge much faster than training from scratch since the trunk already
+understands piece interaction, hive connectivity, and queen pressure.
 
 ## Board recentering and dynamic bounds
 

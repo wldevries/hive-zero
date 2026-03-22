@@ -61,7 +61,7 @@ class RustParallelSelfPlay:
             bt = torch.tensor(board_4d).to(device)
             rv = torch.tensor(reserves).to(device)
             with torch.no_grad():
-                policy_logits, values, _, _ = model(bt, rv)
+                policy_logits, values, _ = model(bt, rv)
             policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
             vals = values.cpu().numpy().flatten()
             return policy.astype(np.float32), vals.astype(np.float32)
@@ -104,7 +104,7 @@ class RustParallelSelfPlay:
             if advance > 0:
                 pbar.update(advance)
             pbar.set_postfix(active=f"{active}/{total}",
-                             resigned=resigned if resigned else None)
+                             resigned=resigned if resigned else 0)
 
         result = session.play_games(self._eval_fn(), progress,
                                     opening_sequences=opening_sequences)

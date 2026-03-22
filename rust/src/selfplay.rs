@@ -36,6 +36,10 @@ struct TurnRecord {
     policy_vector: Vec<f32>, // POLICY_SIZE, zeroed for value-only
     my_queen_danger: f32,    // current player's queen danger [0, 1]
     opp_queen_danger: f32,   // opponent's queen danger [0, 1]
+    my_queen_escape: f32,    // current player's queen escape [0, 1]
+    opp_queen_escape: f32,   // opponent's queen escape [0, 1]
+    my_mobility: f32,        // current player's piece mobility ratio [0, 1]
+    opp_mobility: f32,       // opponent's piece mobility ratio [0, 1]
 }
 
 /// Compute queen danger score for a given color.
@@ -56,6 +60,63 @@ fn queen_danger(game: &Game, color: PieceColor) -> f32 {
             ((neighbors / 6.0) + if beetle_on_top { 0.15 } else { 0.0 }).min(1.0)
         }
     }
+}
+
+/// Compute queen escape score for a given color.
+/// Returns the number of legal slide destinations for the queen / 6.
+/// Returns 0.0 if queen is not on the board.
+fn queen_escape(game: &Game, color: PieceColor) -> f32 {
+    let queen = Piece::new(color, PieceType::Queen, 1);
+    match game.board.piece_position(queen) {
+        None => 0.0,
+        Some(pos) => {
+            // Queen must be on top to move
+            if game.board.top_piece(pos) != Some(queen) {
+                return 0.0;
+            }
+            // Check one-hive: if queen is an articulation point, she can't move
+            if game.board.stack_height(pos) == 1 {
+                let aps = game.board.articulation_points();
+                if aps.contains(&pos) {
+                    return 0.0;
+                }
+            }
+            // Count empty neighbors the queen can slide to
+            let mut count = 0u32;
+            for &n in hex_neighbors(pos).iter() {
+                if !game.board.is_occupied(n) && game.board.can_slide(pos, n) {
+                    // Must remain adjacent to hive after moving
+                    if hex_neighbors(n).iter().any(|&adj| adj != pos && game.board.is_occupied(adj)) {
+                        count += 1;
+                    }
+                }
+            }
+            count as f32 / 6.0
+        }
+    }
+}
+
+/// Compute piece mobility ratio for a given color.
+/// Returns fraction of pieces on board that have at least one legal move.
+/// Returns 0.0 if no pieces are placed.
+fn piece_mobility(game: &mut Game, color: PieceColor) -> f32 {
+    let on_board = game.board.pieces_on_board(color);
+    if on_board.is_empty() {
+        return 0.0;
+    }
+    // Only check mobility if queen is placed (pieces can't move without queen)
+    if !game.queen_placed(color) {
+        return 0.0;
+    }
+    let aps = game.board.articulation_points();
+    let mut mobile = 0u32;
+    for &piece in &on_board {
+        let moves = crate::rules::get_moves(piece, &mut game.board, &aps);
+        if !moves.is_empty() {
+            mobile += 1;
+        }
+    }
+    mobile as f32 / on_board.len() as f32
 }
 
 /// Configuration for self-play session.
@@ -91,6 +152,10 @@ pub struct PySelfPlayResult {
     policy_only_flags: Vec<bool>,
     my_queen_danger: Vec<f32>,   // [total_samples] auxiliary target
     opp_queen_danger: Vec<f32>,  // [total_samples] auxiliary target
+    my_queen_escape: Vec<f32>,   // [total_samples] auxiliary target
+    opp_queen_escape: Vec<f32>,  // [total_samples] auxiliary target
+    my_mobility: Vec<f32>,       // [total_samples] auxiliary target
+    opp_mobility: Vec<f32>,      // [total_samples] auxiliary target
     num_samples: usize,
     // Stats
     wins_w: u32,
@@ -113,9 +178,10 @@ pub struct PySelfPlayResult {
 #[pymethods]
 impl PySelfPlayResult {
     /// Get training data as numpy arrays.
-    /// Returns (boards[N,23,23,23], reserves[N,10], policies[N,5819],
+    /// Returns (boards[N,C,H,W], reserves[N,10], policies[N,5819],
     ///          values[N], weights[N], value_only[N], policy_only[N],
-    ///          my_queen_danger[N], opp_queen_danger[N])
+    ///          aux_targets[N,6])
+    /// aux_targets columns: [my_qd, opp_qd, my_qe, opp_qe, my_mob, opp_mob]
     fn training_data<'py>(&self, py: Python<'py>) -> (
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
@@ -124,8 +190,7 @@ impl PySelfPlayResult {
         Bound<'py, PyArray1<f32>>,
         Vec<bool>,
         Vec<bool>,
-        Bound<'py, PyArray1<f32>>,
-        Bound<'py, PyArray1<f32>>,
+        Bound<'py, PyArray2<f32>>,
     ) {
         let n = self.num_samples;
         let boards = numpy::ndarray::Array2::from_shape_vec(
@@ -139,8 +204,18 @@ impl PySelfPlayResult {
         ).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
         let weights = numpy::ndarray::Array1::from(self.weights.clone());
-        let mqd = numpy::ndarray::Array1::from(self.my_queen_danger.clone());
-        let oqd = numpy::ndarray::Array1::from(self.opp_queen_danger.clone());
+
+        // Pack all auxiliary targets into a single [N, 6] array
+        let mut aux_data = Vec::with_capacity(n * 6);
+        for i in 0..n {
+            aux_data.push(self.my_queen_danger[i]);
+            aux_data.push(self.opp_queen_danger[i]);
+            aux_data.push(self.my_queen_escape[i]);
+            aux_data.push(self.opp_queen_escape[i]);
+            aux_data.push(self.my_mobility[i]);
+            aux_data.push(self.opp_mobility[i]);
+        }
+        let aux = numpy::ndarray::Array2::from_shape_vec((n, 6), aux_data).unwrap();
 
         (
             PyArray2::from_owned_array_bound(py, boards),
@@ -150,8 +225,7 @@ impl PySelfPlayResult {
             PyArray1::from_owned_array_bound(py, weights),
             self.value_only_flags.clone(),
             self.policy_only_flags.clone(),
-            PyArray1::from_owned_array_bound(py, mqd),
-            PyArray1::from_owned_array_bound(py, oqd),
+            PyArray2::from_owned_array_bound(py, aux),
         )
     }
 
@@ -595,6 +669,10 @@ impl PySelfPlaySession {
                     policy_vector,
                     my_queen_danger: queen_danger(&games[gi], turn_color),
                     opp_queen_danger: queen_danger(&games[gi], opp_color),
+                    my_queen_escape: queen_escape(&games[gi], turn_color),
+                    opp_queen_escape: queen_escape(&games[gi], opp_color),
+                    my_mobility: piece_mobility(&mut games[gi], turn_color),
+                    opp_mobility: piece_mobility(&mut games[gi], opp_color),
                 });
 
                 // Sample and play move
@@ -649,6 +727,10 @@ impl PySelfPlaySession {
         let mut result_policy_only: Vec<bool> = Vec::new();
         let mut result_my_queen_danger: Vec<f32> = Vec::new();
         let mut result_opp_queen_danger: Vec<f32> = Vec::new();
+        let mut result_my_queen_escape: Vec<f32> = Vec::new();
+        let mut result_opp_queen_escape: Vec<f32> = Vec::new();
+        let mut result_my_mobility: Vec<f32> = Vec::new();
+        let mut result_opp_mobility: Vec<f32> = Vec::new();
         let mut num_samples = 0usize;
 
         let mut wins_w: u32 = 0;
@@ -703,6 +785,10 @@ impl PySelfPlaySession {
                 result_policy_only.push(policy_only);
                 result_my_queen_danger.push(record.my_queen_danger);
                 result_opp_queen_danger.push(record.opp_queen_danger);
+                result_my_queen_escape.push(record.my_queen_escape);
+                result_opp_queen_escape.push(record.opp_queen_escape);
+                result_my_mobility.push(record.my_mobility);
+                result_opp_mobility.push(record.opp_mobility);
                 num_samples += 1;
             }
         }
@@ -732,6 +818,10 @@ impl PySelfPlaySession {
             policy_only_flags: result_policy_only,
             my_queen_danger: result_my_queen_danger,
             opp_queen_danger: result_opp_queen_danger,
+            my_queen_escape: result_my_queen_escape,
+            opp_queen_escape: result_opp_queen_escape,
+            my_mobility: result_my_mobility,
+            opp_mobility: result_opp_mobility,
             num_samples,
             wins_w, wins_b, draws, resignations,
             total_moves: move_counts.iter().sum(),

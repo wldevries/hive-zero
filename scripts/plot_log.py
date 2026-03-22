@@ -47,10 +47,18 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
     ax2.plot(iters, df["loss"], label="Total loss", color="black", linewidth=1.5)
     ax2.plot(iters, df["policy_loss"], label="Policy loss", color="royalblue", linewidth=1)
     ax2.plot(iters, df["value_loss"], label="Value loss", color="darkorange", linewidth=1)
-    ax2.plot(iters, df["qd_loss"], label="Queen danger loss", color="mediumpurple", linewidth=1)
+    ax2.plot(iters, df["qd_loss"], label="QD loss", color="mediumpurple", linewidth=1)
+    if "qe_loss" in df.columns:
+        qe = pd.to_numeric(df["qe_loss"], errors="coerce")
+        if qe.notna().any() and (qe > 0).any():
+            ax2.plot(iters, qe, label="QE loss", color="mediumseagreen", linewidth=1)
+    if "mob_loss" in df.columns:
+        mob = pd.to_numeric(df["mob_loss"], errors="coerce")
+        if mob.notna().any() and (mob > 0).any():
+            ax2.plot(iters, mob, label="Mob loss", color="indianred", linewidth=1)
     ax2.set_xlabel("Iteration")
     ax2.set_ylabel("Loss")
-    ax2.legend(loc="lower left", bbox_to_anchor=(0, 1.02, 1, 0.1), ncol=4, mode="expand", borderaxespad=0, fontsize=8)
+    ax2.legend(loc="lower left", bbox_to_anchor=(0, 1.02, 1, 0.1), ncol=6, mode="expand", borderaxespad=0, fontsize=8)
     ax2.grid(True, alpha=0.3)
     ax2.set_title("Training losses")
 

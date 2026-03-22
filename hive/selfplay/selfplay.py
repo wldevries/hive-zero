@@ -200,8 +200,17 @@ class SelfPlayTrainer:
 
             # Insert training data into replay buffer
             buf_start = time.time()
-            boards, reserves, policies, values, weights, value_only_flags, policy_only_flags, mqd, oqd = result.training_data()
-            replay_buffer.add_batch(boards, reserves, policies, values, weights, value_only_flags, policy_only_flags, mqd, oqd)
+            (boards, reserves, policies, values, weights, value_only_flags, policy_only_flags,
+             aux_targets) = result.training_data()
+            # aux_targets is [N, 6]: [my_qd, opp_qd, my_qe, opp_qe, my_mob, opp_mob]
+            replay_buffer.add_batch(boards, reserves, policies, values, weights,
+                                    value_only_flags, policy_only_flags,
+                                    my_queen_danger=aux_targets[:, 0],
+                                    opp_queen_danger=aux_targets[:, 1],
+                                    my_queen_escape=aux_targets[:, 2],
+                                    opp_queen_escape=aux_targets[:, 3],
+                                    my_mobility=aux_targets[:, 4],
+                                    opp_mobility=aux_targets[:, 5])
             buf_time = time.time() - buf_start
 
             total_positions = result.num_samples
@@ -257,8 +266,11 @@ class SelfPlayTrainer:
                 policy_s = f"{losses['policy_loss']:.4f}"
                 value_s = f"{losses['value_loss']:.4f}"
                 qd_s = f"{losses.get('qd_loss', 0):.4f}"
+                qe_s = f"{losses.get('qe_loss', 0):.4f}"
+                mob_s = f"{losses.get('mob_loss', 0):.4f}"
                 print(f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
-                      f"(policy={_cy(policy_s)}, value={_cy(value_s)}, qd={_cy(qd_s)}, lr={lr})")
+                      f"(policy={_cy(policy_s)}, value={_cy(value_s)}, "
+                      f"qd={_cy(qd_s)}, qe={_cy(qe_s)}, mob={_cy(mob_s)}, lr={lr})")
             train_time = time.time() - train_start
             _print_vram("post-train")
 
@@ -268,7 +280,8 @@ class SelfPlayTrainer:
                             f"{len(replay_buffer)},{losses['total_loss']:.6f},"
                             f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
                             f"{losses.get('qd_loss', 0):.6f},"
-                            f"{lr:.8f},{play_time + train_time:.1f},{csv_comment(self._comment)}\n")
+                            f"{lr:.8f},{play_time + train_time:.1f},{csv_comment(self._comment)},"
+                            f"{losses.get('qe_loss', 0):.6f},{losses.get('mob_loss', 0):.6f}\n")
             self._comment = ""
             self._log.flush()
 
@@ -392,7 +405,7 @@ class SelfPlayTrainer:
             shutil.copy2(best_model_path, self.model_path)
             print(f"  {_cg(w)}W/{_cy(d)}D/{_cr(l)}L → best model: {winner_label}")
             self._log.write(f"{iteration},pit-bootstrap,{simulations},{w},{l},{d},0,0,0,"
-                            f"{score:.6f},0,0,0,0,{csv_comment(self._comment)}\n")
+                            f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
             self._log.flush()
             return
 
@@ -430,7 +443,7 @@ class SelfPlayTrainer:
         shutil.copy2(best_model_path, self.model_path)
 
         self._log.write(f"{iteration},pit,{simulations},{w},{l},{d},0,0,0,"
-                        f"{score:.6f},0,0,0,0,{csv_comment(self._comment)}\n")
+                        f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
         self._log.flush()
 
     def _run_eval(self, eval_config: dict, iteration: int, replay_buffer=None):
@@ -480,7 +493,7 @@ class SelfPlayTrainer:
             # Log to CSV
             self._log.write(f"{iteration},eval,{eval_config['simulations']},{w},{l},{d},0,{len(samples)},"
                             f"{len(replay_buffer) if replay_buffer else 0},"
-                            f"{score:.6f},0,0,0,0,{csv_comment(self._comment)}\n")
+                            f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
             self._log.flush()
         except Exception as e:
             print(f"  Eval failed: {e}")

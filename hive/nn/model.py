@@ -35,7 +35,8 @@ class HiveNet(nn.Module):
         - Residual tower (num_blocks blocks)
         - Policy head: conv -> flatten -> linear -> POLICY_SIZE
         - Value head: conv(1x1) -> flatten -> concat reserve -> FC(256) -> tanh
-        - Queen danger head: conv(1x1) -> flatten -> concat reserve -> FC(64) -> sigmoid (my_qd, opp_qd)
+        - Auxiliary head: conv(1x1) -> flatten -> concat reserve -> FC(64) -> sigmoid
+          (my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility)
     """
 
     def __init__(self, num_blocks: int = 10, channels: int = 128):
@@ -64,11 +65,12 @@ class HiveNet(nn.Module):
         self.value_fc1 = nn.Linear(value_input_size, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
-        # Auxiliary queen danger head (own pathway from trunk)
+        # Auxiliary head (own pathway from trunk)
+        # Outputs: [my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility]
         self.qd_conv = nn.Conv2d(channels, 1, 1, bias=False)
         self.qd_bn = nn.BatchNorm2d(1)
         self.qd_fc1 = nn.Linear(value_input_size, 64)
-        self.qd_fc2 = nn.Linear(64, 2)  # [my_queen_danger, opp_queen_danger]
+        self.qd_fc2 = nn.Linear(64, 6)
 
     def forward(self, board_tensor: torch.Tensor, reserve_vector: torch.Tensor):
         """Forward pass.
@@ -80,8 +82,7 @@ class HiveNet(nn.Module):
         Returns:
             policy_logits: (batch, POLICY_SIZE)
             value: (batch, 1) in [-1, 1]
-            my_queen_danger: (batch, 1) in [0, 1]
-            opp_queen_danger: (batch, 1) in [0, 1]
+            aux: (batch, 6) in [0, 1] — [my_qd, opp_qd, my_qe, opp_qe, my_mob, opp_mob]
         """
         # Shared trunk
         x = F.relu(self.input_bn(self.input_conv(board_tensor)))
@@ -101,16 +102,14 @@ class HiveNet(nn.Module):
         v = F.relu(self.value_fc1(v))
         value = torch.tanh(self.value_fc2(v))
 
-        # Queen danger head (own pathway from trunk)
+        # Auxiliary head (own pathway from trunk)
         qd = F.relu(self.qd_bn(self.qd_conv(x)))
         qd = qd.view(qd.size(0), -1)
         qd = torch.cat([qd, reserve_vector], dim=1)
         qd = F.relu(self.qd_fc1(qd))
-        qd = torch.sigmoid(self.qd_fc2(qd))
-        my_qd = qd[:, 0:1]
-        opp_qd = qd[:, 1:2]
+        aux = torch.sigmoid(self.qd_fc2(qd))
 
-        return policy_logits, value, my_qd, opp_qd
+        return policy_logits, value, aux
 
 
 def create_model(num_blocks: int = 10, channels: int = 128) -> HiveNet:
@@ -140,8 +139,11 @@ def load_checkpoint(path: str) -> tuple[HiveNet, dict]:
 
     # Support both checkpoint format and raw state_dict
     state_dict = checkpoint.get("model_state_dict", checkpoint)
-    # Allow loading old checkpoints that lack auxiliary queen danger heads
-    model.load_state_dict(state_dict, strict=False)
+    # Filter out keys with shape mismatches (e.g. aux head grew from 2 to 6 outputs)
+    model_state = model.state_dict()
+    compatible = {k: v for k, v in state_dict.items()
+                  if k in model_state and v.shape == model_state[k].shape}
+    model.load_state_dict(compatible, strict=False)
     if "model_state_dict" not in checkpoint:
         checkpoint = {"iteration": 0, "metadata": {}}
 

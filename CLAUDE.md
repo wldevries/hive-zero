@@ -46,7 +46,10 @@ rust/
 - **Replay buffer**: in-memory only, not persisted to disk. Lost on process exit. Pretrain and selfplay run as separate processes so the buffer is always empty at the start of selfplay.
 - **Fast-cap turns**: no Dirichlet noise, play strongest move, added to buffer with value-only training (policy loss masked)
 - **Heuristic value** for unfinished games: queen neighbor pressure + beetle-on-queen bonus (no draw penalty)
-- **Auxiliary queen danger heads**: Two extra outputs from the value head's shared hidden layer predicting current-player and opponent queen danger (neighbors/6 + beetle-on-top bonus, sigmoid, 0–1). Trained with MSE weighted at 0.15 each, always active (not masked). Provides gradient signal on every position even in drawn games.
+- **Auxiliary heads**: Six sigmoid outputs from a dedicated pathway off the trunk (conv1x1→FC64→FC6), predicting per-position metrics for both current and opponent player. Trained with MSE, always active (not masked). Provides gradient signal on every position even in drawn games.
+  - Queen danger (neighbors/6 + beetle-on-top bonus, 0–1)
+  - Queen escape (legal slide destinations / 6, 0–1)
+  - Piece mobility (fraction of pieces with ≥1 legal move, 0–1)
 - **Opening diversity**: Two mechanisms to avoid early-game convergence:
   - `--random-opening-moves MIN-MAX`: play N random moves (uniform in [min, max]) before MCTS takes over
   - `--opening-book PATH`: use boardspace game openings, with `--boardspace-frac` controlling the mix vs random openings
