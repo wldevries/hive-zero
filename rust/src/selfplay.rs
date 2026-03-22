@@ -716,11 +716,11 @@ fn run_simulations_internal(
 
     // pending_gi[i] is the game index (into `searches`) for the i-th pending leaf.
     let mut pending_gi: Vec<usize> = Vec::new();
-    let mut pending_leaf_ids: Vec<u32> = Vec::new();
+    let mut pending_leaves: Vec<(u32, Game)> = Vec::new();
     let mut pending_boards: Vec<f32> = Vec::new();
     let mut pending_reserves: Vec<f32> = Vec::new();
 
-    while !still_searching.is_empty() || !pending_leaf_ids.is_empty() {
+    while !still_searching.is_empty() || !pending_leaves.is_empty() {
         // --- CPU (rayon): each active game selects 1 leaf and encodes it ---
         if !still_searching.is_empty() {
             let active_gis: Vec<usize> = still_searching.iter()
@@ -731,16 +731,16 @@ fn run_simulations_internal(
                 .map(|&gi| SendPtr(&mut searches[gi] as *mut MctsSearch))
                 .collect();
 
-            let results: Vec<(Vec<u32>, Vec<f32>, Vec<f32>)> = search_ptrs.par_iter()
+            let results: Vec<(Vec<(u32, Game)>, Vec<f32>, Vec<f32>)> = search_ptrs.par_iter()
                 .map(|sp| {
                     let search = unsafe { &mut *sp.0 };
                     let leaves = search.select_leaves(1);
-                    let mut boards = vec![0.0f32; leaves.len() * board_size];
-                    let mut reserves = vec![0.0f32; leaves.len() * RESERVE_SIZE];
-                    for (j, &leaf) in leaves.iter().enumerate() {
-                        let game_state = &search.arena.get(leaf).game;
+                    let n = leaves.len();
+                    let mut boards = vec![0.0f32; n * board_size];
+                    let mut reserves = vec![0.0f32; n * RESERVE_SIZE];
+                    for (j, (_, game)) in leaves.iter().enumerate() {
                         board_encoding::encode_board(
-                            game_state,
+                            game,
                             &mut boards[j * board_size..(j + 1) * board_size],
                             &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
                         );
@@ -753,10 +753,10 @@ fn run_simulations_internal(
                 let gi = active_gis[idx];
                 let (ref leaves, ref boards, ref reserves) = results[idx];
                 sims_done[si] += leaves.len().max(1);
-                for &leaf_id in leaves {
+                for &(leaf_id, _) in leaves {
                     pending_gi.push(gi);
-                    pending_leaf_ids.push(leaf_id);
                 }
+                pending_leaves.extend(leaves.iter().cloned());
                 pending_boards.extend_from_slice(boards);
                 pending_reserves.extend_from_slice(reserves);
             }
@@ -766,11 +766,11 @@ fn run_simulations_internal(
         }
 
         // Flush every rounds_per_flush rounds, or on the final round.
-        let should_flush = (!pending_leaf_ids.is_empty())
+        let should_flush = (!pending_leaves.is_empty())
             && (round % rounds_per_flush == 0 || still_searching.is_empty());
 
         if should_flush {
-            let total = pending_leaf_ids.len();
+            let total = pending_leaves.len();
 
             // --- GPU: single inference call ---
             let boards_data = std::mem::take(&mut pending_boards);
@@ -794,13 +794,14 @@ fn run_simulations_internal(
             let value_data = value_arr.as_slice().unwrap();
 
             // --- Group leaves by game for expand/backprop ---
-            // Keys are unique game indices; values are (leaf_ids, policies, values).
+            // Keys are unique game indices; values are (leaves_with_games, policies, values).
             let mut gi_groups: std::collections::HashMap<
-                usize, (Vec<u32>, Vec<Vec<f32>>, Vec<f32>)
+                usize, (Vec<(u32, Game)>, Vec<Vec<f32>>, Vec<f32>)
             > = std::collections::HashMap::new();
+            let drained_leaves = std::mem::take(&mut pending_leaves);
             for (i, &gi) in pending_gi.iter().enumerate() {
                 let entry = gi_groups.entry(gi).or_default();
-                entry.0.push(pending_leaf_ids[i]);
+                entry.0.push(drained_leaves[i].clone());
                 entry.1.push(policy_data[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].to_vec());
                 entry.2.push(value_data[i]);
             }
@@ -813,12 +814,13 @@ fn run_simulations_internal(
 
             expand_ptrs.par_iter().zip(unique_gis.par_iter()).for_each(|(sp, &gi)| {
                 let search = unsafe { &mut *sp.0 };
-                let (leaf_ids, policies, values) = &gi_groups[&gi];
-                search.expand_and_backprop(leaf_ids, policies, values);
+                let (leaves, policies, values) = gi_groups.get(&gi).unwrap();
+                let mut leaves_clone = leaves.clone();
+                search.expand_and_backprop(&mut leaves_clone, policies, values);
             });
 
             pending_gi.clear();
-            pending_leaf_ids.clear();
+            // pending_leaves already emptied via take()
             // pending_boards / pending_reserves already emptied via take()
         }
     }

@@ -7,6 +7,7 @@ use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyRe
 use crate::board::GRID_SIZE;
 use crate::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
 use crate::game::{self, Game};
+use crate::mcts::arena::NodeId;
 use crate::mcts::search::MctsSearch;
 use crate::move_encoding::{self, POLICY_SIZE};
 use crate::piece::{Piece, PieceColor, PieceType};
@@ -263,11 +264,11 @@ impl PyMCTS {
         let mut sims_done = 0;
         while sims_done < max_simulations {
             let batch = std::cmp::min(self.batch_size, max_simulations - sims_done);
-            let leaves = self.search.select_leaves(batch);
+            let mut leaves = self.search.select_leaves(batch);
 
             if !leaves.is_empty() {
                 let (policies, values) = self.eval_batch(py, &leaves, eval_fn);
-                self.search.expand_and_backprop(&leaves, &policies, &values);
+                self.search.expand_and_backprop(&mut leaves, &policies, &values);
             }
 
             sims_done += batch;
@@ -301,11 +302,11 @@ impl PyMCTS {
         let mut sims_done = 0;
         while sims_done < max_simulations {
             let batch = std::cmp::min(self.batch_size, max_simulations - sims_done);
-            let leaves = self.search.select_leaves(batch);
+            let mut leaves = self.search.select_leaves(batch);
 
             if !leaves.is_empty() {
                 let (policies, values) = self.eval_batch(py, &leaves, eval_fn);
-                self.search.expand_and_backprop(&leaves, &policies, &values);
+                self.search.expand_and_backprop(&mut leaves, &policies, &values);
             }
 
             sims_done += batch;
@@ -359,26 +360,30 @@ impl PyMCTS {
     }
 
     /// Select leaf nodes needing NN eval. Terminal/duplicate nodes are handled
-    /// internally. Returns list of leaf node IDs.
+    /// internally. Stashes (leaf_id, game) pairs for later expand_and_backprop.
+    /// Returns list of leaf node IDs.
     #[pyo3(signature = (batch_size))]
     fn select_leaves_batch(&mut self, batch_size: usize) -> Vec<u32> {
-        self.search.select_leaves(batch_size)
+        let leaves = self.search.select_leaves(batch_size);
+        let ids: Vec<u32> = leaves.iter().map(|(id, _)| *id).collect();
+        self.search.stashed_leaves = leaves;
+        ids
     }
 
-    /// Encode leaf game states as numpy arrays for NN evaluation.
+    /// Encode stashed leaf game states as numpy arrays for NN evaluation.
+    /// Must be called after select_leaves_batch.
     /// Returns (boards[N, C*H*W], reserves[N, R]).
     fn encode_leaves<'py>(
-        &self, py: Python<'py>, leaf_ids: Vec<u32>,
+        &self, py: Python<'py>,
     ) -> (Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>) {
-        let n = leaf_ids.len();
+        let n = self.search.stashed_leaves.len();
         let board_size = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
         let mut all_boards = vec![0.0f32; n * board_size];
         let mut all_reserves = vec![0.0f32; n * RESERVE_SIZE];
 
-        for (i, &leaf) in leaf_ids.iter().enumerate() {
-            let game_state = &self.search.arena.get(leaf).game;
+        for (i, (_, game)) in self.search.stashed_leaves.iter().enumerate() {
             crate::board_encoding::encode_board(
-                game_state,
+                game,
                 &mut all_boards[i * board_size..(i + 1) * board_size],
                 &mut all_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
             );
@@ -389,22 +394,23 @@ impl PyMCTS {
     }
 
     /// Expand leaves with NN output and backpropagate values.
+    /// Uses stashed leaves from select_leaves_batch.
     fn expand_and_backprop_batch(
         &mut self,
-        leaf_ids: Vec<u32>,
         policies: PyReadonlyArray2<f32>,
         values: PyReadonlyArray1<f32>,
     ) {
         let policy_data = policies.as_slice().unwrap();
         let value_data = values.as_slice().unwrap();
-        let n = leaf_ids.len();
+        let mut leaves = std::mem::take(&mut self.search.stashed_leaves);
+        let n = leaves.len();
 
         let policies_vec: Vec<Vec<f32>> = (0..n).map(|i| {
             policy_data[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].to_vec()
         }).collect();
         let values_vec: Vec<f32> = value_data[..n].to_vec();
 
-        self.search.expand_and_backprop(&leaf_ids, &policies_vec, &values_vec);
+        self.search.expand_and_backprop(&mut leaves, &policies_vec, &values_vec);
     }
 
     /// Get visit count distribution after search completes.
@@ -442,7 +448,7 @@ impl PyMCTS {
     fn eval_batch(
         &self,
         py: Python<'_>,
-        leaves: &[u32],
+        leaves: &[(NodeId, Game)],
         eval_fn: &Bound<'_, PyAny>,
     ) -> (Vec<Vec<f32>>, Vec<f32>) {
         let n = leaves.len();
@@ -450,8 +456,7 @@ impl PyMCTS {
         let mut all_boards = vec![0.0f32; n * board_size];
         let mut all_reserves = vec![0.0f32; n * RESERVE_SIZE];
 
-        for (i, &leaf) in leaves.iter().enumerate() {
-            let game = &self.search.arena.get(leaf).game;
+        for (i, (_, game)) in leaves.iter().enumerate() {
             crate::board_encoding::encode_board(
                 game,
                 &mut all_boards[i * board_size..(i + 1) * board_size],
@@ -543,59 +548,57 @@ impl PyBatchMCTS {
         let searches = &mut self.searches;
 
         // Collect mutable refs to only the active searches
-        // We gather (index_in_active, &mut MctsSearch) pairs
         let mut active_searches: Vec<(usize, &mut MctsSearch)> = Vec::with_capacity(active_indices.len());
         for (pos, &gi) in active_indices.iter().enumerate() {
-            // Split borrow: take a raw pointer, rebuild mutable ref.
-            // This is safe because active_indices contains unique indices.
             let ptr = &mut searches[gi] as *mut MctsSearch;
             active_searches.push((pos, unsafe { &mut *ptr }));
         }
 
         // Parallel: select leaves + encode for each active game
-        let results: Vec<(Vec<u32>, Vec<f32>, Vec<f32>)> = active_searches
+        let results: Vec<(usize, Vec<f32>, Vec<f32>)> = active_searches
             .par_iter_mut()
             .map(|(_pos, search)| {
                 let leaves = search.select_leaves(leaf_batch_size);
+                let n = leaves.len();
 
-                let mut boards = vec![0.0f32; leaves.len() * board_size];
-                let mut reserves = vec![0.0f32; leaves.len() * RESERVE_SIZE];
+                let mut boards = vec![0.0f32; n * board_size];
+                let mut reserves = vec![0.0f32; n * RESERVE_SIZE];
 
-                for (j, &leaf) in leaves.iter().enumerate() {
-                    let game_state = &search.arena.get(leaf).game;
+                for (j, (_, game)) in leaves.iter().enumerate() {
                     crate::board_encoding::encode_board(
-                        game_state,
+                        game,
                         &mut boards[j * board_size..(j + 1) * board_size],
                         &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
                     );
                 }
 
-                // Stash leaf IDs for backprop
-                search.stashed_leaves = leaves.clone();
+                // Stash leaves (with games) for backprop
+                search.stashed_leaves = leaves;
 
-                (leaves, boards, reserves)
+                (n, boards, reserves)
             })
             .collect();
 
         // Flatten boards/reserves into single arrays
         let mut total_leaves = 0usize;
         let mut game_leaf_counts = Vec::with_capacity(active_indices.len());
-        for (leaves, _, _) in &results {
-            game_leaf_counts.push(leaves.len());
-            total_leaves += leaves.len();
+        for (n, _, _) in &results {
+            game_leaf_counts.push(*n);
+            total_leaves += n;
         }
 
         let mut all_boards = vec![0.0f32; total_leaves * board_size];
         let mut all_reserves = vec![0.0f32; total_leaves * RESERVE_SIZE];
 
         let mut offset = 0;
-        for (_, boards, reserves) in &results {
-            let n = boards.len() / board_size;
-            all_boards[offset * board_size..(offset + n) * board_size]
-                .copy_from_slice(boards);
-            all_reserves[offset * RESERVE_SIZE..(offset + n) * RESERVE_SIZE]
-                .copy_from_slice(reserves);
-            offset += n;
+        for (n, boards, reserves) in &results {
+            if *n > 0 {
+                all_boards[offset * board_size..(offset + n) * board_size]
+                    .copy_from_slice(boards);
+                all_reserves[offset * RESERVE_SIZE..(offset + n) * RESERVE_SIZE]
+                    .copy_from_slice(reserves);
+                offset += n;
+            }
         }
 
         (
@@ -641,14 +644,14 @@ impl PyBatchMCTS {
         active_searches.par_iter_mut().for_each(|(pos, search)| {
             let off = offsets[*pos];
             let n = game_leaf_counts[*pos];
-            let leaf_ids = std::mem::take(&mut search.stashed_leaves);
+            let mut leaves = std::mem::take(&mut search.stashed_leaves);
 
             let policies_vec: Vec<Vec<f32>> = (0..n).map(|j| {
                 policy_data[(off + j) * POLICY_SIZE..(off + j + 1) * POLICY_SIZE].to_vec()
             }).collect();
             let values_vec: Vec<f32> = value_data[off..off + n].to_vec();
 
-            search.expand_and_backprop(&leaf_ids, &policies_vec, &values_vec);
+            search.expand_and_backprop(&mut leaves, &policies_vec, &values_vec);
         });
     }
 
@@ -695,23 +698,23 @@ impl PyBatchMCTS {
                 .map(|&si| (per_game_caps[si] - sims_done[si]).min(leaf_batch_size).max(1))
                 .collect();
 
-            let results: Vec<(Vec<u32>, Vec<f32>, Vec<f32>)> = active_searches
+            let results: Vec<(usize, Vec<f32>, Vec<f32>)> = active_searches
                 .par_iter_mut()
                 .zip(per_game_batch.par_iter())
                 .map(|(search, &batch)| {
                     let leaves = search.select_leaves(batch);
-                    let mut boards = vec![0.0f32; leaves.len() * board_size];
-                    let mut reserves = vec![0.0f32; leaves.len() * RESERVE_SIZE];
-                    for (j, &leaf) in leaves.iter().enumerate() {
-                        let game_state = &search.arena.get(leaf).game;
+                    let n = leaves.len();
+                    let mut boards = vec![0.0f32; n * board_size];
+                    let mut reserves = vec![0.0f32; n * RESERVE_SIZE];
+                    for (j, (_, game)) in leaves.iter().enumerate() {
                         crate::board_encoding::encode_board(
-                            game_state,
+                            game,
                             &mut boards[j * board_size..(j + 1) * board_size],
                             &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
                         );
                     }
-                    search.stashed_leaves = leaves.clone();
-                    (leaves, boards, reserves)
+                    search.stashed_leaves = leaves;
+                    (n, boards, reserves)
                 })
                 .collect();
 
@@ -719,7 +722,7 @@ impl PyBatchMCTS {
             let mut total_leaves = 0usize;
             let mut leaf_counts = Vec::with_capacity(searching.len());
             for (si_idx, &si) in searching.iter().enumerate() {
-                let n = results[si_idx].0.len();
+                let n = results[si_idx].0;
                 sims_done[si] += n.max(1); // at least 1 to avoid infinite loop
                 leaf_counts.push(n);
                 total_leaves += n;
@@ -734,9 +737,8 @@ impl PyBatchMCTS {
             let mut all_boards = vec![0.0f32; total_leaves * board_size];
             let mut all_reserves = vec![0.0f32; total_leaves * RESERVE_SIZE];
             let mut offset = 0;
-            for (_, boards, reserves) in &results {
-                let n = boards.len() / board_size;
-                if n > 0 {
+            for (n, boards, reserves) in &results {
+                if *n > 0 {
                     all_boards[offset * board_size..(offset + n) * board_size]
                         .copy_from_slice(boards);
                     all_reserves[offset * RESERVE_SIZE..(offset + n) * RESERVE_SIZE]
@@ -775,12 +777,12 @@ impl PyBatchMCTS {
             active_searches2.par_iter_mut().enumerate().for_each(|(i, search)| {
                 let off = offsets[i];
                 let n = leaf_counts[i];
-                let leaf_ids = std::mem::take(&mut search.stashed_leaves);
+                let mut leaves = std::mem::take(&mut search.stashed_leaves);
                 let policies_vec: Vec<Vec<f32>> = (0..n).map(|j| {
                     policy_data[(off + j) * POLICY_SIZE..(off + j + 1) * POLICY_SIZE].to_vec()
                 }).collect();
                 let values_vec: Vec<f32> = value_data[off..off + n].to_vec();
-                search.expand_and_backprop(&leaf_ids, &policies_vec, &values_vec);
+                search.expand_and_backprop(&mut leaves, &policies_vec, &values_vec);
             });
 
             searching.retain(|&si| sims_done[si] < per_game_caps[si]);

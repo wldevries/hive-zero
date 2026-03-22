@@ -17,15 +17,21 @@ to `&mut self` accordingly.
 
 ## Remaining opportunities
 
-### MCTS: full Game clone per tree node (high impact)
+### MCTS: full Game clone per tree node (done)
 
-Each `MctsNode` stores `pub game: Game`, and `expand_with_policy` clones the game for every
+Each `MctsNode` stored `pub game: Game`, and `expand_with_policy` cloned the game for every
 child. `Game` contains `Board` (4KB heap), `Vec<Move>` history, and `Vec<(u16, u16)>` reserve
 history. A tree with 10K nodes = ~40MB just for board clones, causing massive cache thrashing.
 
-**Fix**: Don't store game states in nodes. Reconstruct by replaying moves from root during
-selection. Only the leaf needs the full game state for encoding. This is what most competitive
-MCTS implementations do.
+**Fix**: Removed `game` from `MctsNode` entirely. Nodes now store only metadata (~60 bytes:
+move, prior, visit stats, turn_color, child links). `MctsSearch` stores the root game and
+reconstructs game state at any node by replaying moves from root via the parent chain.
+`select_leaves()` returns `(NodeId, Game)` pairs — the reconstructed game is used for
+encoding and expansion, then discarded.
+
+**Impact**: Per-node memory drops from ~4KB+ to ~60 bytes. 10K node tree: ~40MB → ~600KB.
+Reconstruction cost is O(depth) `play_move` calls per leaf (~15-20 moves, microseconds each),
+negligible vs GPU eval time.
 
 ### `parse_and_play_uhp` valid-moves bypass for replay (done)
 

@@ -2,7 +2,8 @@
 /// Pre-allocates a pool of nodes to avoid per-node heap allocation.
 
 use super::node::MctsNode;
-use crate::game::{Game, Move};
+use crate::game::Move;
+use crate::piece::PieceColor;
 
 /// Opaque node identifier.
 pub type NodeId = u32;
@@ -26,8 +27,8 @@ impl NodeArena {
     }
 
     /// Allocate a new node. Returns its ID.
-    pub fn alloc(&mut self, game: Game, parent: Option<NodeId>, mv: Move, prior: f32) -> NodeId {
-        let node = MctsNode::new(game, parent, mv, prior);
+    pub fn alloc(&mut self, parent: Option<NodeId>, mv: Move, prior: f32, turn_color: PieceColor) -> NodeId {
+        let node = MctsNode::new(parent, mv, prior, turn_color);
         if let Some(id) = self.free_list.pop() {
             self.nodes[id as usize] = node;
             id

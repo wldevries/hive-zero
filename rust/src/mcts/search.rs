@@ -1,4 +1,5 @@
 /// MCTS search implementation with arena allocation and batch NN evaluation.
+/// Game states are reconstructed by replaying moves from the root, not stored per node.
 
 use super::arena::{NodeArena, NodeId};
 use super::node::MctsNode;
@@ -159,22 +160,21 @@ fn terminal_value(game: &Game, perspective: PieceColor) -> f32 {
 }
 
 /// Expand a node with a policy vector, adding children to the arena.
-fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, policy: &[f32]) {
+/// `game` is the reconstructed game state at this node (not stored in the node).
+fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, game: &mut Game, policy: &[f32]) {
     arena.get_mut(node_id).is_expanded = true;
-    let mut game = arena.get(node_id).game.clone();
+    let child_turn = game.turn_color.opposite();
 
     let valid_moves = game.valid_moves();
     if valid_moves.is_empty() {
-        // Pass
-        let mut child_game = game.clone();
-        child_game.play_pass();
-        let child_id = arena.alloc(child_game, Some(node_id), Move::pass(), 1.0);
+        // Pass — child turn is opposite of current
+        let child_id = arena.alloc(Some(node_id), Move::pass(), 1.0, child_turn);
         arena.get_mut(node_id).first_child = Some(child_id);
         arena.get_mut(node_id).child_count = 1;
         return;
     }
 
-    let (_mask, indexed_moves) = get_legal_move_mask(&mut game);
+    let (_mask, indexed_moves) = get_legal_move_mask(game);
     let mut total_prior = 0.0f32;
     let mut first_child_id: Option<NodeId> = None;
     let mut prev_child_id: Option<NodeId> = None;
@@ -184,9 +184,7 @@ fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, policy: &[f32]) {
         let prior = policy[idx];
         total_prior += prior;
 
-        let mut child_game = game.clone();
-        child_game.play_move(&mv).unwrap();
-        let child_id = arena.alloc(child_game, Some(node_id), mv, prior);
+        let child_id = arena.alloc(Some(node_id), mv, prior, child_turn);
 
         if first_child_id.is_none() {
             first_child_id = Some(child_id);
@@ -213,12 +211,14 @@ fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, policy: &[f32]) {
 }
 
 /// Single-game MCTS search engine.
+/// Game states are reconstructed by replaying moves from root_game.
 pub struct MctsSearch {
     pub arena: NodeArena,
     pub c_puct: f32,
     pub root: NodeId,
-    /// Temporary storage for leaf IDs between select and expand calls.
-    pub stashed_leaves: Vec<NodeId>,
+    pub root_game: Game,
+    /// Temporary storage for leaf data between select and expand calls.
+    pub stashed_leaves: Vec<(NodeId, Game)>,
     /// Whether to use forced playouts at the root (KataGo-style).
     pub use_forced_playouts: bool,
 }
@@ -229,6 +229,7 @@ impl MctsSearch {
             arena: NodeArena::new(capacity),
             c_puct: DEFAULT_C_PUCT,
             root: 0, // will be set in init
+            root_game: Game::new(),
             stashed_leaves: Vec::new(),
             use_forced_playouts: false,
         }
@@ -237,27 +238,51 @@ impl MctsSearch {
     /// Initialize search for a game position.
     pub fn init(&mut self, game: &Game, policy: &[f32]) {
         self.arena.reset();
-        let root = self.arena.alloc(game.clone(), None, Move::pass(), 0.0);
+        self.root_game = game.clone();
+        let root = self.arena.alloc(None, Move::pass(), 0.0, game.turn_color);
         self.root = root;
-        expand_with_policy(&mut self.arena, root, policy);
+        let mut game_copy = game.clone();
+        expand_with_policy(&mut self.arena, root, &mut game_copy, policy);
+    }
+
+    /// Reconstruct the game state at a given node by replaying moves from root.
+    fn reconstruct_game(&self, node_id: NodeId) -> Game {
+        // Collect moves from node back to root
+        let mut moves = Vec::new();
+        let mut current = node_id;
+        while let Some(parent) = self.arena.get(current).parent {
+            moves.push(self.arena.get(current).move_from_parent);
+            current = parent;
+        }
+        moves.reverse();
+
+        // Replay from root game
+        let mut game = self.root_game.clone();
+        for mv in &moves {
+            game.play_move(mv).unwrap();
+        }
+        game
     }
 
     /// Run one batch of simulations. Returns list of (leaf_id, game) pairs
     /// that need NN evaluation. Terminal nodes are handled immediately.
-    pub fn select_leaves(&mut self, batch_size: usize) -> Vec<NodeId> {
-        let root_turn = self.arena.get(self.root).game.turn_color;
+    pub fn select_leaves(&mut self, batch_size: usize) -> Vec<(NodeId, Game)> {
+        let root_turn = self.arena.get(self.root).turn_color;
         let mut leaves = Vec::new();
 
         for _ in 0..batch_size {
             let leaf = select_leaf(&self.arena, self.root, self.c_puct, self.use_forced_playouts);
 
-            if self.arena.get(leaf).game.is_game_over() {
-                let value = terminal_value(&self.arena.get(leaf).game, root_turn);
+            // Reconstruct game state at the leaf
+            let game = self.reconstruct_game(leaf);
+
+            if game.is_game_over() {
+                let value = terminal_value(&game, root_turn);
                 backpropagate(&mut self.arena, leaf, value);
             } else {
                 // Apply virtual loss so subsequent selections in this batch diverge.
                 apply_virtual_loss(&mut self.arena, leaf);
-                leaves.push(leaf);
+                leaves.push((leaf, game));
             }
         }
 
@@ -267,19 +292,19 @@ impl MctsSearch {
     /// Expand leaf nodes with policies and backpropagate values.
     pub fn expand_and_backprop(
         &mut self,
-        leaves: &[NodeId],
+        leaves: &mut Vec<(NodeId, Game)>,
         policies: &[Vec<f32>],
         values: &[f32],
     ) {
-        let root_turn = self.arena.get(self.root).game.turn_color;
-        for (i, &leaf) in leaves.iter().enumerate() {
-            expand_with_policy(&mut self.arena, leaf, &policies[i]);
+        let root_turn = self.arena.get(self.root).turn_color;
+        for (i, (leaf, game)) in leaves.iter_mut().enumerate() {
+            expand_with_policy(&mut self.arena, *leaf, game, &policies[i]);
             let mut value = values[i];
-            if self.arena.get(leaf).game.turn_color != root_turn {
+            if self.arena.get(*leaf).turn_color != root_turn {
                 value = -value;
             }
             // Replace virtual loss placeholder with real value (visit_count already correct).
-            correct_virtual_loss(&mut self.arena, leaf, value);
+            correct_virtual_loss(&mut self.arena, *leaf, value);
         }
     }
 
@@ -449,9 +474,8 @@ impl MctsSearch {
         result
     }
 
-    /// Encode a leaf node's game state for NN evaluation.
-    pub fn encode_leaf(&self, leaf: NodeId) -> (Vec<f32>, Vec<f32>) {
-        let game = &self.arena.get(leaf).game;
+    /// Encode a game state for NN evaluation.
+    pub fn encode_game(game: &Game) -> (Vec<f32>, Vec<f32>) {
         let mut board = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
         let mut reserve = vec![0.0f32; RESERVE_SIZE];
         encode_board(game, &mut board, &mut reserve);
@@ -485,13 +509,13 @@ mod tests {
         search.init(&game, &uniform_policy);
 
         // Select leaves
-        let leaves = search.select_leaves(8);
+        let mut leaves = search.select_leaves(8);
         assert!(!leaves.is_empty());
 
         // Expand with uniform policies
         let policies: Vec<Vec<f32>> = leaves.iter().map(|_| uniform_policy.clone()).collect();
         let values: Vec<f32> = vec![0.0; leaves.len()];
-        search.expand_and_backprop(&leaves, &policies, &values);
+        search.expand_and_backprop(&mut leaves, &policies, &values);
 
         // Root should have visits now
         assert!(search.arena.get(search.root).visit_count > 0);
@@ -506,13 +530,13 @@ mod tests {
 
         // Run some simulations
         for _ in 0..10 {
-            let leaves = search.select_leaves(8);
+            let mut leaves = search.select_leaves(8);
             if leaves.is_empty() {
                 break;
             }
             let policies: Vec<Vec<f32>> = leaves.iter().map(|_| uniform_policy.clone()).collect();
             let values: Vec<f32> = vec![0.0; leaves.len()];
-            search.expand_and_backprop(&leaves, &policies, &values);
+            search.expand_and_backprop(&mut leaves, &policies, &values);
         }
 
         let best = search.best_move();
