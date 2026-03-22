@@ -85,6 +85,8 @@ def main():
                               help="Directory containing boardspace SGF zip archives (default: games/boardspace)")
     train_parser.add_argument("--boardspace-frac", type=float, default=1.0,
                               help="Fraction of games using book openings; remainder use --random-opening-moves (default: 1.0)")
+    train_parser.add_argument("--skip-timeout-games", action="store_true",
+                              help="Exclude positions from games that hit the move limit (timeouts) from training")
 
     # Supervised pre-training
     pretrain_parser = subparsers.add_parser(
@@ -235,6 +237,7 @@ def main():
             opening_games_csv=args.opening_book,
             opening_boardspace_dir=args.opening_boardspace_dir,
             boardspace_frac=args.boardspace_frac,
+            skip_timeout_games=args.skip_timeout_games,
             comment=args.comment,
         )
     else:

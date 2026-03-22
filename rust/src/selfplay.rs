@@ -52,6 +52,7 @@ struct SelfPlayConfig {
     calibration_frac: f32,
     random_opening_moves_min: u32,
     random_opening_moves_max: u32,
+    skip_timeout_games: bool,
 }
 
 /// Result of a self-play session, returned to Python.
@@ -178,6 +179,7 @@ impl PySelfPlaySession {
         calibration_frac = 0.1,
         random_opening_moves_min = 0,
         random_opening_moves_max = 0,
+        skip_timeout_games = false,
     ))]
     fn new(
         num_games: usize,
@@ -195,13 +197,14 @@ impl PySelfPlaySession {
         calibration_frac: f32,
         random_opening_moves_min: u32,
         random_opening_moves_max: u32,
+        skip_timeout_games: bool,
     ) -> Self {
         PySelfPlaySession {
             config: SelfPlayConfig {
                 num_games, simulations, max_moves, temperature, temp_threshold,
                 playout_cap_p, fast_cap, c_puct, leaf_batch_size,
                 resign_threshold, resign_moves, resign_min_moves, calibration_frac,
-                random_opening_moves_min, random_opening_moves_max,
+                random_opening_moves_min, random_opening_moves_max, skip_timeout_games,
             },
         }
     }
@@ -632,6 +635,11 @@ impl PySelfPlaySession {
                     },
                 }
             };
+
+            // Optionally skip all training data from timeout games
+            if !decisive && cfg.skip_timeout_games {
+                continue;
+            }
 
             let weight = if decisive { DECISIVE_WEIGHT } else { 1.0 };
             // Skip value training for timeout games with zero heuristic (balanced position,

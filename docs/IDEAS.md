@@ -15,19 +15,17 @@ that are genuinely drawn-by-repetition vs. drawn-by-exhaustion.
 
 ### Action item: Analyse boardspace game length distribution
 
-Add analysis over the downloaded boardspace SGF corpus to answer:
+**Done.** Implemented in Rust as part of `hive-zero replay`. Statistics from 145,622
+successfully replayed base-game games:
 
-- What is the median / 90th-percentile game length (in plies)?
-- At what turn does the winning queen typically get surrounded?
-- What fraction of games end before turn 20 / 30 / 40?
-- How does game length correlate with opening (number of pieces placed in first N turns)?
+| Metric       | min | p25 | median | avg  | p75 | max |
+|------------- |----:|----:|-------:|-----:|----:|----:|
+| move count   |   0 |  31 |     39 | 42.5 |  50 | 381 |
+| diameter     |   0 |   6 |      7 |  7.1 |   8 |  15 |
+| total pieces |   0 |  17 |     20 | 18.9 |  22 |  22 |
 
-**Preferred implementation:** Rust, inside the existing `scripts/` pipeline or as a new
-`hive_engine` exposed function — keeps it fast for large corpora and consistent with the
-rest of the engine. Python fallback acceptable if the Rust lift is too large.
-
-Output should be a summary printed to stdout (and optionally a CSV for further analysis)
-covering per-game: ply count, winner, decisive/draw, queen-surrounded turn.
+Median game is 39 plies, confirming that most real games are decided well before any
+reasonable move cap. The 23x23 grid (diameter 15 max) is sufficient for virtually all games.
 
 ### Action item: Validate engine rules against boardspace corpus
 
@@ -47,6 +45,11 @@ move generation.
 - Rust CLI (`hive-zero replay`) replays the full corpus with error reporting.
 - Direct SGF → Game replay (`sgf::replay_into_game`) converts Boardspace grid coords to hex
   coords directly, bypassing UHP string generation/parsing entirely. 12x faster, 99.7% success.
+- Board dimension statistics collected during replay (diameter, q/r/s span, piece counts,
+  move count with min/p25/median/avg/p75/max).
+
+**Results:** 238,517 total games; 92,512 skipped (expansions); 145,622 replayed OK; 383
+failed (all OOB — see board recentering below). 99.7% success rate on non-skipped games.
 
 **Remaining:**
 

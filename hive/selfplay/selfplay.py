@@ -84,6 +84,7 @@ class SelfPlayTrainer:
             opening_boardspace_dir: str | None = None,
             boardspace_frac: float = 1.0,
             opening_min_elo: float = 1600.0,
+            skip_timeout_games: bool = False,
             comment: str = ""):
         """Run the full training loop.
 
@@ -190,6 +191,7 @@ class SelfPlayTrainer:
                 fast_cap=fast_cap,
                 leaf_batch_size=leaf_batch_size,
                 random_opening_moves=random_opening_moves,
+                skip_timeout_games=skip_timeout_games,
             )
 
             result = sp.play_games(games_per_iter, opening_sequences=opening_sequences)
