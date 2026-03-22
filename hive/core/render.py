@@ -1,9 +1,9 @@
 """Console hex board renderer for Hive."""
 
 from __future__ import annotations
+from collections import namedtuple
 
-from .hex import Hex
-from .pieces import Piece, PieceColor
+Hex = namedtuple('Hex', ['q', 'r'])
 
 
 def render_board(board_or_game) -> str:
