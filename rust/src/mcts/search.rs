@@ -161,7 +161,7 @@ fn terminal_value(game: &Game, perspective: PieceColor) -> f32 {
 /// Expand a node with a policy vector, adding children to the arena.
 fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, policy: &[f32]) {
     arena.get_mut(node_id).is_expanded = true;
-    let game = arena.get(node_id).game.clone();
+    let mut game = arena.get(node_id).game.clone();
 
     let valid_moves = game.valid_moves();
     if valid_moves.is_empty() {
@@ -174,7 +174,7 @@ fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, policy: &[f32]) {
         return;
     }
 
-    let (_mask, indexed_moves) = get_legal_move_mask(&game);
+    let (_mask, indexed_moves) = get_legal_move_mask(&mut game);
     let mut total_prior = 0.0f32;
     let mut first_child_id: Option<NodeId> = None;
     let mut prev_child_id: Option<NodeId> = None;
@@ -471,10 +471,10 @@ mod tests {
         let mut search = MctsSearch::new(1000);
         search.init(&game, &uniform_policy);
 
-        // Root should be expanded with 4 children (4 piece types, queen excluded, deduped)
+        // Root should be expanded with 5 children (5 piece types, deduped)
         let root = search.arena.get(search.root);
         assert!(root.is_expanded);
-        assert_eq!(root.child_count, 4);
+        assert_eq!(root.child_count, 5);
     }
 
     #[test]

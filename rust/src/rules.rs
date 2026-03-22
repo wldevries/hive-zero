@@ -5,7 +5,8 @@ use crate::board::Board;
 use crate::piece::{Piece, PieceColor, PieceType};
 
 /// Get all legal destination hexes for a piece already on the board.
-pub fn get_moves(piece: Piece, board: &Board, articulation_points: &[Hex]) -> Vec<Hex> {
+/// Temporarily removes the piece from the board to compute moves, then restores it.
+pub fn get_moves(piece: Piece, board: &mut Board, articulation_points: &[Hex]) -> Vec<Hex> {
     let pos = match board.piece_position(piece) {
         Some(p) => p,
         None => return Vec::new(),
@@ -23,13 +24,21 @@ pub fn get_moves(piece: Piece, board: &Board, articulation_points: &[Hex]) -> Ve
         }
     }
 
-    match piece.piece_type() {
-        PieceType::Queen => queen_moves(piece, pos, board),
-        PieceType::Spider => spider_moves(piece, pos, board),
-        PieceType::Beetle => beetle_moves(piece, pos, board),
-        PieceType::Grasshopper => grasshopper_moves(piece, pos, board),
-        PieceType::Ant => ant_moves(piece, pos, board),
-    }
+    // Temporarily remove piece from board
+    board.remove_piece(piece);
+
+    let moves = match piece.piece_type() {
+        PieceType::Queen => queen_moves(pos, board),
+        PieceType::Spider => spider_moves(pos, board),
+        PieceType::Beetle => beetle_moves(pos, board),
+        PieceType::Grasshopper => grasshopper_moves(pos, board),
+        PieceType::Ant => ant_moves(pos, board),
+    };
+
+    // Restore piece
+    board.place_piece(piece, pos);
+
+    moves
 }
 
 /// Get all legal placement positions for a player.
@@ -94,32 +103,25 @@ pub fn get_placements(color: PieceColor, board: &Board) -> Vec<Hex> {
 }
 
 // ---- Piece-specific movement ----
+// All functions below assume the piece has already been removed from `pos`.
 
-fn queen_moves(piece: Piece, pos: Hex, board: &Board) -> Vec<Hex> {
-    // Temporarily remove piece to check movement
-    let mut board = board.clone();
-    board.remove_piece(piece);
+fn queen_moves(pos: Hex, board: &Board) -> Vec<Hex> {
     let mut moves = Vec::new();
-
     for &n in hex_neighbors(pos).iter() {
         if !board.is_occupied(n) && board.can_slide(pos, n) {
-            // Must remain adjacent to hive after moving
             if hex_neighbors(n).iter().any(|&adj| board.is_occupied(adj)) {
                 moves.push(n);
             }
         }
     }
-
     moves
 }
 
-fn beetle_moves(piece: Piece, pos: Hex, board: &Board) -> Vec<Hex> {
-    let mut board = board.clone();
-    board.remove_piece(piece);
+fn beetle_moves(pos: Hex, board: &Board) -> Vec<Hex> {
     let mut moves = Vec::new();
+    let src_height = board.stack_height(pos);
 
     for &n in hex_neighbors(pos).iter() {
-        let src_height = board.stack_height(pos);
         let dst_height = board.stack_height(n);
 
         if src_height == 0 && dst_height == 0 {
@@ -140,11 +142,8 @@ fn beetle_moves(piece: Piece, pos: Hex, board: &Board) -> Vec<Hex> {
     moves
 }
 
-fn grasshopper_moves(piece: Piece, pos: Hex, board: &Board) -> Vec<Hex> {
-    let mut board = board.clone();
-    board.remove_piece(piece);
+fn grasshopper_moves(pos: Hex, board: &Board) -> Vec<Hex> {
     let mut moves = Vec::new();
-
     for &d in DIRECTIONS.iter() {
         let mut current = hex_add(pos, d);
         if !board.is_occupied(current) {
@@ -155,28 +154,21 @@ fn grasshopper_moves(piece: Piece, pos: Hex, board: &Board) -> Vec<Hex> {
         }
         moves.push(current);
     }
-
     moves
 }
 
-fn spider_moves(piece: Piece, pos: Hex, board: &Board) -> Vec<Hex> {
-    let mut board = board.clone();
-    board.remove_piece(piece);
-    walk_exactly_n(pos, 3, &board)
+fn spider_moves(pos: Hex, board: &Board) -> Vec<Hex> {
+    walk_exactly_n(pos, 3, board)
 }
 
-fn ant_moves(piece: Piece, pos: Hex, board: &Board) -> Vec<Hex> {
-    let mut board = board.clone();
-    board.remove_piece(piece);
-    walk_any(pos, &board)
+fn ant_moves(pos: Hex, board: &Board) -> Vec<Hex> {
+    walk_any(pos, board)
 }
 
 /// Find all hexes reachable by sliding exactly n steps.
 fn walk_exactly_n(start: Hex, n: usize, board: &Board) -> Vec<Hex> {
-    // BFS with (position, steps, visited path)
     let mut results = Vec::new();
 
-    // Use a stack-based DFS with visited tracking via small vec
     struct State {
         pos: Hex,
         steps: usize,
@@ -285,9 +277,9 @@ mod tests {
 
     #[test]
     fn test_queen_moves() {
-        let board = setup_basic_board();
+        let mut board = setup_basic_board();
         let wq = Piece::new(PieceColor::White, PieceType::Queen, 1);
-        let moves = get_moves(wq, &board, &[]);
+        let moves = get_moves(wq, &mut board, &[]);
         // Queen should be able to slide to 2 positions adjacent to both pieces
         assert!(!moves.is_empty());
     }
@@ -303,7 +295,7 @@ mod tests {
         board.place_piece(bq, (1, 0));
         board.place_piece(wg, (-1, 0));
 
-        let moves = get_moves(wg, &board, &[]);
+        let moves = get_moves(wg, &mut board, &[]);
         // Should jump over wq and bq to land at (2, 0)
         assert!(moves.contains(&(2, 0)));
     }
@@ -323,7 +315,7 @@ mod tests {
         let ws = Piece::new(PieceColor::White, PieceType::Spider, 1);
         board.place_piece(ws, (1, -1));
 
-        let moves = get_moves(wb, &board, &[]);
+        let moves = get_moves(wb, &mut board, &[]);
         // Beetle should be able to move onto occupied hexes
         assert!(moves.contains(&(0, 0)) || moves.contains(&(1, 0)));
     }
@@ -341,7 +333,7 @@ mod tests {
 
         let aps = board.articulation_points();
         // bq at (1,0) is an articulation point
-        let moves = get_moves(bq, &board, &aps);
+        let moves = get_moves(bq, &mut board, &aps);
         assert!(moves.is_empty());
     }
 }

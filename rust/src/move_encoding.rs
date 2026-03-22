@@ -62,7 +62,7 @@ pub fn encode_game_move(mv: &Move) -> Option<usize> {
 
 /// Create a binary mask over the policy space for legal moves.
 /// Returns (mask, indexed_moves) where indexed_moves maps policy indices to moves.
-pub fn get_legal_move_mask(game: &Game) -> (Vec<f32>, Vec<(usize, Move)>) {
+pub fn get_legal_move_mask(game: &mut Game) -> (Vec<f32>, Vec<(usize, Move)>) {
     let mut mask = vec![0.0f32; POLICY_SIZE];
     let valid_moves = game.valid_moves();
     let mut indexed_moves = Vec::with_capacity(valid_moves.len());

@@ -88,7 +88,7 @@ impl PyGame {
     }
 
     /// Get all valid moves as list of (piece_str, from_pos_or_None, to_pos).
-    fn valid_moves(&self) -> Vec<(String, Option<(i8, i8)>, (i8, i8))> {
+    fn valid_moves(&mut self) -> Vec<(String, Option<(i8, i8)>, (i8, i8))> {
         self.game.valid_moves().iter().map(|mv| {
             let piece_str = mv.piece.unwrap().to_uhp_string();
             let from = mv.from;
@@ -132,9 +132,9 @@ impl PyGame {
 
     /// Get legal move mask and indexed moves.
     fn get_legal_move_mask<'py>(
-        &self, py: Python<'py>
+        &mut self, py: Python<'py>
     ) -> (Bound<'py, PyArray1<f32>>, Vec<(usize, String, Option<(i8, i8)>, (i8, i8))>) {
-        let (mask, indexed_moves) = move_encoding::get_legal_move_mask(&self.game);
+        let (mask, indexed_moves) = move_encoding::get_legal_move_mask(&mut self.game);
         let mask_array = make_array1(py, &mask);
         let moves_list: Vec<_> = indexed_moves.iter().map(|(idx, mv)| {
             let piece_str = mv.piece.unwrap().to_uhp_string();

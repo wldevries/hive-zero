@@ -228,7 +228,7 @@ impl Game {
     }
 
     /// Return all valid moves as Vec<Move>.
-    pub fn valid_moves(&self) -> Vec<Move> {
+    pub fn valid_moves(&mut self) -> Vec<Move> {
         if self.is_game_over() {
             return Vec::new();
         }
@@ -280,7 +280,7 @@ impl Game {
             on_board.sort_by_key(|p| p.raw());
 
             for piece in &on_board {
-                let mut destinations = get_moves(*piece, &self.board, &aps);
+                let mut destinations = get_moves(*piece, &mut self.board, &aps);
                 destinations.retain(|&d| crate::board::hex_to_grid(d).is_some());
                 destinations.sort();
                 let pos = self.board.piece_position(*piece).unwrap();
@@ -639,12 +639,11 @@ mod tests {
     fn test_first_move() {
         let mut game = Game::new();
         let moves = game.valid_moves();
-        // First move: 4 piece types at origin (queen excluded, deduped by type)
-        assert_eq!(moves.len(), 4);
+        // First move: 5 piece types at origin (all types, deduped by type)
+        assert_eq!(moves.len(), 5);
         for mv in &moves {
             assert!(mv.from.is_none()); // all placements
             assert_eq!(mv.to, Some((0, 0)));
-            assert_ne!(mv.piece.unwrap().piece_type(), PieceType::Queen);
             assert_eq!(mv.piece.unwrap().number(), 1); // always #1 first
         }
 
@@ -655,15 +654,25 @@ mod tests {
     }
 
     #[test]
+    fn test_first_move_tournament() {
+        let mut game = Game::new_tournament();
+        let moves = game.valid_moves();
+        // Tournament: 4 piece types at origin (queen excluded)
+        assert_eq!(moves.len(), 4);
+        for mv in &moves {
+            assert_ne!(mv.piece.unwrap().piece_type(), PieceType::Queen);
+        }
+    }
+
+    #[test]
     fn test_second_move() {
         let mut game = Game::new();
-        // White places spider (can't place queen on first turn)
         let ws1 = Piece::new(PieceColor::White, PieceType::Spider, 1);
         game.play_move(&Move::placement(ws1, (0, 0)));
 
-        // Black should have 4 piece types (no queen) * 6 positions = 24 moves
+        // Black: 5 piece types * 6 positions = 30 moves
         let moves = game.valid_moves();
-        assert_eq!(moves.len(), 4 * 6);
+        assert_eq!(moves.len(), 5 * 6);
     }
 
     #[test]
