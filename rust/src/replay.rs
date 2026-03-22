@@ -33,12 +33,12 @@ pub fn replay_game(content: &str) -> ReplayResult {
         if game.is_game_over() {
             break;
         }
-        if !game.parse_and_play_uhp(move_str) {
+        if let Err(msg) = hive_engine::uhp::play_uhp_unchecked(&mut game, move_str) {
             return ReplayResult {
                 turns_played: i,
                 total_turns,
                 final_state: game.state.as_str().to_string(),
-                error: Some(format!("move {} rejected: {:?}", i + 1, move_str)),
+                error: Some(format!("move {} rejected: {} ({:?})", i + 1, msg, move_str)),
                 game: Some(game),
             };
         }
@@ -93,10 +93,10 @@ pub fn replay_game_verbose(content: &str) -> ReplayResult {
             break;
         }
 
-        if !game.parse_and_play_uhp(move_str) {
-            println!("  ERROR: move rejected by engine");
+        if let Err(msg) = hive_engine::uhp::play_uhp_unchecked(&mut game, move_str) {
+            println!("  ERROR: {}", msg);
             let valid = game.valid_moves();
-            let valid_uhp: Vec<String> = valid.iter().map(|m| game.format_move_uhp(m)).collect();
+            let valid_uhp: Vec<String> = valid.iter().map(|m| hive_engine::uhp::format_move_uhp(&game, m)).collect();
             println!("  Valid moves ({}):", valid_uhp.len());
             for vm in valid_uhp.iter().take(20) {
                 println!("    {}", vm);
@@ -108,7 +108,7 @@ pub fn replay_game_verbose(content: &str) -> ReplayResult {
                 turns_played: i,
                 total_turns,
                 final_state: game.state.as_str().to_string(),
-                error: Some(format!("move {} rejected: {:?}", i + 1, move_str)),
+                error: Some(format!("move {} rejected: {} ({:?})", i + 1, msg, move_str)),
                 game: Some(game),
             };
         }

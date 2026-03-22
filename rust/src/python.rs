@@ -210,7 +210,7 @@ impl PyGame {
             None => game::Move::placement(piece, to_pos),
             Some(f) => game::Move::movement(piece, f, to_pos),
         };
-        self.game.format_move_uhp(&mv)
+        crate::uhp::format_move_uhp(&self.game, &mv)
     }
 
     /// Play a move given a UHP move string (e.g. "wQ", "wS1 wA1-", "pass").
@@ -218,7 +218,7 @@ impl PyGame {
     /// finds and plays the matching valid move.
     /// Returns True if the move was found and played, False if not valid.
     fn play_move_uhp(&mut self, move_str: &str) -> bool {
-        self.game.parse_and_play_uhp(move_str)
+        crate::uhp::parse_and_play_uhp(&mut self.game, move_str)
     }
 }
 
