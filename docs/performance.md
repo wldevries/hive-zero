@@ -33,6 +33,26 @@ Replay used to call `valid_moves()` for every move just to validate it. Now
 `play_uhp_unchecked()` skips validation entirely — parses the UHP string and applies the
 move directly. Board mutations return `Result` so invalid moves are caught without panicking.
 
+### Direct SGF → Game replay, eliminating UHP string round-trip (done)
+
+**Problem**: The SGF parser (`sgf::parse_moves`) built a `Vec<String>` of UHP move strings,
+then `play_uhp_unchecked` re-parsed those strings back into `Move` structs. This involved:
+- `HashMap<String, Vec<String>>` for Boardspace coord→piece tracking
+- `HashMap<String, String>` for piece→coord tracking
+- Hundreds of `format!()`, `to_lowercase()`, `to_uppercase()` allocations per game
+- UHP reference resolution (direction notation like "/wQ") that then got re-parsed
+
+**Fix**: `sgf::replay_into_game()` converts Boardspace grid coordinates directly to hex
+coordinates using a linear mapping (`q = col - origin_col`, `r = -(row - origin_row)`),
+derived from the direction conventions in the old `drop_down_ref` function. Piece names are
+parsed directly to `Piece` structs. No UHP strings, no HashMaps, no string allocations in
+the hot loop. The `Game` state itself tracks piece positions, so no separate coord bookkeeping
+is needed.
+
+**Impact**: 12x faster replay (100s → 8s for 238K games). Also fixed ~2,800 games (97.8% →
+99.7% success) that previously failed due to bugs in UHP reference string generation — the
+direct coord path has no reference resolution to get wrong.
+
 ### Linear `.contains()` checks instead of bitset (medium impact)
 
 - `articulation_points.contains(&pos)` — linear scan, called per piece
@@ -55,6 +75,7 @@ computed directly from the direction index.
 
 ## Benchmarks
 
-Full corpus replay (238K games, 138K base):
-- Rust binary: ~100s
+Full corpus replay (238K games, 146K base):
+- Rust binary (UHP string round-trip): ~100s
 - After board clone elimination: ~98s
+- After direct SGF→Game replay: ~8s

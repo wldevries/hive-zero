@@ -25,33 +25,28 @@ pub fn replay_game(content: &str) -> ReplayResult {
         };
     }
 
-    let moves = sgf::parse_moves(content);
-    let total_turns = moves.len();
     let mut game = Game::new();
-
-    for (i, move_str) in moves.iter().enumerate() {
-        if game.is_game_over() {
-            break;
-        }
-        if let Err(msg) = hive_engine::uhp::play_uhp_unchecked(&mut game, move_str) {
-            return ReplayResult {
-                turns_played: i,
-                total_turns,
-                final_state: game.state.as_str().to_string(),
-                error: Some(format!("move {} rejected: {} ({:?})", i + 1, msg, move_str)),
+    match sgf::replay_into_game(content, &mut game) {
+        Ok(moves_played) => {
+            let state = game.state.as_str().to_string();
+            ReplayResult {
+                turns_played: moves_played,
+                total_turns: moves_played,
+                final_state: state,
+                error: None,
                 game: Some(game),
-            };
+            }
         }
-    }
-
-    let state = game.state.as_str().to_string();
-    let mc = game.move_count as usize;
-    ReplayResult {
-        turns_played: mc,
-        total_turns,
-        final_state: state,
-        error: None,
-        game: Some(game),
+        Err(msg) => {
+            let mc = game.move_count as usize;
+            ReplayResult {
+                turns_played: mc,
+                total_turns: 0,
+                final_state: game.state.as_str().to_string(),
+                error: Some(msg),
+                game: Some(game),
+            }
+        }
     }
 }
 
@@ -77,23 +72,28 @@ pub fn replay_game_verbose(content: &str) -> ReplayResult {
         };
     }
 
-    let moves = sgf::parse_moves(content);
-    let total_turns = moves.len();
-    println!("Parsed {} moves", total_turns);
     println!();
 
     let mut game = Game::new();
 
-    for (i, move_str) in moves.iter().enumerate() {
+    match sgf::replay_into_game_verbose(content, &mut game, |game_before, mv| {
+        let i = game_before.move_count as usize;
         let color = if i % 2 == 0 { "White" } else { "Black" };
-        println!("Move {} ({}): {}", i + 1, color, move_str);
-
-        if game.is_game_over() {
-            println!("  Game already over: {}", game.state.as_str());
-            break;
+        let uhp = hive_engine::uhp::format_move_uhp(game_before, mv);
+        println!("Move {} ({}): {}", i + 1, color, uhp);
+    }) {
+        Ok(moves_played) => {
+            println!("  State: {}", game.state.as_str());
+            let state = game.state.as_str().to_string();
+            ReplayResult {
+                turns_played: moves_played,
+                total_turns: moves_played,
+                final_state: state,
+                error: None,
+                game: Some(game),
+            }
         }
-
-        if let Err(msg) = hive_engine::uhp::play_uhp_unchecked(&mut game, move_str) {
+        Err(msg) => {
             println!("  ERROR: {}", msg);
             let valid = game.valid_moves();
             let valid_uhp: Vec<String> = valid.iter().map(|m| hive_engine::uhp::format_move_uhp(&game, m)).collect();
@@ -104,24 +104,14 @@ pub fn replay_game_verbose(content: &str) -> ReplayResult {
             if valid_uhp.len() > 20 {
                 println!("    ... and {} more", valid_uhp.len() - 20);
             }
-            return ReplayResult {
-                turns_played: i,
-                total_turns,
+            let mc = game.move_count as usize;
+            ReplayResult {
+                turns_played: mc,
+                total_turns: 0,
                 final_state: game.state.as_str().to_string(),
-                error: Some(format!("move {} rejected: {} ({:?})", i + 1, msg, move_str)),
+                error: Some(msg),
                 game: Some(game),
-            };
+            }
         }
-        println!("  State: {}", game.state.as_str());
-    }
-
-    let state = game.state.as_str().to_string();
-    let mc = game.move_count as usize;
-    ReplayResult {
-        turns_played: mc,
-        total_turns,
-        final_state: state,
-        error: None,
-        game: Some(game),
     }
 }

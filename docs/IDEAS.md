@@ -45,11 +45,12 @@ move generation.
 - Board mutations (`place_piece`, `move_piece`, `remove_piece`) return `Result` instead of
   panicking, so OOB and stack mismatches are reported per-game.
 - Rust CLI (`hive-zero replay`) replays the full corpus with error reporting.
+- Direct SGF → Game replay (`sgf::replay_into_game`) converts Boardspace grid coords to hex
+  coords directly, bypassing UHP string generation/parsing entirely. 12x faster, 99.7% success.
 
 **Remaining:**
 
-- Categorise replay errors (OOB vs stack mismatch vs parse failure) and fix underlying
-  engine bugs revealed by the corpus.
+- Fix remaining 383 OOB failures (games that exceed 23x23 grid — see board recentering below).
 - Migrate `process_games.py` to use `RustGame` from `hive_engine` instead of Python `Game`.
 - Once no code outside `hive/core/` references Python game logic, delete `hive/core/rules.py`,
   `hive/core/game.py`, `hive/core/board.py`, `hive/core/pieces.py`, `hive/core/hex.py`.

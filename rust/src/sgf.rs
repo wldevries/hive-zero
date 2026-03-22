@@ -2,7 +2,9 @@
 ///
 /// Port of hive/sgf.py to Rust.
 
-use std::collections::HashMap;
+use hive_engine::game::{Game, Move};
+use hive_engine::hex::Hex;
+use hive_engine::piece::{Piece, PieceColor, PieceType};
 
 /// Check if content contains expansion pieces (M=Mosquito, L=Ladybug, P=Pillbug).
 fn has_expansion_pieces(content: &str) -> bool {
@@ -71,130 +73,108 @@ pub fn extract_player(content: &str, player_idx: u8) -> String {
     }
 }
 
-/// Add color prefix and normalize piece type letter to uppercase.
-fn ensure_color(piece: &str, color: char) -> String {
-    let bytes = piece.as_bytes();
-    if bytes.len() >= 2
+
+// ---------------------------------------------------------------------------
+// Direct SGF → Game replay (no UHP string intermediary)
+// ---------------------------------------------------------------------------
+
+/// Parse a piece name from SGF (with optional color prefix, case-insensitive type).
+fn parse_piece_sgf(s: &str, default_color: PieceColor) -> Option<Piece> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let (color, type_start) = if bytes.len() >= 2
         && (bytes[0] == b'w' || bytes[0] == b'b')
         && (bytes[1] as char).is_ascii_alphabetic()
     {
-        // Has color prefix — normalize type letter to uppercase
-        let mut result = String::with_capacity(piece.len());
-        result.push(bytes[0] as char);
-        result.push_str(&piece[1..].to_uppercase());
-        return result;
-    }
-    // No color prefix — add color and uppercase
-    let mut result = String::with_capacity(piece.len() + 1);
-    result.push(color);
-    result.push_str(&piece.to_uppercase());
-    result
-}
-
-/// UHP ref for a beetle dropping from a stack to an adjacent empty hex.
-fn drop_down_ref(old_coords: &str, new_coords: &str, piece: &str) -> String {
-    let (cx, cy) = parse_coords(old_coords);
-    let (dx, dy) = parse_coords(new_coords);
-
-    if cy == dy {
-        if cx > dx {
-            format!("-{}", piece)
-        } else {
-            format!("{}-", piece)
-        }
-    } else if cx == dx {
-        if cy > dy {
-            format!("{}\\", piece)
-        } else {
-            format!("\\{}", piece)
-        }
-    } else if cy > dy {
-        format!("/{}", piece)
+        let c = if bytes[0] == b'w' { PieceColor::White } else { PieceColor::Black };
+        (c, 1)
     } else {
-        format!("{}/", piece)
+        (default_color, 0)
+    };
+    if type_start >= bytes.len() {
+        return None;
+    }
+    let type_char = (bytes[type_start] as char).to_ascii_uppercase();
+    let piece_type = PieceType::from_char(type_char)?;
+    let number = if type_start + 1 < bytes.len() && bytes[type_start + 1].is_ascii_digit() {
+        bytes[type_start + 1] - b'0'
+    } else {
+        1
+    };
+    Some(Piece::new(color, piece_type, number))
+}
+
+/// Convert Boardspace column string to index (A=0, B=1, ...).
+#[inline]
+fn col_to_index(s: &str) -> i32 {
+    (s.as_bytes()[0].to_ascii_uppercase() - b'A') as i32
+}
+
+/// Convert Boardspace grid coords to hex, given the origin of the first move.
+#[inline]
+fn boardspace_to_hex(col: i32, row: i32, origin_col: i32, origin_row: i32) -> Hex {
+    let q = (col - origin_col) as i8;
+    let r = -(row - origin_row) as i8;
+    (q, r)
+}
+
+/// Case-insensitive prefix check without allocation.
+fn starts_with_ci(s: &str, prefix: &[u8]) -> bool {
+    let b = s.as_bytes();
+    b.len() >= prefix.len()
+        && b[..prefix.len()]
+            .iter()
+            .zip(prefix)
+            .all(|(a, p)| a.to_ascii_lowercase() == *p)
+}
+
+/// Build a Move from a piece and Boardspace destination coords, using the live game state.
+fn make_move(game: &Game, piece: Piece, col: i32, row: i32, origin: &mut Option<(i32, i32)>) -> Move {
+    let hex = if let Some((oc, or)) = *origin {
+        boardspace_to_hex(col, row, oc, or)
+    } else {
+        *origin = Some((col, row));
+        (0i8, 0i8)
+    };
+
+    if let Some(from) = game.board.piece_position(piece) {
+        Move::movement(piece, from, hex)
+    } else {
+        Move::placement(piece, hex)
     }
 }
 
-fn parse_coords(s: &str) -> (char, i32) {
-    let parts: Vec<&str> = s.split('-').collect();
-    let col = parts[0].chars().next().unwrap();
-    let row: i32 = parts[1].parse().unwrap();
-    (col, row)
+/// Replay SGF content directly into a Game, converting Boardspace coords to hex
+/// without building UHP strings. Returns Ok(moves_played) on success.
+pub fn replay_into_game(content: &str, game: &mut Game) -> Result<usize, String> {
+    replay_into_game_inner(content, game, &mut |_, _| {})
 }
 
-/// Resolve the reference string from Boardspace SGF to UHP notation.
-fn resolve_ref(
-    ref_raw: &str,
-    new_coords: &str,
-    piece: &str,
-    move_count: usize,
-    coord_stack: &HashMap<String, Vec<String>>,
-    piece_coords: &HashMap<String, String>,
-) -> String {
-    let r = ref_raw.replace("\\\\", "\\");
-
-    if r == "." {
-        if move_count == 0 {
-            return String::new(); // first placement
-        }
-        if let Some(stack) = coord_stack.get(new_coords) {
-            if !stack.is_empty() {
-                return stack.last().unwrap().clone(); // beetle stacking
-            }
-        }
-        if let Some(old_coords) = piece_coords.get(piece) {
-            return drop_down_ref(old_coords, new_coords, piece);
-        }
-        return String::new();
-    }
-
-    if r.len() > 1 && r.ends_with('.') {
-        return r[..r.len() - 1].to_string(); // "bQ." notation — strip dot
-    }
-
-    r
+/// Like `replay_into_game` but calls `on_move(game, &move)` before each move is played.
+pub fn replay_into_game_verbose(
+    content: &str,
+    game: &mut Game,
+    mut on_move: impl FnMut(&Game, &Move),
+) -> Result<usize, String> {
+    replay_into_game_inner(content, game, &mut on_move)
 }
 
-fn update_coords(
-    coord_stack: &mut HashMap<String, Vec<String>>,
-    piece_coords: &mut HashMap<String, String>,
-    piece: &str,
-    old_coords: Option<&str>,
-    new_coords: &str,
-) {
-    if let Some(old) = old_coords {
-        if let Some(stack) = coord_stack.get_mut(old) {
-            if let Some(pos) = stack.iter().position(|p| p == piece) {
-                stack.remove(pos);
-            }
-        }
-    }
-    coord_stack
-        .entry(new_coords.to_string())
-        .or_default()
-        .push(piece.to_string());
-    piece_coords.insert(piece.to_string(), new_coords.to_string());
-}
-
-/// Parse UHP moves from Boardspace SGF content.
-///
-/// Returns a Vec of UHP move strings.
-pub fn parse_moves(content: &str) -> Vec<String> {
-    let mut coord_stack: HashMap<String, Vec<String>> = HashMap::new();
-    let mut piece_coords: HashMap<String, String> = HashMap::new();
+fn replay_into_game_inner(
+    content: &str,
+    game: &mut Game,
+    on_move: &mut impl FnMut(&Game, &Move),
+) -> Result<usize, String> {
+    let mut origin: Option<(i32, i32)> = None;
     let mut move_count: usize = 0;
-    let mut pending_old_coords: Option<String> = None;
-    // Buffered move: (piece, uhp_ref, old_coords, new_coords)
-    let mut pending_move: Option<(String, String, Option<String>, String)> = None;
-    let mut moves = Vec::new();
+    // Pending move awaiting "done": (piece, dest_col, dest_row)
+    let mut pending: Option<(Piece, i32, i32)> = None;
 
-    // Match: ;  P0[<num> <action>] or ;  P1[<num> <action>]
-    // We'll parse manually since we don't have regex in no-std
-    let mut i = 0;
     let bytes = content.as_bytes();
+    let mut i = 0;
 
     while i < bytes.len() {
-        // Find next ; P0[ or ; P1[
         if bytes[i] != b';' {
             i += 1;
             continue;
@@ -206,216 +186,147 @@ pub fn parse_moves(content: &str) -> Vec<String> {
             i += 1;
         }
 
-        if i >= bytes.len() || bytes[i] != b'P' {
-            continue;
-        }
+        if i >= bytes.len() || bytes[i] != b'P' { continue; }
         i += 1;
 
-        if i >= bytes.len() || (bytes[i] != b'0' && bytes[i] != b'1') {
-            continue;
-        }
-        let player_idx = bytes[i];
-        let player_color = if player_idx == b'0' { 'w' } else { 'b' };
+        if i >= bytes.len() || (bytes[i] != b'0' && bytes[i] != b'1') { continue; }
+        let player_color = if bytes[i] == b'0' { PieceColor::White } else { PieceColor::Black };
         i += 1;
 
-        if i >= bytes.len() || bytes[i] != b'[' {
-            continue;
-        }
+        if i >= bytes.len() || bytes[i] != b'[' { continue; }
         i += 1;
 
-        // Skip the turn number
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
-        }
-        // Skip whitespace after number
-        while i < bytes.len() && bytes[i] == b' ' {
-            i += 1;
-        }
+        // Skip turn number
+        while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+        while i < bytes.len() && bytes[i] == b' ' { i += 1; }
 
-        // Read the action until ']'
+        // Read action until matching ']'
         let action_start = i;
-        // Find the closing ], handling possible TM[...] suffix
         let mut bracket_depth = 1;
         while i < bytes.len() && bracket_depth > 0 {
-            if bytes[i] == b'[' {
-                bracket_depth += 1;
-            } else if bytes[i] == b']' {
-                bracket_depth -= 1;
-            }
-            if bracket_depth > 0 {
-                i += 1;
-            }
+            if bytes[i] == b'[' { bracket_depth += 1; }
+            else if bytes[i] == b']' { bracket_depth -= 1; }
+            if bracket_depth > 0 { i += 1; }
         }
-        let action = &content[action_start..i];
-        let action = action.trim();
-        i += 1; // skip ]
+        let action = content[action_start..i].trim();
+        i += 1;
 
-        // Process the action
-        let low = action.to_lowercase();
-
-        if low.starts_with("done") || low.starts_with("start") {
-            if let Some((piece, uhp_ref, old_coords, new_coords)) = pending_move.take() {
-                if uhp_ref.is_empty() {
-                    moves.push(piece.clone());
-                } else {
-                    moves.push(format!("{} {}", piece, uhp_ref));
-                }
-                update_coords(
-                    &mut coord_stack,
-                    &mut piece_coords,
-                    &piece,
-                    old_coords.as_deref(),
-                    &new_coords,
-                );
+        // done / start → finalize pending move
+        if starts_with_ci(action, b"done") || starts_with_ci(action, b"start") {
+            if let Some((piece, dest_col, dest_row)) = pending.take() {
+                if game.is_game_over() { break; }
+                let mv = make_move(game, piece, dest_col, dest_row, &mut origin);
+                on_move(game, &mv);
+                game.play_move(&mv).map_err(|msg| {
+                    format!("move {} rejected: {} ({:?})", move_count + 1, msg, piece)
+                })?;
                 move_count += 1;
             }
-            pending_old_coords = None;
             continue;
         }
 
-        // Pick from reserve: "Pick W 4 wS1" or "pick b 1 A1"
-        if low.starts_with("pick ") && !low.starts_with("pickb") {
-            pending_old_coords = None;
+        // Pick from reserve — ignore
+        if starts_with_ci(action, b"pick ") && !starts_with_ci(action, b"pickb") {
             continue;
         }
 
-        // Pick from board: "Pickb N 13 wS1"
-        if low.starts_with("pickb ") || low.starts_with("pickb\t") {
-            let parts: Vec<&str> = action.split_whitespace().collect();
-            if parts.len() >= 4 {
-                let col = parts[1].to_uppercase();
-                let row = parts[2];
-                let picked_coords = format!("{}-{}", col, row);
-
-                if let Some(ref pm) = pending_move {
-                    if picked_coords == pm.3 {
-                        // Undo: picking up piece just dropped this turn
-                        pending_old_coords = pm.2.clone();
-                        pending_move = None;
-                    } else {
-                        pending_old_coords = Some(picked_coords);
+        // Pick from board — check for undo of pending move
+        if starts_with_ci(action, b"pickb ") || starts_with_ci(action, b"pickb\t") {
+            let mut parts = action.split_whitespace();
+            parts.next(); // skip "Pickb"
+            if let (Some(col_str), Some(row_str)) = (parts.next(), parts.next()) {
+                let pick_col = col_to_index(col_str);
+                let pick_row: i32 = row_str.parse().unwrap_or(0);
+                if let Some(ref pm) = pending {
+                    if pick_col == pm.1 && pick_row == pm.2 {
+                        pending = None; // undo: player picked up piece they just dropped
                     }
-                } else {
-                    pending_old_coords = Some(picked_coords);
                 }
             }
             continue;
         }
 
         // Drop: "Dropb wS1 N 13 ."
-        if low.starts_with("dropb ") || low.starts_with("dropb\t") {
-            let parts: Vec<&str> = action.split_whitespace().collect();
-            if parts.len() >= 5 {
-                let piece = ensure_color(parts[1], player_color);
-                let col = parts[2].to_uppercase();
-                let row = parts[3];
-                let ref_raw = parts[4..].join(" ");
-                let new_coords = format!("{}-{}", col, row);
-                let old_coords = pending_old_coords.take();
-
-                let uhp_ref = resolve_ref(
-                    ref_raw.trim(),
-                    &new_coords,
-                    &piece,
-                    move_count,
-                    &coord_stack,
-                    &piece_coords,
-                );
-                pending_move = Some((piece, uhp_ref, old_coords, new_coords));
-            }
-            continue;
-        }
-
-        // movedone: "movedone B bS1 M 12 /wS1" — must check before "move"
-        if low.starts_with("movedone ") {
-            let parts: Vec<&str> = action.split_whitespace().collect();
-            if parts.len() >= 6 {
-                let color = if parts[1].to_uppercase() == "W" {
-                    'w'
-                } else {
-                    'b'
-                };
-                let piece = ensure_color(parts[2], color);
-                let col = parts[3].to_uppercase();
-                let row = parts[4];
-                let ref_raw = parts[5..].join(" ");
-                let new_coords = format!("{}-{}", col, row);
-                let old_coords = piece_coords.get(&piece).cloned();
-
-                let uhp_ref = resolve_ref(
-                    ref_raw.trim(),
-                    &new_coords,
-                    &piece,
-                    move_count,
-                    &coord_stack,
-                    &piece_coords,
-                );
-                if uhp_ref.is_empty() {
-                    moves.push(piece.clone());
-                } else {
-                    moves.push(format!("{} {}", piece, uhp_ref));
+        if starts_with_ci(action, b"dropb ") || starts_with_ci(action, b"dropb\t") {
+            let mut parts = action.split_whitespace();
+            parts.next(); // skip "Dropb"
+            if let (Some(piece_str), Some(col_str), Some(row_str)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                if let Some(piece) = parse_piece_sgf(piece_str, player_color) {
+                    let dest_col = col_to_index(col_str);
+                    let dest_row: i32 = row_str.parse().unwrap_or(0);
+                    pending = Some((piece, dest_col, dest_row));
                 }
-                update_coords(
-                    &mut coord_stack,
-                    &mut piece_coords,
-                    &piece,
-                    old_coords.as_deref(),
-                    &new_coords,
-                );
-                move_count += 1;
             }
             continue;
         }
 
-        // Move: "Move B bS1 M 12 /wS1" or "move W B1 N 13 ."
-        if low.starts_with("move ") {
-            let parts: Vec<&str> = action.split_whitespace().collect();
-            if parts.len() >= 6 {
-                let color = if parts[1].to_uppercase() == "W" {
-                    'w'
+        // movedone (must check before "move")
+        if starts_with_ci(action, b"movedone ") {
+            let mut parts = action.split_whitespace();
+            parts.next(); // skip "movedone"
+            if let (Some(color_str), Some(piece_str), Some(col_str), Some(row_str)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            {
+                let color = if color_str.as_bytes()[0].to_ascii_uppercase() == b'W' {
+                    PieceColor::White
                 } else {
-                    'b'
+                    PieceColor::Black
                 };
-                let piece = ensure_color(parts[2], color);
-                let col = parts[3].to_uppercase();
-                let row = parts[4];
-                let ref_raw = parts[5..].join(" ");
-                let new_coords = format!("{}-{}", col, row);
-                let old_coords = piece_coords.get(&piece).cloned();
-
-                let uhp_ref = resolve_ref(
-                    ref_raw.trim(),
-                    &new_coords,
-                    &piece,
-                    move_count,
-                    &coord_stack,
-                    &piece_coords,
-                );
-                if uhp_ref.is_empty() {
-                    moves.push(piece.clone());
-                } else {
-                    moves.push(format!("{} {}", piece, uhp_ref));
+                if let Some(piece) = parse_piece_sgf(piece_str, color) {
+                    let dest_col = col_to_index(col_str);
+                    let dest_row: i32 = row_str.parse().unwrap_or(0);
+                    if game.is_game_over() { break; }
+                    let mv = make_move(game, piece, dest_col, dest_row, &mut origin);
+                    on_move(game, &mv);
+                    game.play_move(&mv).map_err(|msg| {
+                        format!("move {} rejected: {} ({:?})", move_count + 1, msg, piece)
+                    })?;
+                    move_count += 1;
                 }
-                update_coords(
-                    &mut coord_stack,
-                    &mut piece_coords,
-                    &piece,
-                    old_coords.as_deref(),
-                    &new_coords,
-                );
-                move_count += 1;
             }
             continue;
         }
 
-        if low == "pass" {
-            moves.push("pass".to_string());
+        // Move: "Move B bS1 M 12 /wS1"
+        if starts_with_ci(action, b"move ") {
+            let mut parts = action.split_whitespace();
+            parts.next(); // skip "Move"
+            if let (Some(color_str), Some(piece_str), Some(col_str), Some(row_str)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            {
+                let color = if color_str.as_bytes()[0].to_ascii_uppercase() == b'W' {
+                    PieceColor::White
+                } else {
+                    PieceColor::Black
+                };
+                if let Some(piece) = parse_piece_sgf(piece_str, color) {
+                    let dest_col = col_to_index(col_str);
+                    let dest_row: i32 = row_str.parse().unwrap_or(0);
+                    if game.is_game_over() { break; }
+                    let mv = make_move(game, piece, dest_col, dest_row, &mut origin);
+                    on_move(game, &mv);
+                    game.play_move(&mv).map_err(|msg| {
+                        format!("move {} rejected: {} ({:?})", move_count + 1, msg, piece)
+                    })?;
+                    move_count += 1;
+                }
+            }
+            continue;
+        }
+
+        if action.eq_ignore_ascii_case("pass") {
+            if game.is_game_over() { break; }
+            let mv = Move::pass();
+            on_move(game, &mv);
+            game.play_pass();
             move_count += 1;
             continue;
         }
     }
 
-    moves
+    Ok(move_count)
 }
 
 #[cfg(test)]
@@ -434,12 +345,4 @@ mod tests {
         assert_eq!(game_type("some wM1 content"), "expansion");
     }
 
-    #[test]
-    fn test_ensure_color() {
-        assert_eq!(ensure_color("wQ", 'w'), "wQ");
-        assert_eq!(ensure_color("bA1", 'b'), "bA1");
-        assert_eq!(ensure_color("A1", 'w'), "wA1");
-        assert_eq!(ensure_color("q", 'b'), "bQ");
-        assert_eq!(ensure_color("ba1", 'b'), "bA1");
-    }
 }
