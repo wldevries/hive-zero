@@ -329,6 +329,55 @@ fn replay_into_game_inner(
     Ok(move_count)
 }
 
+/// Determine game result from SGF metadata (RE field, Resign, AcceptDraw).
+/// Returns "p0_wins", "p1_wins", "draw", or "unknown".
+pub fn result_from_metadata(content: &str, p0: &str, p1: &str) -> &'static str {
+    // Newer format: explicit RE field containing winner's name
+    if let Some(re_val) = extract_field(content, "RE[") {
+        if re_val.contains(p0) {
+            return "p0_wins";
+        }
+        if re_val.contains(p1) {
+            return "p1_wins";
+        }
+        if re_val.to_lowercase().contains("draw") {
+            return "draw";
+        }
+    }
+
+    // Older format: resign action — the resigning player loses
+    let bytes = content.as_bytes();
+    for i in 0..bytes.len().saturating_sub(10) {
+        if bytes[i] == b'P' && (bytes[i + 1] == b'0' || bytes[i + 1] == b'1') && bytes[i + 2] == b'[' {
+            // Find the action text
+            let rest = &content[i + 2..];
+            if let Some(end) = rest.find(']') {
+                let inner = &rest[1..end];
+                let lower = inner.to_lowercase();
+                if lower.contains(" resign") {
+                    return if bytes[i + 1] == b'0' { "p1_wins" } else { "p0_wins" };
+                }
+                if lower.contains(" acceptdraw") {
+                    return "draw";
+                }
+            }
+        }
+    }
+
+    "unknown"
+}
+
+/// Check if the game was a timeout (one player ran out of time).
+pub fn is_timeout(content: &str) -> bool {
+    if let Some(re_val) = extract_field(content, "RE[") {
+        let lower = re_val.to_lowercase();
+        if lower.contains("time") || lower.contains("timeout") {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

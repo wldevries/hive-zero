@@ -345,15 +345,313 @@ fn print_dimension_stats(dims: &[BoardDims]) {
              mc_p(75.0), move_counts_u16[n - 1]);
 }
 
-fn run_debug(zip_path: &str, sgf_name: &str) {
-    let file = std::fs::File::open(zip_path).expect("failed to open zip");
+// ---------------------------------------------------------------------------
+// process: replay all games, compute ELO, write CSVs
+// ---------------------------------------------------------------------------
+
+const K: f64 = 32.0;
+const DEFAULT_ELO: f64 = 1500.0;
+
+fn expected_score(ra: f64, rb: f64) -> f64 {
+    1.0 / (1.0 + 10.0_f64.powf((rb - ra) / 400.0))
+}
+
+#[derive(Default)]
+struct PlayerStats {
+    games: u32,
+    wins: u32,
+    losses: u32,
+    draws: u32,
+}
+
+fn run_process(games_path: &str, skip_timeout: bool) {
+    let path = Path::new(games_path);
+    if !path.exists() {
+        eprintln!("Path not found: {games_path}");
+        return;
+    }
+
+    let mut elo: HashMap<String, f64> = HashMap::new();
+    let mut stats: HashMap<String, PlayerStats> = HashMap::new();
+    let mut outcomes: Vec<String> = Vec::new(); // CSV lines
+
+    let mut total: usize = 0;
+    let mut determined: usize = 0;
+    let mut errors: usize = 0;
+    let mut skipped_expansion: usize = 0;
+    let mut skipped_timeout: usize = 0;
+
+    let process_content = |content: &str,
+                           zip_name: &str,
+                           sgf_name: &str,
+                           total: &mut usize,
+                           determined: &mut usize,
+                           errors: &mut usize,
+                           skipped_expansion: &mut usize,
+                           skipped_timeout: &mut usize,
+                           elo: &mut HashMap<String, f64>,
+                           stats: &mut HashMap<String, PlayerStats>,
+                           outcomes: &mut Vec<String>,
+                           skip_timeout: bool| {
+        *total += 1;
+        if *total % 10000 == 0 {
+            eprint!("\r  {} games processed ({} determined, {} errors)...   ",
+                    total, determined, errors);
+        }
+
+        let gtype = sgf::game_type(content);
+        if gtype == "expansion" {
+            *skipped_expansion += 1;
+            return;
+        }
+
+        if skip_timeout && sgf::is_timeout(content) {
+            *skipped_timeout += 1;
+            return;
+        }
+
+        let p0 = sgf::extract_player(content, 0);
+        let p1 = sgf::extract_player(content, 1);
+
+        let mut game = Game::new();
+        let replay_result = sgf::replay_into_game(content, &mut game);
+        let move_count = game.move_count;
+
+        let result = match &replay_result {
+            Ok(_) => {
+                match game.state.as_str() {
+                    "WhiteWins" => { *determined += 1; "p0_wins" }
+                    "BlackWins" => { *determined += 1; "p1_wins" }
+                    "Draw" => { *determined += 1; "draw" }
+                    _ => {
+                        // InProgress — try metadata fallback
+                        let r = sgf::result_from_metadata(content, &p0, &p1);
+                        if r != "unknown" { *determined += 1; }
+                        r
+                    }
+                }
+            }
+            Err(_) => {
+                // Replay error — try metadata fallback
+                let r = sgf::result_from_metadata(content, &p0, &p1);
+                if r == "unknown" {
+                    *errors += 1;
+                } else {
+                    *determined += 1;
+                }
+                r
+            }
+        };
+
+        // CSV line
+        outcomes.push(format!("{},{},{},{},{},{},{}",
+            csv_escape(zip_name), csv_escape(sgf_name),
+            csv_escape(&p0), csv_escape(&p1),
+            gtype, move_count, result));
+
+        // Update stats
+        for p in [&p0, &p1] {
+            stats.entry(p.clone()).or_default().games += 1;
+        }
+
+        if result == "p0_wins" || result == "p1_wins" || result == "draw" {
+            match result {
+                "p0_wins" => {
+                    stats.entry(p0.clone()).or_default().wins += 1;
+                    stats.entry(p1.clone()).or_default().losses += 1;
+                }
+                "p1_wins" => {
+                    stats.entry(p1.clone()).or_default().wins += 1;
+                    stats.entry(p0.clone()).or_default().losses += 1;
+                }
+                _ => {
+                    stats.entry(p0.clone()).or_default().draws += 1;
+                    stats.entry(p1.clone()).or_default().draws += 1;
+                }
+            }
+            // Update ELO
+            let ra = *elo.get(&p0).unwrap_or(&DEFAULT_ELO);
+            let rb = *elo.get(&p1).unwrap_or(&DEFAULT_ELO);
+            let ea = expected_score(ra, rb);
+            let (sa, sb) = match result {
+                "p0_wins" => (1.0, 0.0),
+                "p1_wins" => (0.0, 1.0),
+                _ => (0.5, 0.5),
+            };
+            elo.insert(p0, ra + K * (sa - ea));
+            elo.insert(p1, rb + K * (sb - (1.0 - ea)));
+        }
+    };
+
+    println!("Processing games from {games_path}...");
+
+    // Process zip files
+    let mut zip_paths: Vec<_> = Vec::new();
+    collect_zips(path, &mut zip_paths);
+    zip_paths.sort();
+
+    for zip_path in &zip_paths {
+        let zip_name = zip_path.display().to_string();
+        let file = match std::fs::File::open(zip_path) {
+            Ok(f) => f,
+            Err(e) => { eprintln!("  failed to open {zip_name}: {e}"); continue; }
+        };
+        let mut archive = match zip::ZipArchive::new(file) {
+            Ok(a) => a,
+            Err(e) => { eprintln!("  failed to read zip {zip_name}: {e}"); continue; }
+        };
+
+        for i in 0..archive.len() {
+            let mut entry = match archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.name().ends_with(".sgf") { continue; }
+            let sgf_name = entry.name().to_string();
+
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut entry, &mut buf);
+            let content: String = buf.iter().map(|&b| b as char).collect();
+
+            process_content(&content, &zip_name, &sgf_name,
+                &mut total, &mut determined, &mut errors,
+                &mut skipped_expansion, &mut skipped_timeout,
+                &mut elo, &mut stats, &mut outcomes, skip_timeout);
+        }
+    }
+
+    // Process loose SGF files
+    let mut sgf_paths: Vec<_> = Vec::new();
+    collect_sgfs(path, &mut sgf_paths);
+    sgf_paths.sort();
+
+    for sgf_path in &sgf_paths {
+        let content = match std::fs::read(sgf_path) {
+            Ok(buf) => buf.iter().map(|&b| b as char).collect::<String>(),
+            Err(_) => continue,
+        };
+        let parent = sgf_path.parent().map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string()).unwrap_or_default();
+        let name = sgf_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        process_content(&content, &parent, &name,
+            &mut total, &mut determined, &mut errors,
+            &mut skipped_expansion, &mut skipped_timeout,
+            &mut elo, &mut stats, &mut outcomes, skip_timeout);
+    }
+
+    eprintln!();
+    println!();
+    println!("Done: {} games total, {} outcomes determined, {} parse errors, {} skipped expansion, {} skipped timeout, {} unknown",
+        total, determined, errors, skipped_expansion, skipped_timeout,
+        total - determined - errors - skipped_expansion - skipped_timeout);
+
+    // Write game_outcomes.csv
+    let outcomes_path = Path::new(games_path).join("game_outcomes.csv");
+    if let Ok(mut f) = std::fs::File::create(&outcomes_path) {
+        use std::io::Write;
+        writeln!(f, "zip_file,sgf_name,p0,p1,game_type,move_count,result").ok();
+        for line in &outcomes {
+            writeln!(f, "{}", line).ok();
+        }
+        println!("Wrote {}", outcomes_path.display());
+    }
+
+    // Write player_elo.csv (sorted by ELO descending)
+    let elo_path = Path::new(games_path).join("player_elo.csv");
+    if let Ok(mut f) = std::fs::File::create(&elo_path) {
+        use std::io::Write;
+        writeln!(f, "player,elo,games,wins,losses,draws").ok();
+        let mut ranked: Vec<_> = stats.iter().collect();
+        ranked.sort_by(|a, b| {
+            let ea = elo.get(a.0).unwrap_or(&DEFAULT_ELO);
+            let eb = elo.get(b.0).unwrap_or(&DEFAULT_ELO);
+            eb.partial_cmp(ea).unwrap()
+        });
+        for (player, s) in ranked {
+            let e = elo.get(player).unwrap_or(&DEFAULT_ELO);
+            writeln!(f, "{},{:.1},{},{},{},{}", csv_escape(player), e, s.games, s.wins, s.losses, s.draws).ok();
+        }
+        println!("Wrote {}", elo_path.display());
+    }
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn collect_zips(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    if dir.is_file() && dir.extension().is_some_and(|e| e == "zip") {
+        out.push(dir.to_path_buf());
+        return;
+    }
+    if !dir.is_dir() { return; }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                collect_zips(&p, out);
+            } else if p.extension().is_some_and(|e| e == "zip") {
+                out.push(p);
+            }
+        }
+    }
+}
+
+fn collect_sgfs(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    if !dir.is_dir() { return; }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                collect_sgfs(&p, out);
+            } else if p.extension().is_some_and(|e| e == "sgf") {
+                out.push(p);
+            }
+        }
+    }
+}
+
+fn read_iso8859(path: &Path) -> String {
+    let buf = std::fs::read(path).expect("failed to read file");
+    buf.iter().map(|&b| b as char).collect()
+}
+
+fn run_debug_content(contents: &str) {
+    println!("--- Raw SGF ---");
+    println!("{contents}");
+    println!();
+
+    let result = replay::replay_game_verbose(contents);
+    println!();
+    if let Some(ref err) = result.error {
+        println!("REPLAY ERROR at turn {}: {err}", result.turns_played);
+    } else {
+        println!("Replay OK ({} turns)", result.turns_played);
+    }
+}
+
+fn run_debug(args: &[String]) {
+    let path = Path::new(&args[0]);
+
+    // If it's an SGF file, debug it directly
+    if path.extension().is_some_and(|e| e == "sgf") {
+        let contents = read_iso8859(path);
+        run_debug_content(&contents);
+        return;
+    }
+
+    // Otherwise treat as zip + sgf name
+    let sgf_name = args.get(1).expect("need sgf name when debugging from zip");
+    let file = std::fs::File::open(path).expect("failed to open zip");
     let mut archive = zip::ZipArchive::new(file).expect("failed to read zip");
 
-    // Find the SGF file (partial match on name)
     let mut found = None;
     for i in 0..archive.len() {
         let entry = archive.by_index(i).unwrap();
-        if entry.name().contains(sgf_name) {
+        if entry.name().contains(sgf_name.as_str()) {
             found = Some(i);
             println!("Found: {}", entry.name());
             break;
@@ -374,20 +672,8 @@ fn run_debug(zip_path: &str, sgf_name: &str) {
     let mut entry = archive.by_index(idx).unwrap();
     let mut buf = Vec::new();
     std::io::Read::read_to_end(&mut entry, &mut buf).expect("failed to read SGF");
-    // Decode as iso-8859-1
     let contents: String = buf.iter().map(|&b| b as char).collect();
-
-    println!("--- Raw SGF ---");
-    println!("{contents}");
-    println!();
-
-    let result = replay::replay_game_verbose(&contents);
-    println!();
-    if let Some(ref err) = result.error {
-        println!("REPLAY ERROR at turn {}: {err}", result.turns_played);
-    } else {
-        println!("Replay OK ({} turns)", result.turns_played);
-    }
+    run_debug_content(&contents);
 }
 
 fn run_mcts(simulations: u32, batch_size: usize) {
@@ -496,9 +782,19 @@ fn main() {
             run_replay(path);
         }
         "debug" => {
-            let zip_path = args.get(2).expect("need zip path");
-            let sgf_name = args.get(3).expect("need sgf name");
-            run_debug(zip_path, sgf_name);
+            if args.len() < 3 {
+                eprintln!("Usage: hive-zero debug <sgf-file> OR hive-zero debug <zip> <sgf-name>");
+                std::process::exit(1);
+            }
+            run_debug(&args[2..]);
+        }
+        "process" => {
+            let path = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("games/boardspace");
+            let skip_timeout = args.iter().any(|a| a == "--skip-timeout-games");
+            run_process(path, skip_timeout);
         }
         "mcts" => {
             let sims: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(800);
@@ -506,11 +802,15 @@ fn main() {
             run_mcts(sims, batch);
         }
         _ => {
-            eprintln!("Usage: hive-zero <random [N]|replay [path]|debug <zip> <sgf>|mcts [sims] [batch]>");
-            eprintln!("  random [N]        - play N random games (default 100)");
-            eprintln!("  replay [path]     - replay boardspace games from zip dir/file");
-            eprintln!("  debug <z> <s>     - verbose replay of a single game from zip");
-            eprintln!("  mcts [sims] [batch] - MCTS benchmark with uniform policy (default 800 sims, batch 8)");
+            eprintln!("Usage: hive-zero <command> [args]");
+            eprintln!();
+            eprintln!("Commands:");
+            eprintln!("  random [N]           - play N random games (default 100)");
+            eprintln!("  replay [path]        - replay boardspace games, print stats");
+            eprintln!("  debug <file> [sgf]   - verbose replay of SGF file or SGF within zip");
+            eprintln!("  process [path]       - replay all games, compute ELO, write CSVs");
+            eprintln!("    --skip-timeout-games  skip timed-out games");
+            eprintln!("  mcts [sims] [batch]  - MCTS benchmark (default 800 sims, batch 8)");
             std::process::exit(1);
         }
     }
