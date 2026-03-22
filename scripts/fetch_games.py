@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """Download Hive game zips from boardspace.net into games/boardspace/."""
 
 import re
-import sys
 import urllib.request
 from pathlib import Path
 
 BASE_URL = "https://www.boardspace.net/hive/hivegames"
 DEST = Path(__file__).parent.parent / "games" / "boardspace"
 
-YEARS = range(2006, 2027)
+# Subdirectories to skip — not game archives
+SKIP_DIRS = {"rankings/", "test/", "tutorials/"}
 
 
 def fetch(url: str) -> str:
@@ -17,8 +18,14 @@ def fetch(url: str) -> str:
         return r.read().decode("utf-8", errors="ignore")
 
 
+def subdir_links(index_html: str) -> list[str]:
+    """Return all subdirectory hrefs (ending in /) from an index page."""
+    return re.findall(r'href="([^"/][^"]*/?)"', index_html)
+
+
 def zip_links(index_html: str) -> list[str]:
-    return re.findall(r'href="(games-[^"]+\.zip)"', index_html)
+    """Return all .zip hrefs from an index page."""
+    return re.findall(r'href="([^"]+\.zip)"', index_html)
 
 
 def download(url: str, dest: Path):
@@ -31,29 +38,35 @@ def download(url: str, dest: Path):
 def main():
     DEST.mkdir(parents=True, exist_ok=True)
 
+    # Discover all subdirectories from the top-level index
+    print(f"Fetching index: {BASE_URL}/")
+    top_html = fetch(f"{BASE_URL}/")
+    dirs = [d for d in subdir_links(top_html) if d.endswith("/") and d not in SKIP_DIRS]
+    print(f"Found {len(dirs)} subdirectories\n")
+
     total_new = 0
 
-    for year in YEARS:
-        url = f"{BASE_URL}/archive-{year}/"
+    for subdir in sorted(dirs):
+        url = f"{BASE_URL}/{subdir}"
         try:
             html = fetch(url)
         except Exception as e:
-            print(f"archive-{year}: skipped ({e})")
+            print(f"{subdir}: skipped ({e})")
             continue
 
         zips = zip_links(html)
         if not zips:
             continue
 
-        year_dir = DEST / f"archive-{year}"
-        year_dir.mkdir(exist_ok=True)
-        existing = {p.name for p in year_dir.glob("*.zip")}
+        local_dir = DEST / subdir.rstrip("/")
+        local_dir.mkdir(exist_ok=True)
+        existing = {p.name for p in local_dir.glob("*.zip")}
         new = [z for z in zips if z not in existing]
-        print(f"archive-{year}: {len(zips)} zips, {len(new)} new")
+        print(f"{subdir}: {len(zips)} zips, {len(new)} new")
 
         for name in new:
             try:
-                download(f"{url}{name}", year_dir / name)
+                download(f"{url}{name}", local_dir / name)
                 total_new += 1
             except Exception as e:
                 print(f"  ERROR {name}: {e}")

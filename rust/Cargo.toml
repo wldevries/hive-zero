@@ -5,7 +5,11 @@ edition = "2021"
 
 [lib]
 name = "hive_engine"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "hive-zero"
+path = "src/main.rs"
 
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
@@ -13,6 +17,7 @@ numpy = "0.22"
 rand = "0.8"
 rand_distr = "0.4"
 rayon = "1.10"
+zip = "2"
 
 [profile.release]
 opt-level = 3
