@@ -34,8 +34,8 @@ class HiveNet(nn.Module):
         - Input convolution
         - Residual tower (num_blocks blocks)
         - Policy head: conv -> flatten -> linear -> POLICY_SIZE
-        - Value head: conv -> flatten -> concat reserve -> FC -> tanh
-        - Queen danger heads: branch from value FC -> sigmoid (my_qd, opp_qd)
+        - Value head: conv(1x1) -> flatten -> concat reserve -> FC(256) -> tanh
+        - Queen danger head: conv(1x1) -> flatten -> concat reserve -> FC(64) -> sigmoid (my_qd, opp_qd)
     """
 
     def __init__(self, num_blocks: int = 10, channels: int = 128):
@@ -64,9 +64,11 @@ class HiveNet(nn.Module):
         self.value_fc1 = nn.Linear(value_input_size, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
-        # Auxiliary queen danger heads (branch from shared value features)
-        self.my_queen_danger_fc = nn.Linear(256, 1)
-        self.opp_queen_danger_fc = nn.Linear(256, 1)
+        # Auxiliary queen danger head (own pathway from trunk)
+        self.qd_conv = nn.Conv2d(channels, 1, 1, bias=False)
+        self.qd_bn = nn.BatchNorm2d(1)
+        self.qd_fc1 = nn.Linear(value_input_size, 64)
+        self.qd_fc2 = nn.Linear(64, 2)  # [my_queen_danger, opp_queen_danger]
 
     def forward(self, board_tensor: torch.Tensor, reserve_vector: torch.Tensor):
         """Forward pass.
@@ -96,12 +98,17 @@ class HiveNet(nn.Module):
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.view(v.size(0), -1)
         v = torch.cat([v, reserve_vector], dim=1)
-        v_shared = F.relu(self.value_fc1(v))
-        value = torch.tanh(self.value_fc2(v_shared))
+        v = F.relu(self.value_fc1(v))
+        value = torch.tanh(self.value_fc2(v))
 
-        # Auxiliary queen danger heads
-        my_qd = torch.sigmoid(self.my_queen_danger_fc(v_shared))
-        opp_qd = torch.sigmoid(self.opp_queen_danger_fc(v_shared))
+        # Queen danger head (own pathway from trunk)
+        qd = F.relu(self.qd_bn(self.qd_conv(x)))
+        qd = qd.view(qd.size(0), -1)
+        qd = torch.cat([qd, reserve_vector], dim=1)
+        qd = F.relu(self.qd_fc1(qd))
+        qd = torch.sigmoid(self.qd_fc2(qd))
+        my_qd = qd[:, 0:1]
+        opp_qd = qd[:, 1:2]
 
         return policy_logits, value, my_qd, opp_qd
 
