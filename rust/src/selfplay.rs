@@ -296,7 +296,7 @@ impl PySelfPlaySession {
                         let move_str = &seq[move_counts[gi] as usize];
                         let valid = games[gi].valid_moves();
                         if let Some(mv) = valid.iter().find(|m| crate::uhp::format_move_uhp(&games[gi], m) == *move_str) {
-                            games[gi].play_move(mv);
+                            games[gi].play_move(mv).unwrap();
                             move_counts[gi] += 1;
                             if games[gi].is_game_over() || move_counts[gi] >= cfg.max_moves {
                                 active[gi] = false;
@@ -315,7 +315,7 @@ impl PySelfPlaySession {
                         games[gi].play_pass();
                     } else {
                         let idx = rng.gen_range(0..valid.len());
-                        games[gi].play_move(&valid[idx]);
+                        games[gi].play_move(&valid[idx]).unwrap();
                     }
                     move_counts[gi] += 1;
                     if games[gi].is_game_over() || move_counts[gi] >= cfg.max_moves {
@@ -570,7 +570,7 @@ impl PySelfPlaySession {
                 if mv.piece.is_none() {
                     games[gi].play_pass();
                 } else {
-                    games[gi].play_move(mv);
+                    games[gi].play_move(mv).unwrap();
                 }
 
                 move_counts[gi] += 1;

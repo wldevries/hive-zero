@@ -25,7 +25,7 @@ pub fn get_moves(piece: Piece, board: &mut Board, articulation_points: &[Hex]) -
     }
 
     // Temporarily remove piece from board
-    board.remove_piece(piece);
+    board.remove_piece(piece).unwrap();
 
     let moves = match piece.piece_type() {
         PieceType::Queen => queen_moves(pos, board),
@@ -36,7 +36,7 @@ pub fn get_moves(piece: Piece, board: &mut Board, articulation_points: &[Hex]) -
     };
 
     // Restore piece
-    board.place_piece(piece, pos);
+    board.place_piece(piece, pos).unwrap();
 
     moves
 }

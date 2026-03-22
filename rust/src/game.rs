@@ -294,7 +294,7 @@ impl Game {
     }
 
     /// Execute a move.
-    pub fn play_move(&mut self, mv: &Move) {
+    pub fn play_move(&mut self, mv: &Move) -> Result<(), String> {
         // Save reserve state for undo
         let (wr, br) = self.reserves.raw();
         self.history_reserves.push((wr, br));
@@ -304,11 +304,11 @@ impl Game {
                 // Placement
                 let to = mv.to.unwrap();
                 self.reserves.remove(piece);
-                self.board.place_piece(piece, to);
+                self.board.place_piece(piece, to)?;
             } else {
                 // Movement
                 let to = mv.to.unwrap();
-                self.board.move_piece(piece, to);
+                self.board.move_piece(piece, to)?;
             }
         }
 
@@ -325,11 +325,12 @@ impl Game {
         self.turn_color = self.turn_color.opposite();
 
         self.check_game_end();
+        Ok(())
     }
 
     /// Execute a pass.
     pub fn play_pass(&mut self) {
-        self.play_move(&Move::pass());
+        self.play_move(&Move::pass()).unwrap();
     }
 
     /// Undo the last move.
@@ -345,11 +346,12 @@ impl Game {
         if let Some(piece) = mv.piece {
             if mv.from.is_none() {
                 // Undo placement
-                self.board.remove_piece(piece);
+                self.board.remove_piece(piece).expect("undo: piece must be on board");
             } else {
                 // Undo movement
                 let from = mv.from.unwrap();
-                self.board.move_piece(piece, from);
+                self.board.move_piece(piece, from)
+                    .expect("undo coordinates must be in bounds");
             }
         }
 
@@ -446,7 +448,7 @@ impl Game {
             } else {
                 let uhp = crate::uhp::format_move_uhp(&replay, mv);
                 parts.push(uhp);
-                replay.play_move(mv);
+                replay.play_move(mv).unwrap();
             }
         }
         parts.join(";")

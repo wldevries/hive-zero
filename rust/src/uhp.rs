@@ -141,7 +141,7 @@ pub fn parse_and_play_uhp(game: &mut Game, move_str: &str) -> bool {
 
     let valid = game.valid_moves();
     if valid.iter().any(|m| m.piece == mv.piece && m.to == mv.to) {
-        game.play_move(&mv);
+        game.play_move(&mv).unwrap();
         true
     } else {
         false
@@ -159,6 +159,6 @@ pub fn play_uhp_unchecked(game: &mut Game, move_str: &str) -> Result<(), String>
 
     let mv = parse_uhp_move(game, move_str)
         .ok_or_else(|| format!("cannot parse UHP move: {}", move_str))?;
-    game.play_move(&mv);
+    game.play_move(&mv)?;
     Ok(())
 }

@@ -58,3 +58,49 @@ move generation.
    and `hive/core/hex.py`. Keep only what has no Rust equivalent (e.g. `render.py`).
 4. With the above done, extend `process_games.py` to surface errors verbosely. A `--strict`
    flag that aborts on first rule error would help with debugging.
+
+## Board recentering and dynamic bounds
+
+### Problem
+
+The board is a fixed 23x23 grid centered at hex (0,0), allowing coordinates from -11 to +11
+in both axes. Some boardspace games (especially long ones) drift far enough in one direction
+that pieces exceed this range, causing an out-of-bounds error. The first piece is always
+placed at (0,0), so games that grow asymmetrically waste half the grid in the opposite
+direction.
+
+### Solution: recenter the hive
+
+Add a `Game::recenter()` operation that shifts all piece positions so the bounding box center
+of the hive sits at (0,0). This maximizes usable space in every direction. Key properties:
+
+- **Transparent to UHP**: moves reference pieces by name, not coordinates, so recentering
+  between moves doesn't affect parsing.
+- **Transparent to the model**: board encoding is already position-relative (channels encode
+  piece identity at grid cells), so the same board state centered differently produces
+  equivalent tensors up to translation — recentering just keeps the hive within bounds.
+- **When to recenter**: before any move whose destination would be out of bounds. Can also
+  recenter proactively when the bounding box drifts past a threshold (e.g. any piece within
+  2 cells of the grid edge).
+
+### Implementation sketch
+
+1. `Board::bounding_box() -> Option<(i8, i8, i8, i8)>` — min/max q/r of all placed pieces.
+2. `Board::shift(dq, dr)` — clear and rebuild the grid with all positions offset by (dq, dr).
+   Update `piece_positions` accordingly.
+3. `Game::recenter()` — compute bounding box center, call `shift(-center_q, -center_r)`,
+   update `from`/`to` in `move_history` by the same offset.
+4. In `play_uhp_unchecked`: if parsed destination is OOB, call `recenter()`, re-parse
+   (reference piece positions changed), retry. If still OOB, return error.
+
+### Future: variable board size
+
+The grid is currently a compile-time `[[StackSlot; 23]; 23]`. To support larger boards:
+
+- Change to `Vec<StackSlot>` with runtime `grid_size` field.
+- Board encoding and policy head dimensions are tied to `GRID_SIZE` — a larger replay board
+  would need separate encoding, or replay could use a bigger grid while training stays at 23.
+- For training: keep the model's input size fixed (23x23). Constrain `valid_moves()` to only
+  return moves within the trained grid after recentering. This prevents the model from ever
+  seeing positions it can't encode, while recentering ensures it can use the full grid.
+- For replay-only (no model): use a larger grid (e.g. 31x31) to avoid any OOB issues.

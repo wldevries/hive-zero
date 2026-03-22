@@ -407,7 +407,7 @@ fn run_random(n: u32) {
                 game.play_pass();
             } else {
                 let idx = rng.gen_range(0..moves.len());
-                game.play_move(&moves[idx]);
+                game.play_move(&moves[idx]).unwrap();
             }
             total_moves += 1;
         }

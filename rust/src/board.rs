@@ -164,34 +164,42 @@ impl Board {
     }
 
     /// Place a piece on the board (on top of any existing stack).
-    pub fn place_piece(&mut self, piece: Piece, pos: Hex) {
-        let (r, c) = hex_to_grid(pos).expect("hex out of grid bounds");
+    pub fn place_piece(&mut self, piece: Piece, pos: Hex) -> Result<(), String> {
+        let (r, c) = hex_to_grid(pos)
+            .ok_or_else(|| format!("hex ({}, {}) out of grid bounds", pos.0, pos.1))?;
         let was_empty = self.grid[r][c].is_empty();
         self.grid[r][c].push(piece);
         self.piece_positions[piece.linear_index()] = Some((r as u8, c as u8));
         if was_empty {
             self.occupied_count += 1;
         }
+        Ok(())
     }
 
     /// Remove the top piece at a piece's position. Returns the position.
-    pub fn remove_piece(&mut self, piece: Piece) -> Hex {
+    pub fn remove_piece(&mut self, piece: Piece) -> Result<Hex, String> {
         let idx = piece.linear_index();
-        let (r, c) = self.piece_positions[idx].expect("piece not on board");
+        let (r, c) = self.piece_positions[idx]
+            .ok_or_else(|| format!("{} not on board", piece.to_uhp_string()))?;
         let slot = &mut self.grid[r as usize][c as usize];
-        debug_assert_eq!(slot.top().unwrap(), piece, "piece not on top of stack");
+        let top = slot.top()
+            .ok_or_else(|| format!("{} position ({}, {}) has empty stack", piece.to_uhp_string(), r, c))?;
+        if top != piece {
+            return Err(format!("{} not on top of stack (top is {})",
+                piece.to_uhp_string(), top.to_uhp_string()));
+        }
         slot.pop();
         self.piece_positions[idx] = None;
         if slot.is_empty() {
             self.occupied_count -= 1;
         }
-        grid_to_hex(r as usize, c as usize)
+        Ok(grid_to_hex(r as usize, c as usize))
     }
 
     /// Move a piece from its current position to dest.
-    pub fn move_piece(&mut self, piece: Piece, dest: Hex) {
-        self.remove_piece(piece);
-        self.place_piece(piece, dest);
+    pub fn move_piece(&mut self, piece: Piece, dest: Hex) -> Result<(), String> {
+        self.remove_piece(piece)?;
+        self.place_piece(piece, dest)
     }
 
     /// Return occupied hex neighbors.
@@ -521,7 +529,7 @@ mod tests {
         assert_eq!(board.top_piece((0, 0)), Some(p));
         assert_eq!(board.piece_position(p), Some((0, 0)));
 
-        board.remove_piece(p);
+        board.remove_piece(p).unwrap();
         assert_eq!(board.occupied_count, 0);
         assert!(!board.is_occupied((0, 0)));
     }
@@ -539,7 +547,7 @@ mod tests {
         assert_eq!(board.top_piece((0, 0)), Some(b));
         assert_eq!(board.occupied_count, 1);
 
-        board.remove_piece(b);
+        board.remove_piece(b).unwrap();
         assert_eq!(board.top_piece((0, 0)), Some(q));
         assert_eq!(board.occupied_count, 1);
     }

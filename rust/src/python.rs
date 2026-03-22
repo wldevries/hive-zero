@@ -105,7 +105,7 @@ impl PyGame {
             None => game::Move::placement(piece, to_pos),
             Some(f) => game::Move::movement(piece, f, to_pos),
         };
-        self.game.play_move(&mv);
+        self.game.play_move(&mv).unwrap();
     }
 
     /// Play a pass.

@@ -185,7 +185,7 @@ fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, policy: &[f32]) {
         total_prior += prior;
 
         let mut child_game = game.clone();
-        child_game.play_move(&mv);
+        child_game.play_move(&mv).unwrap();
         let child_id = arena.alloc(child_game, Some(node_id), mv, prior);
 
         if first_child_id.is_none() {
