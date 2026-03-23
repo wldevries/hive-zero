@@ -106,36 +106,126 @@ improved the decisive game rate — the network recognizes positional patterns b
 struggles with multi-move attacking sequences. The bottleneck appears to be planning depth
 (policy + MCTS search), not position evaluation.
 
-## Supervised intermezzo during self-play
+## Supervised mix during self-play
 
 The network has good pattern recognition (aux losses converge quickly) but the policy head
-can't learn attacking sequences from self-play alone — 500 simulations is too shallow to
-discover 5-6 move queen-surrounding sequences in a 30+ branching factor game.
+can't learn attacking sequences from self-play alone — even 800 simulations is too shallow to
+discover 5-6 move queen-surrounding sequences in a 30+ branching factor game. With playout cap
+randomization (75% fast-cap at 20 sims), the policy head only learns from 25% of positions,
+and even those can't find multi-move attacks.
 
-### Idea
+### Evidence from training
 
-Periodically inject a few epochs of supervised training on boardspace games between self-play
-iterations. The network already understands the game; supervised data teaches the policy head
-"this is what winning move sequences look like" on top of existing trunk features.
+Auxiliary heads (queen danger, queen escape, piece mobility) were added at iteration 54. The
+aux losses converged within 2-3 iterations, confirming the trunk already encodes positional
+features. But the decisive game rate still collapsed: ~34% at iter 54-65, ~15% at iter 76-85,
+then <5% from iter 86 onward. The bottleneck is planning depth (policy + MCTS search), not
+position evaluation.
 
-### Key constraints
+### Why decisive games cluster early in training runs
 
-A full pretrain run (8 chunks × 3 epochs × 100k positions) would overwrite self-play learning.
-The intermezzo must be gentle:
+Across multiple runs, wins concentrate in iterations ~15-50, then taper off. The likely
+mechanism:
 
-- **Small batch**: 1-2 chunks (10-20k positions) instead of 800k
-- **1 epoch**: same as self-play, no repeated passes
-- **Low LR**: same or lower than self-play LR (≤ 0.0025)
-- **Mix with replay buffer**: interleave supervised positions with recent self-play data
-  to prevent catastrophic forgetting
-- **Decisive games only**: filter boardspace data for games that ended in wins, not draws
-- **Frequency**: every N self-play iterations (e.g. every 10)
+1. **Defense is a single-move skill**: "don't leave your queen exposed" is a local pattern
+   the network learns quickly. Attack requires 5-6 coordinated moves — much harder.
+2. **Early network is semi-random**: chaotic play accidentally exposes queens, creating
+   decisive outcomes. The network hasn't yet learned to defend, so queens get surrounded
+   by chance even without intentional attack.
+3. **Defense converges first**: once both sides learn to keep their queen safe, games
+   stalemate. The network reaches a local optimum of "don't lose" rather than "win."
+4. **Crowded boards lock down**: with more pieces on the board, mobility drops and positions
+   become rigid. The network may not know how to handle full-board positions where attack
+   requires dismantling defensive structures.
+
+The gradient signal for attack vanishes once defense is learned — no decisive games means
+no policy gradient toward winning moves. This is a classic RL exploration collapse.
+
+### Approach: interspersed supervised data (preferred over intermezzo)
+
+Rather than periodically injecting separate supervised training epochs ("intermezzo"), mix
+supervised positions directly into the replay buffer each iteration. This is better because:
+
+- **Smooth gradients**: every batch sees both self-play and human positions, no oscillation
+  between "imitate humans" and "self-play" modes
+- **No catastrophic forgetting**: both signal sources train together in shuffled batches
+- **Continuous signal**: policy head gets attacking patterns every iteration, not every Nth
+- **Simpler**: just add samples to the existing replay buffer
+
+Implementation: `--supervised-mix FRAC` (e.g. 0.2 = 20% of replay buffer is boardspace data).
+Each iteration, after adding self-play data, top up the buffer with randomly sampled decisive
+boardspace positions. Filter for wins only (no draws) — the whole point is teaching attacks.
+
+### Auxiliary targets for supervised samples
+
+Supervised positions from `game_to_samples()` don't have aux targets. Options:
+1. **Mask aux loss** for supervised samples (cleanest — avoids corrupting aux heads)
+2. Compute aux targets by running Rust engine per position (accurate but slow)
+3. Train on zeros (aux loss is small, probably doesn't matter)
+
+Prefer option 1 to keep aux heads clean.
+
+### Other options considered
+
+#### A. Separate intermezzo epochs (rejected)
+
+Run a dedicated supervised epoch every N iterations. Problems: abrupt gradient shifts,
+catastrophic forgetting risk in both directions, bursty signal (most iters get nothing).
+
+#### B. Increase MCTS simulations (insufficient)
+
+Tried 800 sims (up from 500). Still not enough — branching factor ~30 means ~4 moves deep,
+short of the 5-6 coordinated moves needed to surround a queen. Diminishing returns without
+better policy guidance.
+
+#### C. Policy prior bias toward queen-adjacent moves (risky)
+
+Add a handcrafted bonus to the NN policy prior for moves that land adjacent to the opponent
+queen. This would focus MCTS search on attacking moves without needing to discover them from
+scratch. **Risk: creates kamikaze behavior.** Moving a lone ant next to the queen is aggressive
+but pointless without supporting pieces nearby. The network would learn to rush pieces at the
+queen without building the positional foundation needed for a real surround. Could make play
+worse, not better.
+
+A softer version: only boost queen-adjacent moves when the aux head already predicts elevated
+queen danger (support pieces are in place). But this adds complexity and couples the prior to
+aux head quality.
+
+#### D. Reward shaping / intermediate rewards (risky)
+
+Instead of only getting +1/-1 at game end, provide small intermediate rewards for increasing
+queen danger or reducing opponent queen escape. Would need careful tuning to avoid the network
+optimizing for the shaping reward instead of winning. Could interact badly with the value head.
+Same kamikaze risk as option C — the network might learn to create queen pressure at the expense
+of overall position quality.
+
+#### E. Asymmetric search / progressive widening
+
+Use more simulations in positions where queen danger is high (attack is close to completion).
+Or use progressive widening to focus early MCTS visits on a smaller set of promising moves.
+Less explored, needs research.
+
+#### F. Temperature / exploration schedule
+
+Keep higher policy temperature (more random move selection) for longer during self-play to
+maintain exploration. Currently the network becomes deterministic quickly, locking in defensive
+play. Higher temperature in the first 30-40 moves could create more diverse positions where
+attacks are possible. Downside: noisier training data, slower convergence of good patterns.
+
+#### G. Opponent pool / historical snapshots
+
+Play against older checkpoints (that don't defend as well) alongside self-play. Decisive games
+against weaker opponents provide attack gradient signal. League training (AlphaStar-style) is
+the full version but even a simple "play 20% of games against a checkpoint from 50 iterations
+ago" could help. The weaker opponent leaves queen-attack opportunities that the current network
+can learn from.
 
 ### Expected benefit
 
 The policy head sees real examples of how human players close out wins — move sequences that
 create queen pressure, beetle climbs, grasshopper jumps to fill gaps. These patterns are
-exactly what self-play fails to discover on its own.
+exactly what self-play fails to discover on its own. With interspersed training, the network
+gets continuous pressure to maintain these patterns alongside self-play learning.
 
 ## Curriculum for opening book
 
