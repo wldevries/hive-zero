@@ -85,6 +85,7 @@ class SelfPlayTrainer:
             boardspace_frac: float = 1.0,
             opening_min_elo: float = 1600.0,
             skip_timeout_games: bool = False,
+            augment_symmetry: bool = False,
             comment: str = ""):
         """Run the full training loop.
 
@@ -132,6 +133,7 @@ class SelfPlayTrainer:
 
         # Replay buffer: keep last `replay_window` iterations of data (worst case: all games hit max_moves)
         replay_buffer = HiveDataset(max_size=replay_window * games_per_iter * max_moves)
+        replay_buffer.augment_symmetry = augment_symmetry
 
         # Opening book: load boardspace game sequences if configured
         opening_book: list[list[str]] = []

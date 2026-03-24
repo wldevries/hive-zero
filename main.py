@@ -87,6 +87,8 @@ def main():
                               help="Fraction of games using book openings; remainder use --random-opening-moves (default: 1.0)")
     train_parser.add_argument("--skip-timeout-games", action="store_true",
                               help="Exclude positions from games that hit the move limit (timeouts) from training")
+    train_parser.add_argument("--augment-symmetry", action="store_true",
+                              help="Apply random D6 hex symmetry augmentation during training (12x effective data)")
 
     # Supervised pre-training
     pretrain_parser = subparsers.add_parser(
@@ -238,6 +240,7 @@ def main():
             opening_boardspace_dir=args.opening_boardspace_dir,
             boardspace_frac=args.boardspace_frac,
             skip_timeout_games=args.skip_timeout_games,
+            augment_symmetry=args.augment_symmetry,
             comment=args.comment,
         )
     else:

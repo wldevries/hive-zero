@@ -1,6 +1,7 @@
 """Training loop for the Hive neural network."""
 
 from __future__ import annotations
+import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -11,6 +12,50 @@ from typing import Optional
 from .model import HiveNet, create_model, save_model
 from ..encoding.board_encoder import NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE
 from ..encoding.move_encoder import POLICY_SIZE
+
+# ---------------------------------------------------------------------------
+# Hex D6 symmetry: 6 rotations + 6 reflections in axial coordinates (q, r).
+# Precompute gather permutations for the 23x23 grid so augmentation in
+# __getitem__ is just a numpy fancy-index.
+# ---------------------------------------------------------------------------
+_GRID_CELLS = GRID_SIZE * GRID_SIZE
+_NUM_POLICY_CH = POLICY_SIZE // _GRID_CELLS  # 11
+
+_HEX_SYM_FNS = [
+    lambda q, r: (q, r),          # R0: identity
+    lambda q, r: (-r, q + r),     # R1: 60°
+    lambda q, r: (-q - r, q),     # R2: 120°
+    lambda q, r: (-q, -r),        # R3: 180°
+    lambda q, r: (r, -q - r),     # R4: 240°
+    lambda q, r: (q + r, -q),     # R5: 300°
+    lambda q, r: (-q, q + r),     # S0
+    lambda q, r: (r, q),          # S1
+    lambda q, r: (q + r, -r),     # S2
+    lambda q, r: (q, -q - r),     # S3
+    lambda q, r: (-r, -q),        # S4
+    lambda q, r: (-q - r, r),     # S5
+]
+
+def _precompute_sym_perms():
+    """Build gather permutation for each D6 symmetry.
+
+    perm[output_cell] = input_cell, or _GRID_CELLS (sentinel → zero).
+    """
+    center = GRID_SIZE // 2
+    perms = []
+    for fn in _HEX_SYM_FNS:
+        perm = np.full(_GRID_CELLS, _GRID_CELLS, dtype=np.int64)
+        for row in range(GRID_SIZE):
+            for col in range(GRID_SIZE):
+                q, r = col - center, row - center
+                q2, r2 = fn(q, r)
+                nr, nc = r2 + center, q2 + center
+                if 0 <= nr < GRID_SIZE and 0 <= nc < GRID_SIZE:
+                    perm[nr * GRID_SIZE + nc] = row * GRID_SIZE + col
+        perms.append(perm)
+    return perms
+
+_SYM_PERMS = _precompute_sym_perms()
 
 
 class HiveDataset(Dataset):
@@ -27,6 +72,7 @@ class HiveDataset(Dataset):
         self.max_size = max_size
         self._count = 0  # total samples added (for ring buffer index)
         self._size = 0   # current number of valid samples
+        self.augment_symmetry = False  # set True to apply random D6 augmentation
         # Pre-allocate contiguous arrays
         self.board_tensors = np.zeros((max_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
         self.reserve_vectors = np.zeros((max_size, RESERVE_SIZE), dtype=np.float32)
@@ -103,6 +149,25 @@ class HiveDataset(Dataset):
         return self._size
 
     def __getitem__(self, idx):
+        board = self.board_tensors[idx]
+        policy = self.policy_targets[idx]
+
+        if self.augment_symmetry:
+            sym = random.randint(0, 11)
+            if sym != 0:  # 0 = identity, skip
+                perm = _SYM_PERMS[sym]
+                # Board: (NUM_CHANNELS, 23, 23) → permute spatial cells
+                bf = board.reshape(NUM_CHANNELS, _GRID_CELLS)
+                padded = np.concatenate([bf, np.zeros((NUM_CHANNELS, 1), dtype=np.float32)], axis=1)
+                board = padded[:, perm].reshape(NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
+                # Policy: (11*23*23,) → (11, 529) → permute → flatten
+                pf = policy.reshape(_NUM_POLICY_CH, _GRID_CELLS)
+                padded_p = np.concatenate([pf, np.zeros((_NUM_POLICY_CH, 1), dtype=np.float32)], axis=1)
+                policy = padded_p[:, perm].reshape(-1)
+        else:
+            board = board.copy()
+            policy = policy.copy()
+
         # Auxiliary targets as a single tensor [qd, qd, qe, qe, mob, mob]
         aux_targets = np.array([
             self.my_queen_danger[idx], self.opp_queen_danger[idx],
@@ -110,9 +175,9 @@ class HiveDataset(Dataset):
             self.my_mobility[idx], self.opp_mobility[idx],
         ], dtype=np.float32)
         return (
-            torch.from_numpy(self.board_tensors[idx].copy()),
+            torch.from_numpy(board),
             torch.from_numpy(self.reserve_vectors[idx].copy()),
-            torch.from_numpy(self.policy_targets[idx].copy()),
+            torch.from_numpy(policy),
             torch.tensor(self.value_targets[idx], dtype=torch.float32),
             torch.tensor(self.weights[idx], dtype=torch.float32),
             torch.tensor(self.value_only[idx], dtype=torch.bool),
