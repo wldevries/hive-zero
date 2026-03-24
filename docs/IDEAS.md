@@ -304,3 +304,36 @@ The grid is currently a compile-time `[[StackSlot; 23]; 23]`. To support larger 
   return moves within the trained grid after recentering. This prevents the model from ever
   seeing positions it can't encode, while recentering ensures it can use the full grid.
 - For replay-only (no model): use a larger grid (e.g. 31x31) to avoid any OOB issues.
+
+## Symmetry augmentation (12x data)
+
+Standard CNNs (including ResNets) are translation equivariant but NOT rotation/reflection
+equivariant. The network must learn each rotated version of a spatial pattern independently.
+On a hex board with D6 symmetry (6 rotations × 2 reflections = 12 symmetries), this wastes
+significant channel capacity — up to 12x redundancy for rotation-dependent features.
+
+### Approach: augment each position with all 12 symmetries
+
+For every position generated during selfplay, add all 12 rotated/reflected versions to the
+replay buffer with the same value target and appropriately transformed policy/board tensors.
+One real position → 12 training samples.
+
+- **Board tensor**: rotate/reflect the 23×23 hex grid. Axial coordinates transform under D6
+  as rotations of 60° multiples and reflections across hex axes.
+- **Policy target**: the policy is 11 channels × 23 × 23 (per-cell logits). Apply the same
+  hex rotation to the destination cell coordinates. Piece channel stays the same (piece
+  identity doesn't change under rotation).
+- **Value target**: unchanged (game outcome is rotation-invariant).
+- **Auxiliary targets**: unchanged (queen danger, escape, mobility are all scalar).
+
+This is the standard AlphaZero approach for games with board symmetries. It's the cheapest
+way to get rotation awareness: 12x training signal from the same selfplay data, no model
+changes, no extra inference cost.
+
+### Long-term: group equivariant convolutions
+
+The principled solution is to constrain conv filters to respect hex D6 symmetry (e.g. using
+escnn library). Each filter automatically works in all 12 orientations, effectively giving
+96 channels the representational power of 1152 orientation-aware channels. More complex to
+implement but eliminates the redundancy at the architecture level rather than patching it
+with data augmentation.
