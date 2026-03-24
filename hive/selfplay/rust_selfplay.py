@@ -58,8 +58,9 @@ class RustParallelSelfPlay:
                 n = board_4d.shape[0]
                 return (np.ones((n, POLICY_SIZE), dtype=np.float32) / POLICY_SIZE,
                         np.zeros(n, dtype=np.float32))
-            bt = torch.from_numpy(board_4d).pin_memory().to(device, dtype=torch.bfloat16, non_blocking=True)
-            rv = torch.from_numpy(reserves).pin_memory().to(device, dtype=torch.bfloat16, non_blocking=True)
+            # Data arrives as uint16 (raw bf16 bits) from Rust — reinterpret as bfloat16
+            bt = torch.from_numpy(board_4d).view(torch.bfloat16).pin_memory().to(device, non_blocking=True)
+            rv = torch.from_numpy(reserves).view(torch.bfloat16).pin_memory().to(device, non_blocking=True)
             with torch.no_grad():
                 policy_logits, values, _ = model(bt, rv)
             policy = torch.softmax(policy_logits.float(), dim=1).cpu().numpy()

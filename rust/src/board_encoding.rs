@@ -38,6 +38,68 @@ fn piece_idx(piece: crate::piece::Piece) -> usize {
     piece.linear_index() % PIECES_PER_PLAYER
 }
 
+/// Convert f32 to bfloat16, stored as u16 (truncation, matches PyTorch convention).
+#[inline]
+pub fn f32_to_bf16(x: f32) -> u16 {
+    (x.to_bits() >> 16) as u16
+}
+
+/// Encode a game state into board tensor and reserve vector as bfloat16.
+/// Board tensor shape: (NUM_CHANNELS, GRID_SIZE, GRID_SIZE) = (39, 23, 23)
+/// Reserve vector shape: (RESERVE_SIZE,) = (10,)
+pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [u16]) {
+    debug_assert!(board_out.len() == NUM_CHANNELS * GRID_SIZE * GRID_SIZE);
+    debug_assert!(reserve_out.len() == RESERVE_SIZE);
+
+    let bf16_zero = f32_to_bf16(0.0);
+    let bf16_one = f32_to_bf16(1.0);
+    board_out.fill(bf16_zero);
+    reserve_out.fill(bf16_zero);
+
+    let is_white_turn = game.turn_color == PieceColor::White;
+    let is_mine = |color: PieceColor| (color == PieceColor::White) == is_white_turn;
+
+    for (pos, stack) in game.board.iter_occupied() {
+        let (row, col) = match hex_to_grid(pos) {
+            Some(rc) => rc,
+            None => continue,
+        };
+        let cell = row * GRID_SIZE + col;
+
+        board_out[STACK_HEIGHT_CH * GRID_SIZE * GRID_SIZE + cell] =
+            f32_to_bf16(stack.height() as f32 / 7.0);
+
+        for (depth, piece) in stack.iter().enumerate() {
+            let mine = is_mine(piece.color());
+            let idx = piece_idx(piece);
+
+            if depth == 0 {
+                let ch = if mine { idx } else { 11 + idx };
+                board_out[ch * GRID_SIZE * GRID_SIZE + cell] = bf16_one;
+            } else {
+                let player_offset = if mine { 0 } else { 8 };
+                let beetle_offset = (piece.number() as usize - 1) * 4;
+                let depth_offset = (depth - 1).min(3);
+                let ch = STACKED_BEETLE_BASE + player_offset + beetle_offset + depth_offset;
+                board_out[ch * GRID_SIZE * GRID_SIZE + cell] = bf16_one;
+            }
+        }
+    }
+
+    let (cur_color, opp_color) = if is_white_turn {
+        (PieceColor::White, PieceColor::Black)
+    } else {
+        (PieceColor::Black, PieceColor::White)
+    };
+    for (i, &pt) in ALL_PIECE_TYPES.iter().enumerate() {
+        let max_count = PIECE_COUNTS[i] as f32;
+        if max_count > 0.0 {
+            reserve_out[i] = f32_to_bf16(game.reserve_count(cur_color, pt) as f32 / max_count);
+            reserve_out[5 + i] = f32_to_bf16(game.reserve_count(opp_color, pt) as f32 / max_count);
+        }
+    }
+}
+
 /// Encode a game state into board tensor and reserve vector.
 /// Board tensor shape: (NUM_CHANNELS, GRID_SIZE, GRID_SIZE) = (39, 23, 23)
 /// Reserve vector shape: (RESERVE_SIZE,) = (10,)

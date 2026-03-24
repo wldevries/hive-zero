@@ -457,46 +457,40 @@ impl PySelfPlaySession {
                 vec![true; n]
             };
 
-            // --- Encode positions (rayon parallel) ---
-            let board_offsets: Vec<usize> = mcts_games.iter().map(|_| {
-                // Will be set after parallel encoding
-                0usize
-            }).collect();
-
-            // Encode all boards in parallel
-            let encoded: Vec<(Vec<f32>, Vec<f32>)> = mcts_games.par_iter().map(|&gi| {
-                let mut board = vec![0.0f32; BOARD_SIZE];
-                let mut reserve = vec![0.0f32; RESERVE_SIZE];
-                board_encoding::encode_board(&games[gi], &mut board, &mut reserve);
-                (board, reserve)
-            }).collect();
-
-            // Store in contiguous buffers and record offsets
+            // --- Encode positions (sequential — per-board work is too small for rayon) ---
             let mut turn_board_offsets: Vec<usize> = Vec::with_capacity(n);
             let mut turn_reserve_offsets: Vec<usize> = Vec::with_capacity(n);
-            for (board, reserve) in &encoded {
-                turn_board_offsets.push(board_buf.len());
-                turn_reserve_offsets.push(reserve_buf.len());
-                board_buf.extend_from_slice(board);
-                reserve_buf.extend_from_slice(reserve);
+            let mut flat_boards_bf16 = vec![0u16; n * BOARD_SIZE];
+            let mut flat_reserves_bf16 = vec![0u16; n * RESERVE_SIZE];
+            for (i, &gi) in mcts_games.iter().enumerate() {
+                // Encode f32 into training buffer
+                let board_off = board_buf.len();
+                let reserve_off = reserve_buf.len();
+                board_buf.resize(board_off + BOARD_SIZE, 0.0);
+                reserve_buf.resize(reserve_off + RESERVE_SIZE, 0.0);
+                board_encoding::encode_board(
+                    &games[gi],
+                    &mut board_buf[board_off..board_off + BOARD_SIZE],
+                    &mut reserve_buf[reserve_off..reserve_off + RESERVE_SIZE],
+                );
+                turn_board_offsets.push(board_off);
+                turn_reserve_offsets.push(reserve_off);
+                // Encode bf16 for GPU eval
+                board_encoding::encode_board_bf16(
+                    &games[gi],
+                    &mut flat_boards_bf16[i * BOARD_SIZE..(i + 1) * BOARD_SIZE],
+                    &mut flat_reserves_bf16[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
+                );
             }
 
-            // --- Build flat arrays for GPU eval ---
-            let mut flat_boards = vec![0.0f32; n * BOARD_SIZE];
-            let mut flat_reserves = vec![0.0f32; n * RESERVE_SIZE];
-            for (i, (board, reserve)) in encoded.iter().enumerate() {
-                flat_boards[i * BOARD_SIZE..(i + 1) * BOARD_SIZE].copy_from_slice(board);
-                flat_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE].copy_from_slice(reserve);
-            }
-
-            // --- GPU: initial policy eval ---
+            // --- GPU: initial policy eval (bf16) ---
             let board_arr = numpy::ndarray::Array2::from_shape_vec(
-                (n, BOARD_SIZE), flat_boards,
+                (n, BOARD_SIZE), flat_boards_bf16,
             ).unwrap();
             let board_np = PyArray2::from_owned_array_bound(py, board_arr);
             let board_4d = board_np.reshape([n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
             let reserve_arr = numpy::ndarray::Array2::from_shape_vec(
-                (n, RESERVE_SIZE), flat_reserves,
+                (n, RESERVE_SIZE), flat_reserves_bf16,
             ).unwrap();
             let reserve_np = PyArray2::from_owned_array_bound(py, reserve_arr);
 
@@ -851,7 +845,6 @@ fn run_simulations_internal(
     rounds_per_flush: usize,    // GPU call every N rounds; 1 = flush every round
     eval_fn: &Bound<'_, PyAny>,
 ) {
-    let board_size = BOARD_SIZE;
     let mut sims_done: Vec<usize> = vec![0; searching.len()];
     let mut still_searching: Vec<usize> = (0..searching.len()).collect();
     let mut round: usize = 0;
@@ -859,48 +852,28 @@ fn run_simulations_internal(
     // pending_gi[i] is the game index (into `searches`) for the i-th pending leaf.
     let mut pending_gi: Vec<usize> = Vec::new();
     let mut pending_leaves: Vec<(u32, Game)> = Vec::new();
-    let mut pending_boards: Vec<f32> = Vec::new();
-    let mut pending_reserves: Vec<f32> = Vec::new();
+    let mut pending_boards: Vec<u16> = Vec::new();
+    let mut pending_reserves: Vec<u16> = Vec::new();
+
+    // Reusable encoding buffer to avoid per-leaf allocation
+    let mut enc_board = vec![0u16; BOARD_SIZE];
+    let mut enc_reserve = vec![0u16; RESERVE_SIZE];
 
     while !still_searching.is_empty() || !pending_leaves.is_empty() {
-        // --- CPU (rayon): each active game selects 1 leaf and encodes it ---
+        // --- CPU: each active game selects 1 leaf and encodes it (sequential) ---
         if !still_searching.is_empty() {
-            let active_gis: Vec<usize> = still_searching.iter()
-                .map(|&si| mcts_games[searching[si]])
-                .collect();
-
-            let search_ptrs: Vec<SendPtr> = active_gis.iter()
-                .map(|&gi| SendPtr(&mut searches[gi] as *mut MctsSearch))
-                .collect();
-
-            let results: Vec<(Vec<(u32, Game)>, Vec<f32>, Vec<f32>)> = search_ptrs.par_iter()
-                .map(|sp| {
-                    let search = unsafe { &mut *sp.0 };
-                    let leaves = search.select_leaves(1);
-                    let n = leaves.len();
-                    let mut boards = vec![0.0f32; n * board_size];
-                    let mut reserves = vec![0.0f32; n * RESERVE_SIZE];
-                    for (j, (_, game)) in leaves.iter().enumerate() {
-                        board_encoding::encode_board(
-                            game,
-                            &mut boards[j * board_size..(j + 1) * board_size],
-                            &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
-                        );
-                    }
-                    (leaves, boards, reserves)
-                })
-                .collect();
-
-            for (idx, &si) in still_searching.iter().enumerate() {
-                let gi = active_gis[idx];
-                let (ref leaves, ref boards, ref reserves) = results[idx];
+            for &si in &still_searching {
+                let gi = mcts_games[searching[si]];
+                let search = &mut searches[gi];
+                let leaves = search.select_leaves(1);
                 sims_done[si] += leaves.len().max(1);
-                for &(leaf_id, _) in leaves {
+                for (_, game) in &leaves {
+                    board_encoding::encode_board_bf16(game, &mut enc_board, &mut enc_reserve);
                     pending_gi.push(gi);
+                    pending_boards.extend_from_slice(&enc_board);
+                    pending_reserves.extend_from_slice(&enc_reserve);
                 }
-                pending_leaves.extend(leaves.iter().cloned());
-                pending_boards.extend_from_slice(boards);
-                pending_reserves.extend_from_slice(reserves);
+                pending_leaves.extend(leaves);
             }
 
             still_searching.retain(|&si| sims_done[si] < per_game_caps[si]);
@@ -914,12 +887,12 @@ fn run_simulations_internal(
         if should_flush {
             let total = pending_leaves.len();
 
-            // --- GPU: single inference call ---
+            // --- GPU: single inference call (bf16) ---
             let boards_data = std::mem::take(&mut pending_boards);
             let reserves_data = std::mem::take(&mut pending_reserves);
 
             let board_arr = numpy::ndarray::Array2::from_shape_vec(
-                (total, board_size), boards_data,
+                (total, BOARD_SIZE), boards_data,
             ).unwrap();
             let board_np = PyArray2::from_owned_array_bound(py, board_arr);
             let board_4d = board_np.reshape([total, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
