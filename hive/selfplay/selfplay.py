@@ -194,7 +194,10 @@ class SelfPlayTrainer:
                 skip_timeout_games=skip_timeout_games,
             )
 
+            self.model.eval()
+            self.model.bfloat16()
             result = sp.play_games(games_per_iter, opening_sequences=opening_sequences)
+            self.model.float()
             play_time = time.time() - iter_start
             _print_vram("post-play")
 

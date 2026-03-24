@@ -153,6 +153,7 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
+        device_type = self.device.type
         for board, reserve, policy_target, value_target, weight, vo_mask, po_mask, aux_target in loader:
             board = board.to(self.device)
             reserve = reserve.to(self.device)
@@ -163,7 +164,8 @@ class Trainer:
             po_mask = po_mask.to(self.device)
             aux_target = aux_target.to(self.device)  # (batch, 6)
 
-            policy_logits, value, aux = self.model(board, reserve)
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                policy_logits, value, aux = self.model(board, reserve)
 
             # Policy loss: weighted cross-entropy, masked for value-only samples
             log_probs = torch.log_softmax(policy_logits, dim=1)
