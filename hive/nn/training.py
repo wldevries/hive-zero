@@ -8,6 +8,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from typing import Optional
+from tqdm import tqdm
 
 from .model import HiveNet, create_model, save_model
 from ..encoding.board_encoder import NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE
@@ -219,7 +220,7 @@ class Trainer:
         num_batches = 0
 
         device_type = self.device.type
-        for board, reserve, policy_target, value_target, weight, vo_mask, po_mask, aux_target in loader:
+        for board, reserve, policy_target, value_target, weight, vo_mask, po_mask, aux_target in tqdm(loader, desc="  Training", leave=False, unit="batch"):
             board = board.to(self.device)
             reserve = reserve.to(self.device)
             policy_target = policy_target.to(self.device)

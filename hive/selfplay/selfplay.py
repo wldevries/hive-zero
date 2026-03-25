@@ -149,7 +149,10 @@ class SelfPlayTrainer:
             cap_label = f" [sims={simulations}]"
 
         import itertools
+        interrupted = False
         for i in (range(num_iterations) if num_iterations is not None else itertools.count()):
+            if interrupted:
+                break
             iteration = self.start_iteration + i + 1
 
             if time_limit_minutes is not None:
@@ -198,7 +201,14 @@ class SelfPlayTrainer:
 
             self.model.eval()
             self.model.bfloat16()
-            result = sp.play_games(games_per_iter, opening_sequences=opening_sequences)
+            try:
+                result = sp.play_games(games_per_iter, opening_sequences=opening_sequences)
+            except BaseException as e:
+                if not isinstance(e, KeyboardInterrupt) and "KeyboardInterrupt" not in str(e):
+                    raise
+                print("\n  Ctrl-C received, exiting cleanly.")
+                self.model.float()
+                break
             self.model.float()
             play_time = time.time() - iter_start
             _print_vram("post-play")
@@ -231,6 +241,22 @@ class SelfPlayTrainer:
             resignations = result.resignations
             resign_suffix = f" (resigned={resignations})" if resignations else ""
             print(f"  Results: W={_cg(wins_w)} B={_cg(wins_b)} D/unfinished={_cy(draws)}{resign_suffix}")
+
+            # Game length stats
+            finished_games_all = result.final_games()
+            game_lengths = sorted([g.move_count for g in finished_games_all])
+            decisive_lengths = sorted([g.move_count for g in finished_games_all
+                                       if (g.state if isinstance(g.state, str) else g.state.value) in ("WhiteWins", "BlackWins")])
+            if game_lengths:
+                median = game_lengths[len(game_lengths) // 2]
+                avg = sum(game_lengths) / len(game_lengths)
+                print(f"  Game length: avg={avg:.0f} med={median} min={game_lengths[0]} max={game_lengths[-1]}", end="")
+                if decisive_lengths:
+                    d_med = decisive_lengths[len(decisive_lengths) // 2]
+                    d_avg = sum(decisive_lengths) / len(decisive_lengths)
+                    print(f"  decisive: avg={d_avg:.0f} med={d_med}")
+                else:
+                    print()
             if result.use_playout_cap:
                 print(f"  Playout cap: {result.full_search_turns}/{result.total_turns} full-search turns "
                       f"({100*result.full_search_turns/max(result.total_turns,1):.0f}%)")
@@ -243,10 +269,9 @@ class SelfPlayTrainer:
                   f"buffer: {len(replay_buffer)}")
 
             # Show boards of decisive games
-            finished_games = result.final_games()
             decisive_games = []
             from ..core.render import render_board
-            for g in finished_games:
+            for g in finished_games_all:
                 state = g.state if isinstance(g.state, str) else g.state.value
                 if state in ("WhiteWins", "BlackWins") and len(decisive_games) < 3:
                     decisive_games.append(g)
@@ -264,29 +289,38 @@ class SelfPlayTrainer:
 
             # Train on replay buffer
             train_start = time.time()
-            for epoch in range(epochs_per_iter):
-                losses = self.trainer.train_epoch(replay_buffer, batch_size=batch_size)
-                lr = self.trainer._current_lr
-                total_s = f"{losses['total_loss']:.4f}"
-                policy_s = f"{losses['policy_loss']:.4f}"
-                value_s = f"{losses['value_loss']:.4f}"
-                qd_s = f"{losses.get('qd_loss', 0):.4f}"
-                qe_s = f"{losses.get('qe_loss', 0):.4f}"
-                mob_s = f"{losses.get('mob_loss', 0):.4f}"
-                print(f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
-                      f"(policy={_cy(policy_s)}, value={_cy(value_s)}, "
-                      f"qd={_cy(qd_s)}, qe={_cy(qe_s)}, mob={_cy(mob_s)}, lr={lr})")
+            try:
+                for epoch in range(epochs_per_iter):
+                    losses = self.trainer.train_epoch(replay_buffer, batch_size=batch_size)
+                    lr = self.trainer._current_lr
+                    total_s = f"{losses['total_loss']:.4f}"
+                    policy_s = f"{losses['policy_loss']:.4f}"
+                    value_s = f"{losses['value_loss']:.4f}"
+                    qd_s = f"{losses.get('qd_loss', 0):.4f}"
+                    qe_s = f"{losses.get('qe_loss', 0):.4f}"
+                    mob_s = f"{losses.get('mob_loss', 0):.4f}"
+                    print(f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
+                          f"(policy={_cy(policy_s)}, value={_cy(value_s)}, "
+                          f"qd={_cy(qd_s)}, qe={_cy(qe_s)}, mob={_cy(mob_s)}, lr={lr})")
+            except KeyboardInterrupt:
+                print("\n  Ctrl-C during training, saving model...")
+                interrupted = True
             train_time = time.time() - train_start
             _print_vram("post-train")
 
             # Log to CSV
+            avg_gl = sum(game_lengths) / len(game_lengths) if game_lengths else 0
+            med_gl = game_lengths[len(game_lengths) // 2] if game_lengths else 0
+            avg_dl = sum(decisive_lengths) / len(decisive_lengths) if decisive_lengths else 0
+            med_dl = decisive_lengths[len(decisive_lengths) // 2] if decisive_lengths else 0
             self._log.write(f"{iteration},MCTS,{simulations},"
                             f"{wins_w},{wins_b},{draws},{resignations},{total_positions},"
                             f"{len(replay_buffer)},{losses['total_loss']:.6f},"
                             f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
                             f"{losses.get('qd_loss', 0):.6f},"
                             f"{lr:.8f},{play_time + train_time:.1f},{csv_comment(self._comment)},"
-                            f"{losses.get('qe_loss', 0):.6f},{losses.get('mob_loss', 0):.6f}\n")
+                            f"{losses.get('qe_loss', 0):.6f},{losses.get('mob_loss', 0):.6f},"
+                            f"{avg_gl:.1f},{med_gl},{avg_dl:.1f},{med_dl}\n")
             self._comment = ""
             self._log.flush()
 

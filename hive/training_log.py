@@ -1,6 +1,7 @@
 LOG_HEADER = (
     "iter,mode,simulations,wins_w,wins_b,draws,resignations,positions,buffer,"
-    "loss,policy_loss,value_loss,qd_loss,lr,duration_s,comment,qe_loss,mob_loss\n"
+    "loss,policy_loss,value_loss,qd_loss,lr,duration_s,comment,qe_loss,mob_loss,"
+    "avg_game_len,med_game_len,avg_decisive_len,med_decisive_len\n"
 )
 
 
