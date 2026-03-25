@@ -1,8 +1,8 @@
 mod replay;
 
-use hive_engine::sgf;
-use hive_engine::game::Game;
-use hive_engine::piece::{PieceColor, player_pieces, PIECES_PER_PLAYER};
+use hive_game::sgf;
+use hive_game::game::Game;
+use hive_game::piece::{PieceColor, player_pieces, PIECES_PER_PLAYER};
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -74,7 +74,7 @@ fn board_dims(game: &Game) -> BoardDims {
     let mut diameter: i8 = 0;
     for i in 0..positions.len() {
         for j in i + 1..positions.len() {
-            let d = hive_engine::hex::hex_distance(positions[i], positions[j]);
+            let d = hive_game::hex::hex_distance(positions[i], positions[j]);
             diameter = diameter.max(d);
         }
     }
@@ -677,13 +677,14 @@ fn run_debug(args: &[String]) {
 }
 
 fn run_mcts(simulations: u32, batch_size: usize) {
-    use hive_engine::mcts::search::MctsSearch;
-    use hive_engine::move_encoding::POLICY_SIZE;
-    use hive_engine::uhp::format_move_uhp;
+    use core_game::mcts::search::MctsSearch;
+    use core_game::game::GameEngine;
+    use hive_game::move_encoding::POLICY_SIZE;
+    use hive_game::uhp::format_move_uhp;
 
     let mut game = Game::new();
     let uniform_policy = vec![1.0 / POLICY_SIZE as f32; POLICY_SIZE];
-    let mut search = MctsSearch::new(100_000);
+    let mut search = MctsSearch::<Game>::new(100_000);
     search.init(&game, &uniform_policy);
 
     let rounds = simulations / batch_size as u32;

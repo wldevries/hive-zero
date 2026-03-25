@@ -7,13 +7,14 @@ use pyo3::types::PyTuple;
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use rayon::prelude::*;
 
-use crate::board::GRID_SIZE;
-use crate::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE};
-use crate::game::{Game, GameState};
-use crate::hex::hex_neighbors;
-use crate::mcts::search::MctsSearch;
-use crate::move_encoding::{self, POLICY_SIZE, encode_game_move};
-use crate::piece::{Piece, PieceColor, PieceType};
+use hive_game::board::GRID_SIZE;
+use hive_game::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE};
+use hive_game::game::{Game, GameState};
+use hive_game::hex::hex_neighbors;
+use core_game::mcts::search::MctsSearch;
+use hive_game::move_encoding::{self, POLICY_SIZE, encode_game_move};
+use hive_game::piece::{Piece, PieceColor, PieceType};
+use core_game::game::GameEngine;
 
 use rand::Rng;
 use rand::distributions::WeightedIndex;
@@ -23,7 +24,7 @@ const BOARD_SIZE: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 const DECISIVE_WEIGHT: f32 = 10.0;
 
 /// Wrapper to send raw pointers across threads (safe when indices are unique).
-struct SendPtr(*mut MctsSearch);
+struct SendPtr(*mut MctsSearch<Game>);
 unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
 
@@ -111,7 +112,7 @@ fn piece_mobility(game: &mut Game, color: PieceColor) -> f32 {
     let aps = game.board.articulation_points();
     let mut mobile = 0u32;
     for &piece in &on_board {
-        let moves = crate::rules::get_moves(piece, &mut game.board, &aps);
+        let moves = hive_game::rules::get_moves(piece, &mut game.board, &aps);
         if !moves.is_empty() {
             mobile += 1;
         }
@@ -333,8 +334,8 @@ impl PySelfPlaySession {
 
         // --- Initialize state ---
         let mut games: Vec<Game> = (0..num_games).map(|_| Game::new()).collect();
-        let mut searches: Vec<MctsSearch> = (0..num_games).map(|_| {
-            let mut s = MctsSearch::new(100_000);
+        let mut searches: Vec<MctsSearch<Game>> = (0..num_games).map(|_| {
+            let mut s = MctsSearch::<Game>::new(100_000);
             s.c_puct = cfg.c_puct;
             s.use_forced_playouts = true;
             s
@@ -409,9 +410,9 @@ impl PySelfPlaySession {
                     // Boardspace opening: replay next move from sequence
                     if !opening_done[gi] && (move_counts[gi] as usize) < seq.len() {
                         let move_str = &seq[move_counts[gi] as usize];
-                        let transformed = crate::uhp::transform_uhp_move(move_str, opening_syms[gi]);
+                        let transformed = hive_game::uhp::transform_uhp_move(move_str, opening_syms[gi]);
                         let valid = games[gi].valid_moves();
-                        if let Some(mv) = valid.iter().find(|m| crate::uhp::format_move_uhp(&games[gi], m) == transformed) {
+                        if let Some(mv) = valid.iter().find(|m| hive_game::uhp::format_move_uhp(&games[gi], m) == transformed) {
                             games[gi].play_move(mv).unwrap();
                             move_counts[gi] += 1;
                             if games[gi].is_game_over() || move_counts[gi] >= cfg.max_moves {
@@ -513,7 +514,7 @@ impl PySelfPlaySession {
             {
                 let c_puct = cfg.c_puct;
                 let search_ptrs: Vec<SendPtr> = mcts_games.iter()
-                    .map(|&gi| SendPtr(&mut searches[gi] as *mut MctsSearch))
+                    .map(|&gi| SendPtr(&mut searches[gi] as *mut MctsSearch<Game>))
                     .collect();
 
                 search_ptrs.par_iter().enumerate().for_each(|(i, sp)| {
@@ -845,7 +846,7 @@ impl PySelfPlaySession {
 /// games complete — unlike a fixed leaf-count threshold.
 fn run_simulations_internal(
     py: Python<'_>,
-    searches: &mut Vec<MctsSearch>,
+    searches: &mut Vec<MctsSearch<Game>>,
     mcts_games: &[usize],       // game indices
     searching: &[usize],        // indices into mcts_games that have moves
     per_game_caps: &[usize],    // cap for each entry in `searching`
@@ -931,7 +932,7 @@ fn run_simulations_internal(
             // --- CPU (rayon): expand + backprop per game ---
             let unique_gis: Vec<usize> = gi_groups.keys().copied().collect();
             let expand_ptrs: Vec<SendPtr> = unique_gis.iter()
-                .map(|&gi| SendPtr(&mut searches[gi] as *mut MctsSearch))
+                .map(|&gi| SendPtr(&mut searches[gi] as *mut MctsSearch<Game>))
                 .collect();
 
             expand_ptrs.par_iter().zip(unique_gis.par_iter()).for_each(|(sp, &gi)| {

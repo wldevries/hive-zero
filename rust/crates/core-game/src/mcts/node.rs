@@ -3,12 +3,11 @@
 /// moves from the root game during selection. This reduces per-node memory
 /// from ~4KB+ to ~60 bytes.
 
-use crate::game::Move;
-use crate::piece::PieceColor;
+use crate::game::Player;
 use super::arena::NodeId;
 
 #[derive(Clone)]
-pub struct MctsNode {
+pub struct MctsNode<M: Copy> {
     pub parent: Option<NodeId>,
     pub first_child: Option<NodeId>,
     pub next_sibling: Option<NodeId>,
@@ -16,13 +15,13 @@ pub struct MctsNode {
     pub value_sum: f32,
     pub prior: f32,
     pub is_expanded: bool,
-    pub move_from_parent: Move,
-    pub turn_color: PieceColor,
+    pub move_from_parent: M,
+    pub turn_player: Player,
     pub child_count: u16,
 }
 
-impl MctsNode {
-    pub fn new(parent: Option<NodeId>, mv: Move, prior: f32, turn_color: PieceColor) -> Self {
+impl<M: Copy> MctsNode<M> {
+    pub fn new(parent: Option<NodeId>, mv: M, prior: f32, turn_player: Player) -> Self {
         MctsNode {
             parent,
             first_child: None,
@@ -32,7 +31,7 @@ impl MctsNode {
             prior,
             is_expanded: false,
             move_from_parent: mv,
-            turn_color,
+            turn_player,
             child_count: 0,
         }
     }
@@ -44,11 +43,5 @@ impl MctsNode {
         } else {
             self.value_sum / self.visit_count as f32
         }
-    }
-}
-
-impl Default for MctsNode {
-    fn default() -> Self {
-        MctsNode::new(None, Move::pass(), 0.0, PieceColor::White)
     }
 }

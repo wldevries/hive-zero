@@ -5,6 +5,8 @@ use crate::board::Board;
 use crate::piece::{Piece, PieceColor, PieceType, PIECE_COUNTS, ALL_PIECE_TYPES, player_pieces};
 use crate::rules::{get_moves, get_placements};
 
+use core_game::game::{GameEngine, Player, Outcome};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameState {
     NotStarted,
@@ -461,6 +463,72 @@ impl Game {
             PieceColor::Black => "Black",
         };
         format!("{}[{}]", color_name, self.turn_number)
+    }
+}
+
+// --- GameEngine trait implementation ---
+
+impl Game {
+    /// Convert PieceColor to generic Player.
+    pub fn color_to_player(color: PieceColor) -> Player {
+        match color {
+            PieceColor::White => Player::Player1,
+            PieceColor::Black => Player::Player2,
+        }
+    }
+
+    /// Convert generic Player to PieceColor.
+    pub fn player_to_color(player: Player) -> PieceColor {
+        match player {
+            Player::Player1 => PieceColor::White,
+            Player::Player2 => PieceColor::Black,
+        }
+    }
+}
+
+impl GameEngine for Game {
+    type Move = Move;
+
+    const BOARD_CHANNELS: usize = crate::board_encoding::NUM_CHANNELS;
+    const GRID_SIZE: usize = crate::board::GRID_SIZE;
+    const RESERVE_SIZE: usize = crate::board_encoding::RESERVE_SIZE;
+    const POLICY_SIZE: usize = crate::move_encoding::POLICY_SIZE;
+
+    fn current_player(&self) -> Player {
+        Game::color_to_player(self.turn_color)
+    }
+
+    fn outcome(&self) -> Outcome {
+        match self.state {
+            GameState::WhiteWins => Outcome::WonBy(Player::Player1),
+            GameState::BlackWins => Outcome::WonBy(Player::Player2),
+            GameState::Draw => Outcome::Draw,
+            _ => Outcome::Ongoing,
+        }
+    }
+
+    fn valid_moves(&mut self) -> Vec<Move> {
+        Game::valid_moves(self)
+    }
+
+    fn play_move(&mut self, mv: &Move) -> Result<(), String> {
+        Game::play_move(self, mv)
+    }
+
+    fn encode_board(&self, board_out: &mut [f32], reserve_out: &mut [f32]) {
+        crate::board_encoding::encode_board(self, board_out, reserve_out);
+    }
+
+    fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(usize, Move)>) {
+        crate::move_encoding::get_legal_move_mask(self)
+    }
+
+    fn pass_move() -> Move {
+        Move::pass()
+    }
+
+    fn is_pass(mv: &Move) -> bool {
+        mv.is_pass()
     }
 }
 

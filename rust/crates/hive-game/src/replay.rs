@@ -1,7 +1,7 @@
 /// Replay Boardspace Hive games through the Rust engine.
 
-use hive_engine::game::Game;
-use hive_engine::sgf;
+use hive_game::game::Game;
+use hive_game::sgf;
 
 pub struct ReplayResult {
     pub turns_played: usize,
@@ -79,7 +79,7 @@ pub fn replay_game_verbose(content: &str) -> ReplayResult {
     match sgf::replay_into_game_verbose(content, &mut game, |game_before, mv| {
         let i = game_before.move_count as usize;
         let color = if i % 2 == 0 { "White" } else { "Black" };
-        let uhp = hive_engine::uhp::format_move_uhp(game_before, mv);
+        let uhp = hive_game::uhp::format_move_uhp(game_before, mv);
         println!("Move {} ({}): {}", i + 1, color, uhp);
     }) {
         Ok(moves_played) => {
@@ -96,7 +96,7 @@ pub fn replay_game_verbose(content: &str) -> ReplayResult {
         Err(msg) => {
             println!("  ERROR: {}", msg);
             let valid = game.valid_moves();
-            let valid_uhp: Vec<String> = valid.iter().map(|m| hive_engine::uhp::format_move_uhp(&game, m)).collect();
+            let valid_uhp: Vec<String> = valid.iter().map(|m| hive_game::uhp::format_move_uhp(&game, m)).collect();
             println!("  Valid moves ({}):", valid_uhp.len());
             for vm in valid_uhp.iter().take(20) {
                 println!("    {}", vm);

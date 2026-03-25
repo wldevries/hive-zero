@@ -1,0 +1,17 @@
+[package]
+name = "engine-zero"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "hive_engine"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+core-game = { path = "../core-game" }
+hive-game = { path = "../hive-game" }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+numpy = "0.22"
+rand = { workspace = true }
+rand_distr = { workspace = true }
+rayon = "1.10"

@@ -4,13 +4,14 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 
-use crate::board::GRID_SIZE;
-use crate::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
-use crate::game::{self, Game};
-use crate::mcts::arena::NodeId;
-use crate::mcts::search::MctsSearch;
-use crate::move_encoding::{self, POLICY_SIZE};
-use crate::piece::{Piece, PieceColor, PieceType};
+use hive_game::board::GRID_SIZE;
+use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
+use hive_game::game::{self, Game};
+use core_game::mcts::arena::NodeId;
+use core_game::mcts::search::MctsSearch;
+use hive_game::move_encoding::{self, POLICY_SIZE};
+use hive_game::piece::{Piece, PieceColor, PieceType};
+use core_game::game::GameEngine;
 
 /// Create a 1D numpy array from a slice.
 fn make_array1<'py>(py: Python<'py>, data: &[f32]) -> Bound<'py, PyArray1<f32>> {
@@ -124,7 +125,7 @@ impl PyGame {
     fn encode_board<'py>(&self, py: Python<'py>) -> (Bound<'py, PyArray3<f32>>, Bound<'py, PyArray1<f32>>) {
         let mut board_data = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
         let mut reserve_data = vec![0.0f32; RESERVE_SIZE];
-        crate::board_encoding::encode_board(&self.game, &mut board_data, &mut reserve_data);
+        hive_game::board_encoding::encode_board(&self.game, &mut board_data, &mut reserve_data);
 
         let board_tensor = make_array3(py, &board_data, NUM_CHANNELS, GRID_SIZE, GRID_SIZE);
         let reserve_vec = make_array1(py, &reserve_data);
@@ -211,7 +212,7 @@ impl PyGame {
             None => game::Move::placement(piece, to_pos),
             Some(f) => game::Move::movement(piece, f, to_pos),
         };
-        crate::uhp::format_move_uhp(&self.game, &mv)
+        hive_game::uhp::format_move_uhp(&self.game, &mv)
     }
 
     /// Play a move given a UHP move string (e.g. "wQ", "wS1 wA1-", "pass").
@@ -219,14 +220,14 @@ impl PyGame {
     /// finds and plays the matching valid move.
     /// Returns True if the move was found and played, False if not valid.
     fn play_move_uhp(&mut self, move_str: &str) -> bool {
-        crate::uhp::parse_and_play_uhp(&mut self.game, move_str)
+        hive_game::uhp::parse_and_play_uhp(&mut self.game, move_str)
     }
 }
 
 /// Rust MCTS search exposed to Python.
 #[pyclass(name = "RustMCTS")]
 pub struct PyMCTS {
-    search: MctsSearch,
+    search: MctsSearch<Game>,
     c_puct: f32,
     batch_size: usize,
 }
@@ -237,7 +238,7 @@ impl PyMCTS {
     #[pyo3(signature = (c_puct=1.5, batch_size=8, capacity=100000))]
     fn new(c_puct: f32, batch_size: usize, capacity: usize) -> Self {
         PyMCTS {
-            search: MctsSearch::new(capacity),
+            search: MctsSearch::<Game>::new(capacity),
             c_puct,
             batch_size,
         }
@@ -382,7 +383,7 @@ impl PyMCTS {
         let mut all_reserves = vec![0.0f32; n * RESERVE_SIZE];
 
         for (i, (_, game)) in self.search.stashed_leaves.iter().enumerate() {
-            crate::board_encoding::encode_board(
+            hive_game::board_encoding::encode_board(
                 game,
                 &mut all_boards[i * board_size..(i + 1) * board_size],
                 &mut all_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
@@ -432,7 +433,7 @@ impl PyMCTS {
     fn eval_single(&self, py: Python<'_>, game: &game::Game, eval_fn: &Bound<'_, PyAny>) -> Vec<f32> {
         let mut board_data = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
         let mut reserve_data = vec![0.0f32; RESERVE_SIZE];
-        crate::board_encoding::encode_board(game, &mut board_data, &mut reserve_data);
+        hive_game::board_encoding::encode_board(game, &mut board_data, &mut reserve_data);
 
         let board_arr = make_array2(py, &board_data, 1, NUM_CHANNELS * GRID_SIZE * GRID_SIZE);
         let board_4d = board_arr.reshape([1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
@@ -457,7 +458,7 @@ impl PyMCTS {
         let mut all_reserves = vec![0.0f32; n * RESERVE_SIZE];
 
         for (i, (_, game)) in leaves.iter().enumerate() {
-            crate::board_encoding::encode_board(
+            hive_game::board_encoding::encode_board(
                 game,
                 &mut all_boards[i * board_size..(i + 1) * board_size],
                 &mut all_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
@@ -486,7 +487,7 @@ impl PyMCTS {
 /// Batch MCTS: owns multiple search trees and parallelizes CPU work with rayon.
 #[pyclass(name = "RustBatchMCTS")]
 pub struct PyBatchMCTS {
-    searches: Vec<MctsSearch>,
+    searches: Vec<MctsSearch<Game>>,
     c_puct: f32,
     leaf_batch_size: usize,
     use_forced_playouts: bool,
@@ -498,9 +499,9 @@ impl PyBatchMCTS {
     #[new]
     #[pyo3(signature = (num_games, c_puct=1.5, leaf_batch_size=16, capacity=100000, use_forced_playouts=false))]
     fn new(num_games: usize, c_puct: f32, leaf_batch_size: usize, capacity: usize, use_forced_playouts: bool) -> Self {
-        let searches: Vec<MctsSearch> = (0..num_games)
+        let searches: Vec<MctsSearch<Game>> = (0..num_games)
             .map(|_| {
-                let mut s = MctsSearch::new(capacity);
+                let mut s = MctsSearch::<Game>::new(capacity);
                 s.c_puct = c_puct;
                 s.use_forced_playouts = use_forced_playouts;
                 s
@@ -548,9 +549,9 @@ impl PyBatchMCTS {
         let searches = &mut self.searches;
 
         // Collect mutable refs to only the active searches
-        let mut active_searches: Vec<(usize, &mut MctsSearch)> = Vec::with_capacity(active_indices.len());
+        let mut active_searches: Vec<(usize, &mut MctsSearch<Game>)> = Vec::with_capacity(active_indices.len());
         for (pos, &gi) in active_indices.iter().enumerate() {
-            let ptr = &mut searches[gi] as *mut MctsSearch;
+            let ptr = &mut searches[gi] as *mut MctsSearch<Game>;
             active_searches.push((pos, unsafe { &mut *ptr }));
         }
 
@@ -565,7 +566,7 @@ impl PyBatchMCTS {
                 let mut reserves = vec![0.0f32; n * RESERVE_SIZE];
 
                 for (j, (_, game)) in leaves.iter().enumerate() {
-                    crate::board_encoding::encode_board(
+                    hive_game::board_encoding::encode_board(
                         game,
                         &mut boards[j * board_size..(j + 1) * board_size],
                         &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
@@ -634,9 +635,9 @@ impl PyBatchMCTS {
         let searches = &mut self.searches;
 
         // Collect mutable refs to active searches
-        let mut active_searches: Vec<(usize, &mut MctsSearch)> = Vec::with_capacity(active_indices.len());
+        let mut active_searches: Vec<(usize, &mut MctsSearch<Game>)> = Vec::with_capacity(active_indices.len());
         for (pos, &gi) in active_indices.iter().enumerate() {
-            let ptr = &mut searches[gi] as *mut MctsSearch;
+            let ptr = &mut searches[gi] as *mut MctsSearch<Game>;
             active_searches.push((pos, unsafe { &mut *ptr }));
         }
 
@@ -687,9 +688,9 @@ impl PyBatchMCTS {
             let active_gis: Vec<usize> = searching.iter().map(|&si| active_indices[si]).collect();
             let searches = &mut self.searches;
 
-            let mut active_searches: Vec<&mut MctsSearch> = Vec::with_capacity(active_gis.len());
+            let mut active_searches: Vec<&mut MctsSearch<Game>> = Vec::with_capacity(active_gis.len());
             for &gi in &active_gis {
-                let ptr = &mut searches[gi] as *mut MctsSearch;
+                let ptr = &mut searches[gi] as *mut MctsSearch<Game>;
                 active_searches.push(unsafe { &mut *ptr });
             }
 
@@ -707,7 +708,7 @@ impl PyBatchMCTS {
                     let mut boards = vec![0.0f32; n * board_size];
                     let mut reserves = vec![0.0f32; n * RESERVE_SIZE];
                     for (j, (_, game)) in leaves.iter().enumerate() {
-                        crate::board_encoding::encode_board(
+                        hive_game::board_encoding::encode_board(
                             game,
                             &mut boards[j * board_size..(j + 1) * board_size],
                             &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
@@ -768,9 +769,9 @@ impl PyBatchMCTS {
                 off += count;
             }
 
-            let mut active_searches2: Vec<&mut MctsSearch> = Vec::with_capacity(active_gis.len());
+            let mut active_searches2: Vec<&mut MctsSearch<Game>> = Vec::with_capacity(active_gis.len());
             for &gi in &active_gis {
-                let ptr = &mut searches[gi] as *mut MctsSearch;
+                let ptr = &mut searches[gi] as *mut MctsSearch<Game>;
                 active_searches2.push(unsafe { &mut *ptr });
             }
 
@@ -813,7 +814,7 @@ impl PyBatchMCTS {
         let encoded: Vec<(Vec<f32>, Vec<f32>)> = game_clones.par_iter().map(|game| {
             let mut board = vec![0.0f32; board_size];
             let mut reserve = vec![0.0f32; RESERVE_SIZE];
-            crate::board_encoding::encode_board(game, &mut board, &mut reserve);
+            hive_game::board_encoding::encode_board(game, &mut board, &mut reserve);
             (board, reserve)
         }).collect();
 
@@ -845,9 +846,9 @@ impl PyBatchMCTS {
         let searches = &mut self.searches;
 
         // Only reinit the active searches
-        let mut active_searches: Vec<(usize, &mut MctsSearch)> = Vec::with_capacity(num);
+        let mut active_searches: Vec<(usize, &mut MctsSearch<Game>)> = Vec::with_capacity(num);
         for (pos, &gi) in active_indices.iter().enumerate() {
-            let ptr = &mut searches[gi] as *mut MctsSearch;
+            let ptr = &mut searches[gi] as *mut MctsSearch<Game>;
             active_searches.push((pos, unsafe { &mut *ptr }));
         }
 
@@ -902,11 +903,11 @@ impl PyBatchMCTS {
 fn parse_sgf_moves(content: &str) -> PyResult<Vec<String>> {
     let mut game = Game::new();
     let mut moves = Vec::new();
-    crate::sgf::replay_into_game_verbose(content, &mut game, |g, mv| {
+    hive_game::sgf::replay_into_game_verbose(content, &mut game, |g, mv| {
         if mv.piece.is_none() {
             moves.push("pass".to_string());
         } else {
-            moves.push(crate::uhp::format_move_uhp(g, mv));
+            moves.push(hive_game::uhp::format_move_uhp(g, mv));
         }
     }).map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
     Ok(moves)

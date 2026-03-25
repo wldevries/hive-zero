@@ -2,24 +2,22 @@
 /// Pre-allocates a pool of nodes to avoid per-node heap allocation.
 
 use super::node::MctsNode;
-use crate::game::Move;
-use crate::piece::PieceColor;
+use crate::game::Player;
 
 /// Opaque node identifier.
 pub type NodeId = u32;
 
 /// Pre-allocated node pool.
-pub struct NodeArena {
-    nodes: Vec<MctsNode>,
+pub struct NodeArena<M: Copy> {
+    nodes: Vec<MctsNode<M>>,
     free_list: Vec<u32>,
 }
 
-impl NodeArena {
-    pub fn new(capacity: usize) -> Self {
+impl<M: Copy> NodeArena<M> {
+    pub fn new(capacity: usize, default_move: M) -> Self {
         let mut nodes = Vec::with_capacity(capacity);
         // Node 0 is reserved as "null"
-        nodes.push(MctsNode::default());
-        let _ = capacity;
+        nodes.push(MctsNode::new(None, default_move, 0.0, Player::Player1));
         NodeArena {
             nodes,
             free_list: Vec::new(),
@@ -27,8 +25,8 @@ impl NodeArena {
     }
 
     /// Allocate a new node. Returns its ID.
-    pub fn alloc(&mut self, parent: Option<NodeId>, mv: Move, prior: f32, turn_color: PieceColor) -> NodeId {
-        let node = MctsNode::new(parent, mv, prior, turn_color);
+    pub fn alloc(&mut self, parent: Option<NodeId>, mv: M, prior: f32, turn_player: Player) -> NodeId {
+        let node = MctsNode::new(parent, mv, prior, turn_player);
         if let Some(id) = self.free_list.pop() {
             self.nodes[id as usize] = node;
             id
@@ -41,13 +39,13 @@ impl NodeArena {
 
     /// Get a reference to a node.
     #[inline]
-    pub fn get(&self, id: NodeId) -> &MctsNode {
+    pub fn get(&self, id: NodeId) -> &MctsNode<M> {
         &self.nodes[id as usize]
     }
 
     /// Get a mutable reference to a node.
     #[inline]
-    pub fn get_mut(&mut self, id: NodeId) -> &mut MctsNode {
+    pub fn get_mut(&mut self, id: NodeId) -> &mut MctsNode<M> {
         &mut self.nodes[id as usize]
     }
 
