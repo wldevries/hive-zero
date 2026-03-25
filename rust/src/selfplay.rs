@@ -365,6 +365,12 @@ impl PySelfPlaySession {
         // Opening sequence state: tracks games that have abandoned their sequence early
         let mut opening_done: Vec<bool> = vec![false; num_games];
 
+        // Per-game D6 symmetry for opening book moves (0-11: 6 rotations × 2 mirrors)
+        let opening_syms: Vec<u8> = {
+            let mut rng = rand::thread_rng();
+            (0..num_games).map(|_| rng.gen_range(0..12u8)).collect()
+        };
+
         // Resignation state
         let mut resign_counters: Vec<u32> = vec![0; num_games];
         let mut resigned_as: Vec<Option<PieceColor>> = vec![None; num_games];
@@ -403,8 +409,9 @@ impl PySelfPlaySession {
                     // Boardspace opening: replay next move from sequence
                     if !opening_done[gi] && (move_counts[gi] as usize) < seq.len() {
                         let move_str = &seq[move_counts[gi] as usize];
+                        let transformed = crate::uhp::transform_uhp_move(move_str, opening_syms[gi]);
                         let valid = games[gi].valid_moves();
-                        if let Some(mv) = valid.iter().find(|m| crate::uhp::format_move_uhp(&games[gi], m) == *move_str) {
+                        if let Some(mv) = valid.iter().find(|m| crate::uhp::format_move_uhp(&games[gi], m) == transformed) {
                             games[gi].play_move(mv).unwrap();
                             move_counts[gi] += 1;
                             if games[gi].is_game_over() || move_counts[gi] >= cfg.max_moves {
