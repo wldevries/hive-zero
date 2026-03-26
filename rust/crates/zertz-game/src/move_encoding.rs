@@ -5,9 +5,12 @@
 ///   PlaceOnly: 4107 + color(3) * 37 + place_at(37)                   → [4107, 4218)
 ///   Capture:   4218 + from(37) * 37 + final_to(37)                   → [4218, 5587)
 
-use crate::zertz::{BOARD_SIZE, ZertzBoard, ZertzMove};
+use crate::hex::{self, hex_to_index};
+use crate::zertz::{ZertzBoard, ZertzMove};
 #[cfg(test)]
 use crate::zertz::Marble;
+
+const BOARD_SIZE: usize = hex::BOARD_SIZE;
 
 const PLACE_OFFSET: usize = 0;
 const PLACE_ONLY_OFFSET: usize = 3 * BOARD_SIZE * BOARD_SIZE; // 4107
@@ -25,15 +28,15 @@ pub fn encode_move(mv: &ZertzMove) -> usize {
         } => {
             PLACE_OFFSET
                 + color.index() * BOARD_SIZE * BOARD_SIZE
-                + place_at as usize * BOARD_SIZE
-                + remove as usize
+                + hex_to_index(place_at) * BOARD_SIZE
+                + hex_to_index(remove)
         }
         ZertzMove::PlaceOnly { color, place_at } => {
-            PLACE_ONLY_OFFSET + color.index() * BOARD_SIZE + place_at as usize
+            PLACE_ONLY_OFFSET + color.index() * BOARD_SIZE + hex_to_index(place_at)
         }
         ZertzMove::Capture { jumps, len } => {
-            let from = jumps[0].0 as usize;
-            let final_to = jumps[len as usize - 1].2 as usize;
+            let from = hex_to_index(jumps[0].0);
+            let final_to = hex_to_index(jumps[len as usize - 1].2);
             CAPTURE_OFFSET + from * BOARD_SIZE + final_to
         }
         ZertzMove::Pass => 0, // Pass is never generated; return dummy index
@@ -62,10 +65,13 @@ mod tests {
 
     #[test]
     fn test_place_encoding() {
+        use crate::hex::index_to_hex;
+        let place_hex = index_to_hex(5);
+        let remove_hex = index_to_hex(10);
         let mv = ZertzMove::Place {
             color: Marble::White,
-            place_at: 5,
-            remove: 10,
+            place_at: place_hex,
+            remove: remove_hex,
         };
         let idx = encode_move(&mv);
         assert!(idx < PLACE_ONLY_OFFSET);
@@ -74,9 +80,11 @@ mod tests {
 
     #[test]
     fn test_place_only_encoding() {
+        use crate::hex::index_to_hex;
+        let place_hex = index_to_hex(3);
         let mv = ZertzMove::PlaceOnly {
             color: Marble::Grey,
-            place_at: 3,
+            place_at: place_hex,
         };
         let idx = encode_move(&mv);
         assert!(idx >= PLACE_ONLY_OFFSET && idx < CAPTURE_OFFSET);
@@ -85,7 +93,11 @@ mod tests {
 
     #[test]
     fn test_capture_encoding() {
-        let mv = ZertzMove::capture_single(10, 15, 20);
+        use crate::hex::index_to_hex;
+        let from = index_to_hex(10);
+        let over = index_to_hex(15);
+        let to = index_to_hex(20);
+        let mv = ZertzMove::capture_single(from, over, to);
         let idx = encode_move(&mv);
         assert!(idx >= CAPTURE_OFFSET && idx < POLICY_SIZE);
         assert_eq!(idx, CAPTURE_OFFSET + 10 * 37 + 20);

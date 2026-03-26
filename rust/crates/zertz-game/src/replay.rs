@@ -1,12 +1,12 @@
 //! Replay parsed boardspace games on the Zertz engine.
 //!
-//! Maps boardspace coordinates to engine cell indices, reconstructs
+//! Maps boardspace coordinates to hex coordinates, reconstructs
 //! `ZertzMove` values, and plays them on a `ZertzBoard`.
 
+use crate::hex::boardspace_to_hex;
 use crate::parser::{Color, Coord, GameRecord, Turn, Variant};
 use crate::zertz::{
-    find_capture_path, find_intermediate, standard_neighbours, BoardLayout, Marble, ZertzBoard,
-    ZertzMove, MAX_CAPTURE_JUMPS,
+    find_capture_path, find_intermediate, Marble, ZertzBoard, ZertzMove, MAX_CAPTURE_JUMPS,
 };
 
 // ---------------------------------------------------------------------------
@@ -21,10 +21,10 @@ fn color_to_marble(c: Color) -> Marble {
     }
 }
 
-fn coord_to_index(layout: &BoardLayout, coord: Coord) -> Result<usize, ReplayError> {
-    layout
-        .coord_to_index(coord.col, coord.row)
-        .ok_or(ReplayError::BadCoord(coord))
+fn coord_to_hex(
+    coord: Coord,
+) -> Result<crate::hex::Hex, ReplayError> {
+    boardspace_to_hex(coord.col, coord.row).ok_or(ReplayError::BadCoord(coord))
 }
 
 // ---------------------------------------------------------------------------
@@ -80,13 +80,11 @@ pub fn replay_game_verbose(record: &GameRecord) -> ReplayResult {
 }
 
 fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
-    let (layout, nbrs): (BoardLayout, &[[u8; 6]]) = match &record.variant {
-        Variant::Standard => (BoardLayout::standard(), standard_neighbours().as_slice()),
+    match &record.variant {
+        Variant::Standard => {}
         Variant::Tournament { .. } => {
-            // Tournament boards use a different neighbour table.
-            // For now, we build it on the fly. Could be cached.
-            // We'd need to expose tournament_neighbours or build_neighbours.
-            // For the MVP, skip tournament games.
+            // Tournament boards use a different layout.
+            // For now, skip tournament games.
             return ReplayResult {
                 turns_played: 0,
                 total_turns: record.turns.len(),
@@ -108,7 +106,7 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
         }
         let mv = match turn {
             Turn::Place { color, at, remove } => {
-                let place_idx = match coord_to_index(&layout, *at) {
+                let place_hex = match coord_to_hex(*at) {
                     Ok(v) => v,
                     Err(e) => {
                         return ReplayResult {
@@ -119,7 +117,7 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
                         }
                     }
                 };
-                let remove_idx = match coord_to_index(&layout, *remove) {
+                let remove_hex = match coord_to_hex(*remove) {
                     Ok(v) => v,
                     Err(e) => {
                         return ReplayResult {
@@ -132,12 +130,12 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
                 };
                 ZertzMove::Place {
                     color: color_to_marble(*color),
-                    place_at: place_idx as u8,
-                    remove: remove_idx as u8,
+                    place_at: place_hex,
+                    remove: remove_hex,
                 }
             }
             Turn::PlaceOnly { color, at } => {
-                let place_idx = match coord_to_index(&layout, *at) {
+                let place_hex = match coord_to_hex(*at) {
                     Ok(v) => v,
                     Err(e) => {
                         return ReplayResult {
@@ -150,7 +148,7 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
                 };
                 ZertzMove::PlaceOnly {
                     color: color_to_marble(*color),
-                    place_at: place_idx as u8,
+                    place_at: place_hex,
                 }
             }
             Turn::Capture { jumps } => {
@@ -158,11 +156,12 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
                     continue;
                 }
                 // Build capture chain: convert each (from, to) to (from, over, to).
-                let mut capture_jumps = [(0u8, 0u8, 0u8); MAX_CAPTURE_JUMPS];
+                let mut capture_jumps =
+                    [((0i8, 0i8), (0i8, 0i8), (0i8, 0i8)); MAX_CAPTURE_JUMPS];
                 let mut len = 0u8;
 
                 for (from_coord, to_coord) in jumps.iter() {
-                    let from_idx = match coord_to_index(&layout, *from_coord) {
+                    let from_hex = match coord_to_hex(*from_coord) {
                         Ok(v) => v,
                         Err(e) => {
                             return ReplayResult {
@@ -173,7 +172,7 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
                             }
                         }
                     };
-                    let to_idx = match coord_to_index(&layout, *to_coord) {
+                    let to_hex = match coord_to_hex(*to_coord) {
                         Ok(v) => v,
                         Err(e) => {
                             return ReplayResult {
@@ -185,7 +184,9 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
                         }
                     };
                     // Try direct 2-step hop first.
-                    if let Some(over_idx) = find_intermediate(nbrs, from_idx, to_idx) {
+                    if let Some(over_hex) =
+                        find_intermediate(board.rings(), from_hex, to_hex)
+                    {
                         if (len as usize) >= MAX_CAPTURE_JUMPS {
                             return ReplayResult {
                                 turns_played: i,
@@ -193,15 +194,17 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
                                 final_board: board,
                                 error: Some(ReplayError::EngineError {
                                     turn: i,
-                                    msg: format!("capture chain too long (>{MAX_CAPTURE_JUMPS} hops)"),
+                                    msg: format!(
+                                        "capture chain too long (>{MAX_CAPTURE_JUMPS} hops)"
+                                    ),
                                 }),
                             };
                         }
-                        capture_jumps[len as usize] = (from_idx as u8, over_idx as u8, to_idx as u8);
+                        capture_jumps[len as usize] = (from_hex, over_hex, to_hex);
                         len += 1;
                     } else {
                         // Old-format multi-hop: find path via board state.
-                        match find_capture_path(nbrs, board.rings(), from_idx, to_idx) {
+                        match find_capture_path(board.rings(), from_hex, to_hex) {
                             Some(path) => {
                                 for (f, o, t) in path {
                                     if (len as usize) >= MAX_CAPTURE_JUMPS {
@@ -211,11 +214,13 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
                                             final_board: board,
                                             error: Some(ReplayError::EngineError {
                                                 turn: i,
-                                                msg: format!("capture chain too long (>{MAX_CAPTURE_JUMPS} hops)"),
+                                                msg: format!(
+                                                    "capture chain too long (>{MAX_CAPTURE_JUMPS} hops)"
+                                                ),
                                             }),
                                         };
                                     }
-                                    capture_jumps[len as usize] = (f as u8, o as u8, t as u8);
+                                    capture_jumps[len as usize] = (f, o, t);
                                     len += 1;
                                 }
                             }

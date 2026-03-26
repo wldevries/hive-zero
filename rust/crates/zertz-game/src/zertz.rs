@@ -1,24 +1,23 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use core_game::game::{Game, Outcome, Player};
+
+use crate::hex::{self, all_hexes, hex_add, hex_neighbors, Hex, DIRECTIONS};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 /// Standard Zertz uses a hex board with 37 rings arranged in rows of
-/// 4-5-6-7-6-5-4.  We index them 0..36.
-pub const BOARD_SIZE: usize = 37;
+/// 4-5-6-7-6-5-4.
+pub const BOARD_SIZE: usize = hex::BOARD_SIZE;
 
 /// Maximum number of jumps in a single capture chain.
 /// On a 37-cell board the theoretical max is higher, but 8 covers all
 /// observed games (some have 5-6 hops).
 pub const MAX_CAPTURE_JUMPS: usize = 8;
-
-/// Row lengths for the hex board (top to bottom).
-pub const ROW_LENGTHS: [usize; 7] = [4, 5, 6, 7, 6, 5, 4];
 
 /// Starting marble supply: 6 white, 8 grey, 10 black.
 const INITIAL_SUPPLY: [u8; 3] = [6, 8, 10];
@@ -30,102 +29,27 @@ const WIN_SINGLE: [u8; 3] = [4, 5, 6];
 const WIN_EACH: u8 = 3;
 
 // ---------------------------------------------------------------------------
-// Board layout (for coordinate mapping and future tournament support)
+// Hex-based helper functions (replacing old cell-index infrastructure)
 // ---------------------------------------------------------------------------
 
-/// Column lengths for standard (37-ring) and tournament (48-ring) boards.
-pub const STANDARD_COL_LENGTHS: &[usize] = &[4, 5, 6, 7, 6, 5, 4];
-pub const TOURNAMENT_COL_LENGTHS: &[usize] = &[5, 6, 7, 8, 7, 6, 5, 4];
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BoardLayout {
-    col_lengths: Vec<usize>,
-    col_starts: Vec<usize>,
-    board_size: usize,
-}
-
-impl BoardLayout {
-    pub fn new(col_lengths: &[usize]) -> Self {
-        let mut col_starts = Vec::with_capacity(col_lengths.len());
-        let mut acc = 0;
-        for &len in col_lengths {
-            col_starts.push(acc);
-            acc += len;
-        }
-        BoardLayout {
-            col_lengths: col_lengths.to_vec(),
-            col_starts,
-            board_size: acc,
-        }
-    }
-
-    pub fn standard() -> Self {
-        Self::new(STANDARD_COL_LENGTHS)
-    }
-
-    pub fn tournament() -> Self {
-        Self::new(TOURNAMENT_COL_LENGTHS)
-    }
-
-    pub fn board_size(&self) -> usize {
-        self.board_size
-    }
-
-    pub fn num_cols(&self) -> usize {
-        self.col_lengths.len()
-    }
-
-    pub fn col_lengths(&self) -> &[usize] {
-        &self.col_lengths
-    }
-
-    /// Convert boardspace coordinate (col: A=0, B=1, ...; row: 0-based) to cell index.
-    pub fn coord_to_index(&self, col: u8, row: u8) -> Option<usize> {
-        let c = col as usize;
-        let r = row as usize;
-        if c >= self.col_lengths.len() || r >= self.col_lengths[c] {
-            return None;
-        }
-        Some(self.col_starts[c] + r)
-    }
-
-    /// Convert cell index to (col, row) pair (both 0-based).
-    pub fn index_to_coord(&self, idx: usize) -> Option<(u8, u8)> {
-        if idx >= self.board_size {
-            return None;
-        }
-        for (c, &start) in self.col_starts.iter().enumerate() {
-            if idx < start + self.col_lengths[c] {
-                return Some((c as u8, (idx - start) as u8));
-            }
-        }
-        None
-    }
-}
-
-/// Find the intermediate cell between `from` and `to` for a 2-step hex hop,
-/// using a given neighbour table.
+/// Find the intermediate cell between `from` and `to` for a 2-step hex hop.
+/// The hop must be exactly 2 steps in one of the 6 hex directions.
 pub fn find_intermediate(
-    neighbours: &[[u8; NUM_DIRECTIONS]],
-    from: usize,
-    to: usize,
-) -> Option<usize> {
-    for dir in 0..NUM_DIRECTIONS {
-        let mid = neighbours[from][dir];
-        if mid == 255 {
+    rings: &BTreeMap<Hex, Ring>,
+    from: Hex,
+    to: Hex,
+) -> Option<Hex> {
+    for &dir in &DIRECTIONS {
+        let mid = hex_add(from, dir);
+        if !rings.contains_key(&mid) {
             continue;
         }
-        let end = neighbours[mid as usize][dir];
-        if end != 255 && end as usize == to {
-            return Some(mid as usize);
+        let end = hex_add(mid, dir);
+        if end == to && rings.contains_key(&end) {
+            return Some(mid);
         }
     }
     None
-}
-
-/// Get a reference to the standard (37-ring) neighbour table.
-pub fn standard_neighbours() -> &'static [[u8; NUM_DIRECTIONS]; BOARD_SIZE] {
-    &NEIGHBOURS
 }
 
 /// Find a multi-hop capture path from `from` to `to` on the given board.
@@ -134,15 +58,13 @@ pub fn standard_neighbours() -> &'static [[u8; NUM_DIRECTIONS]; BOARD_SIZE] {
 /// as a single BtoB(start, end). Returns a list of (from, over, to) triples,
 /// or None if no valid path exists.
 pub fn find_capture_path(
-    neighbours: &[[u8; NUM_DIRECTIONS]],
-    rings: &[Ring],
-    from: usize,
-    to: usize,
-) -> Option<Vec<(usize, usize, usize)>> {
-    // DFS: find a sequence of jumps from `from` to `to`.
+    rings: &BTreeMap<Hex, Ring>,
+    from: Hex,
+    to: Hex,
+) -> Option<Vec<(Hex, Hex, Hex)>> {
     let mut path = Vec::new();
-    let mut jumped_over = vec![false; rings.len()];
-    if dfs_capture(neighbours, rings, from, to, &mut jumped_over, &mut path) {
+    let mut jumped_over = HashSet::new();
+    if dfs_capture(rings, from, to, &mut jumped_over, &mut path) {
         Some(path)
     } else {
         None
@@ -150,48 +72,44 @@ pub fn find_capture_path(
 }
 
 fn dfs_capture(
-    neighbours: &[[u8; NUM_DIRECTIONS]],
-    rings: &[Ring],
-    current: usize,
-    target: usize,
-    jumped_over: &mut Vec<bool>,
-    path: &mut Vec<(usize, usize, usize)>,
+    rings: &BTreeMap<Hex, Ring>,
+    current: Hex,
+    target: Hex,
+    jumped_over: &mut HashSet<Hex>,
+    path: &mut Vec<(Hex, Hex, Hex)>,
 ) -> bool {
     if current == target && !path.is_empty() {
         return true;
     }
-    for dir in 0..NUM_DIRECTIONS {
-        let mid = neighbours[current][dir];
-        if mid == 255 {
-            continue;
-        }
-        let mid = mid as usize;
+    for &dir in &DIRECTIONS {
+        let mid = hex_add(current, dir);
         // Must jump over an occupied cell that hasn't been jumped yet.
-        if jumped_over[mid] || !matches!(rings[mid], Ring::Occupied(_)) {
+        match rings.get(&mid) {
+            Some(Ring::Occupied(_)) if !jumped_over.contains(&mid) => {}
+            _ => continue,
+        }
+        let end = hex_add(mid, dir);
+        // Landing cell must exist on the board.
+        let end_ring = match rings.get(&end) {
+            Some(r) => *r,
+            None => continue,
+        };
+        // Landing cell must be empty, OR be the target if we're completing the path.
+        if end_ring != Ring::Empty && end != target {
             continue;
         }
-        let end = neighbours[mid][dir];
-        if end == 255 {
-            continue;
-        }
-        let end = end as usize;
-        // Landing cell must be empty, OR be the target if we're completing the path,
-        // OR be where we started (passing through).
-        if rings[end] != Ring::Empty && end != target {
-            continue;
-        }
-        // For the landing cell: if it's occupied and not the target, skip.
-        if matches!(rings[end], Ring::Occupied(_)) && end != current {
+        // For the landing cell: if it's occupied and not the start, skip.
+        if matches!(end_ring, Ring::Occupied(_)) && end != current {
             continue;
         }
 
-        jumped_over[mid] = true;
+        jumped_over.insert(mid);
         path.push((current, mid, end));
-        if dfs_capture(neighbours, rings, end, target, jumped_over, path) {
+        if dfs_capture(rings, end, target, jumped_over, path) {
             return true;
         }
         path.pop();
-        jumped_over[mid] = false;
+        jumped_over.remove(&mid);
     }
     false
 }
@@ -200,7 +118,7 @@ fn dfs_capture(
 // Marble color
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Marble {
     White = 0,
     Grey = 1,
@@ -229,7 +147,7 @@ impl Display for Marble {
 // Ring state
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Ring {
     /// Ring exists and is empty.
     Empty,
@@ -251,30 +169,28 @@ pub enum ZertzMove {
     /// Place marble of given color at `place_at`, then remove ring `remove`.
     Place {
         color: Marble,
-        place_at: u8,
-        remove: u8,
+        place_at: Hex,
+        remove: Hex,
     },
     /// Place marble when no free ring exists to remove.
     PlaceOnly {
         color: Marble,
-        place_at: u8,
+        place_at: Hex,
     },
     /// No-op pass move (Zertz never generates this, but the Game trait requires it).
     Pass,
-    /// A capture sequence encoded as start position + sequence of directions.
-    /// We encode captures as (from, over, to) triples, up to 4 jumps max
-    /// (practically sufficient for standard Zertz).
+    /// A capture sequence encoded as (from, over, to) triples, up to MAX_CAPTURE_JUMPS.
     Capture {
-        jumps: [(u8, u8, u8); MAX_CAPTURE_JUMPS],
+        jumps: [(Hex, Hex, Hex); MAX_CAPTURE_JUMPS],
         len: u8,
     },
 }
 
 impl ZertzMove {
-    pub fn capture_single(from: u8, over: u8, to: u8) -> Self {
+    pub fn capture_single(from: Hex, over: Hex, to: Hex) -> Self {
         ZertzMove::Capture {
             jumps: {
-                let mut j = [(0u8, 0u8, 0u8); MAX_CAPTURE_JUMPS];
+                let mut j = [((0i8, 0i8), (0i8, 0i8), (0i8, 0i8)); MAX_CAPTURE_JUMPS];
                 j[0] = (from, over, to);
                 j
             },
@@ -282,7 +198,7 @@ impl ZertzMove {
         }
     }
 
-    fn with_extra_jump(self, from: u8, over: u8, to: u8) -> Option<Self> {
+    fn with_extra_jump(self, from: Hex, over: Hex, to: Hex) -> Option<Self> {
         match self {
             ZertzMove::Capture { mut jumps, len } => {
                 if (len as usize) >= MAX_CAPTURE_JUMPS {
@@ -306,9 +222,13 @@ impl Debug for ZertzMove {
                 color,
                 place_at,
                 remove,
-            } => write!(f, "Place({color} @{place_at}, rm {remove})"),
+            } => write!(
+                f,
+                "Place({color} @({},{}), rm ({},{}))",
+                place_at.0, place_at.1, remove.0, remove.1
+            ),
             ZertzMove::PlaceOnly { color, place_at } => {
-                write!(f, "Place({color} @{place_at})")
+                write!(f, "Place({color} @({},{}))", place_at.0, place_at.1)
             }
             ZertzMove::Capture { jumps, len } => {
                 write!(f, "Capture(")?;
@@ -317,7 +237,11 @@ impl Debug for ZertzMove {
                         write!(f, " -> ")?;
                     }
                     let (from, over, to) = jumps[i];
-                    write!(f, "{from}x{over}->{to}")?;
+                    write!(
+                        f,
+                        "({},{})x({},{})->({},{})",
+                        from.0, from.1, over.0, over.1, to.0, to.1
+                    )?;
                 }
                 write!(f, ")")
             }
@@ -333,120 +257,12 @@ impl Display for ZertzMove {
 }
 
 // ---------------------------------------------------------------------------
-// Hex grid neighbour table
-// ---------------------------------------------------------------------------
-
-/// For each of the 37 positions, the six hex neighbours (or 255 if off-board).
-/// Hex directions: E, W, NE, NW, SE, SW.
-const NUM_DIRECTIONS: usize = 6;
-
-/// Pre-computed neighbour table.  Built at startup via `build_neighbours`.
-fn build_neighbours() -> [[u8; NUM_DIRECTIONS]; BOARD_SIZE] {
-    // Map each cell to (row, col) and back.
-    let mut row_of = [0u8; BOARD_SIZE];
-    let mut col_of = [0u8; BOARD_SIZE];
-    let mut idx = 0usize;
-    let mut r = 0u8;
-    while r < 7 {
-        let mut c = 0u8;
-        while c < ROW_LENGTHS[r as usize] as u8 {
-            row_of[idx] = r;
-            col_of[idx] = c;
-            idx += 1;
-            c += 1;
-        }
-        r += 1;
-    }
-
-    // For hex grids with offset rows, neighbours depend on whether we are
-    // in the "expanding" part (rows 0..3) or "shrinking" part (rows 3..6).
-    // We use axial-style adjacency.
-    //
-    // Row start indices:
-    let row_start: [usize; 7] = [0, 4, 9, 15, 22, 28, 33];
-
-    let mut neighbours = [[255u8; NUM_DIRECTIONS]; BOARD_SIZE];
-    let mut i = 0usize;
-    while i < BOARD_SIZE {
-        let r = row_of[i] as usize;
-        let c = col_of[i] as usize;
-        let rlen = ROW_LENGTHS[r];
-
-        // East / West (same row)
-        if c + 1 < rlen {
-            neighbours[i][0] = (row_start[r] + c + 1) as u8;
-        }
-        if c > 0 {
-            neighbours[i][1] = (row_start[r] + c - 1) as u8;
-        }
-
-        // NE, NW (row - 1)
-        if r > 0 {
-            let prev_len = ROW_LENGTHS[r - 1];
-            if r <= 3 {
-                // current row is longer than previous
-                // NW: same col - 1 in prev row, NE: same col in prev row
-                if c > 0 && c - 1 < prev_len {
-                    neighbours[i][3] = (row_start[r - 1] + c - 1) as u8; // NW
-                }
-                if c < prev_len {
-                    neighbours[i][2] = (row_start[r - 1] + c) as u8; // NE
-                }
-            } else {
-                // current row is shorter than or equal to previous
-                // NW: same col in prev row, NE: col+1 in prev row
-                if c < prev_len {
-                    neighbours[i][3] = (row_start[r - 1] + c) as u8; // NW
-                }
-                if c + 1 < prev_len {
-                    neighbours[i][2] = (row_start[r - 1] + c + 1) as u8; // NE
-                }
-            }
-        }
-
-        // SE, SW (row + 1)
-        if r < 6 {
-            let next_len = ROW_LENGTHS[r + 1];
-            if r < 3 {
-                // next row is longer than current
-                // SW: same col in next row, SE: col+1 in next row
-                if c < next_len {
-                    neighbours[i][5] = (row_start[r + 1] + c) as u8; // SW
-                }
-                if c + 1 < next_len {
-                    neighbours[i][4] = (row_start[r + 1] + c + 1) as u8; // SE
-                }
-            } else {
-                // next row is shorter than or equal to current
-                // SW: col-1 in next row, SE: same col in next row
-                if c > 0 && c - 1 < next_len {
-                    neighbours[i][5] = (row_start[r + 1] + c - 1) as u8; // SW
-                }
-                if c < next_len {
-                    neighbours[i][4] = (row_start[r + 1] + c) as u8; // SE
-                }
-            }
-        }
-
-        i += 1;
-    }
-
-    neighbours
-}
-
-// We use a lazily-initialized static for the neighbour table.
-use std::sync::LazyLock;
-
-static NEIGHBOURS: LazyLock<[[u8; NUM_DIRECTIONS]; BOARD_SIZE]> =
-    LazyLock::new(build_neighbours);
-
-// ---------------------------------------------------------------------------
 // ZertzBoard
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct ZertzBoard {
-    rings: [Ring; BOARD_SIZE],
+    rings: BTreeMap<Hex, Ring>,
     /// Marble supply shared by both players: [white, grey, black].
     supply: [u8; 3],
     /// Captured marbles per player: captures[player_index][color_index].
@@ -466,7 +282,11 @@ pub struct ZertzBoard {
 impl ZertzBoard {
     fn position_key(&self) -> u64 {
         let mut h = DefaultHasher::new();
-        self.rings.hash(&mut h);
+        // BTreeMap iterates in deterministic order, so this is stable.
+        for (hex, ring) in &self.rings {
+            hex.hash(&mut h);
+            ring.hash(&mut h);
+        }
         self.supply.hash(&mut h);
         self.captures.hash(&mut h);
         self.next_player.hash(&mut h);
@@ -488,7 +308,11 @@ impl Eq for ZertzBoard {}
 
 impl Hash for ZertzBoard {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.rings.hash(state);
+        // BTreeMap iterates in deterministic order.
+        for (hex, ring) in &self.rings {
+            hex.hash(state);
+            ring.hash(state);
+        }
         self.supply.hash(state);
         self.captures.hash(state);
         self.next_player.hash(state);
@@ -498,8 +322,12 @@ impl Hash for ZertzBoard {
 
 impl Default for ZertzBoard {
     fn default() -> Self {
+        let mut rings = BTreeMap::new();
+        for h in all_hexes() {
+            rings.insert(h, Ring::Empty);
+        }
         let mut board = ZertzBoard {
-            rings: [Ring::Empty; BOARD_SIZE],
+            rings,
             supply: INITIAL_SUPPLY,
             captures: [[0; 3]; 2],
             next_player: Player::Player1,
@@ -528,15 +356,25 @@ impl ZertzBoard {
     fn generate_captures(&self) -> Vec<ZertzMove> {
         let mut all_captures = Vec::new();
 
-        for from in 0..BOARD_SIZE {
-            if let Ring::Occupied(_) = self.rings[from] {
-                let chain = ZertzMove::Capture {
-                    jumps: [(0, 0, 0); MAX_CAPTURE_JUMPS],
-                    len: 0,
-                };
-                let mut temp_rings = self.rings;
-                self.find_capture_chains(from, &mut temp_rings, chain, &mut all_captures);
-            }
+        let occupied: Vec<Hex> = self
+            .rings
+            .iter()
+            .filter_map(|(&h, r)| {
+                if matches!(r, Ring::Occupied(_)) {
+                    Some(h)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for from in occupied {
+            let chain = ZertzMove::Capture {
+                jumps: [((0, 0), (0, 0), (0, 0)); MAX_CAPTURE_JUMPS],
+                len: 0,
+            };
+            let mut temp_rings = self.rings.clone();
+            self.find_capture_chains(from, &mut temp_rings, chain, &mut all_captures);
         }
 
         // Also allow capturing any marble (not just your own) — in Zertz,
@@ -547,70 +385,70 @@ impl ZertzBoard {
 
     fn find_capture_chains(
         &self,
-        from: usize,
-        rings: &mut [Ring; BOARD_SIZE],
+        from: Hex,
+        rings: &mut BTreeMap<Hex, Ring>,
         current_chain: ZertzMove,
         results: &mut Vec<ZertzMove>,
     ) {
         let mut found_jump = false;
 
-        for dir in 0..NUM_DIRECTIONS {
-            let over = NEIGHBOURS[from][dir];
-            if over == 255 {
+        for &dir in &DIRECTIONS {
+            let over = hex_add(from, dir);
+
+            // Must jump over an occupied ring that is on the board.
+            let over_ring = match rings.get(&over) {
+                Some(Ring::Occupied(_)) => *rings.get(&over).unwrap(),
+                _ => continue,
+            };
+
+            // Find landing spot: next cell in same direction from `over`.
+            let to = hex_add(over, dir);
+
+            // Landing spot must exist on the board.
+            let to_ring = match rings.get(&to) {
+                Some(r) => *r,
+                None => continue,
+            };
+
+            // Landing spot must be empty.
+            if to_ring != Ring::Empty {
                 continue;
             }
-            let over = over as usize;
 
-            // Must jump over an occupied ring.
-            if let Ring::Occupied(_) = rings[over] {
-                // Find landing spot: next cell in same direction from `over`.
-                let to = NEIGHBOURS[over][dir];
-                if to == 255 {
-                    continue;
-                }
-                let to = to as usize;
+            found_jump = true;
 
-                // Landing spot must be empty.
-                if rings[to] != Ring::Empty {
-                    continue;
-                }
+            // Execute jump temporarily.
+            let orig_from = *rings.get(&from).unwrap();
+            rings.insert(from, Ring::Empty);
+            rings.insert(over, Ring::Empty);
+            rings.insert(to, orig_from);
 
-                found_jump = true;
-
-                // Execute jump temporarily.
-                let orig_from = rings[from];
-                let orig_over = rings[over];
-                rings[from] = Ring::Empty;
-                rings[over] = Ring::Empty;
-                rings[to] = orig_from;
-
-                let new_chain = if let ZertzMove::Capture { jumps: _, len } = current_chain {
-                    if len == 0 {
-                        Some(ZertzMove::capture_single(from as u8, over as u8, to as u8))
-                    } else {
-                        current_chain.with_extra_jump(from as u8, over as u8, to as u8)
-                    }
+            let new_chain = if let ZertzMove::Capture { jumps: _, len } = current_chain {
+                if len == 0 {
+                    Some(ZertzMove::capture_single(from, over, to))
                 } else {
-                    unreachable!()
-                };
+                    current_chain.with_extra_jump(from, over, to)
+                }
+            } else {
+                unreachable!()
+            };
 
-                // If chain is at max length, record it and stop recursing.
-                let Some(new_chain) = new_chain else {
-                    results.push(current_chain);
-                    rings[from] = orig_from;
-                    rings[over] = orig_over;
-                    rings[to] = Ring::Empty;
-                    continue;
-                };
+            // If chain is at max length, record it and stop recursing.
+            let Some(new_chain) = new_chain else {
+                results.push(current_chain);
+                rings.insert(from, orig_from);
+                rings.insert(over, over_ring);
+                rings.insert(to, Ring::Empty);
+                continue;
+            };
 
-                // Recurse for multi-jumps.
-                self.find_capture_chains(to, rings, new_chain, results);
+            // Recurse for multi-jumps.
+            self.find_capture_chains(to, rings, new_chain, results);
 
-                // Undo jump.
-                rings[from] = orig_from;
-                rings[over] = orig_over;
-                rings[to] = Ring::Empty;
-            }
+            // Undo jump.
+            rings.insert(from, orig_from);
+            rings.insert(over, over_ring);
+            rings.insert(to, Ring::Empty);
         }
 
         // If no further jumps, and we've made at least one jump, record the chain.
@@ -653,14 +491,14 @@ impl ZertzBoard {
 
         // Precompute empty positions and removable edges once.
         // Placing a marble doesn't change which rings are removable edges:
-        // is_edge_static only checks for Removed/off-board neighbors, not Occupied.
+        // is_edge_static only checks for absent neighbors in the rings map.
         let mut empty_positions = Vec::new();
         let mut removable_edges = Vec::new();
-        for i in 0..BOARD_SIZE {
-            if self.rings[i] == Ring::Empty {
-                empty_positions.push(i);
-                if Self::is_edge_static(&self.rings, i) {
-                    removable_edges.push(i);
+        for (&pos, &ring) in &self.rings {
+            if ring == Ring::Empty {
+                empty_positions.push(pos);
+                if Self::is_edge_static(&self.rings, pos) {
+                    removable_edges.push(pos);
                 }
             }
         }
@@ -675,8 +513,8 @@ impl ZertzBoard {
                     found_removal = true;
                     moves.push(ZertzMove::Place {
                         color,
-                        place_at: place as u8,
-                        remove: remove as u8,
+                        place_at: place,
+                        remove,
                     });
                 }
 
@@ -684,7 +522,7 @@ impl ZertzBoard {
                 if !found_removal {
                     moves.push(ZertzMove::PlaceOnly {
                         color,
-                        place_at: place as u8,
+                        place_at: place,
                     });
                 }
             }
@@ -693,13 +531,10 @@ impl ZertzBoard {
         moves
     }
 
-    fn is_edge_static(rings: &[Ring; BOARD_SIZE], i: usize) -> bool {
-        if rings[i] == Ring::Removed {
-            return false;
-        }
-        let neighbours = &NEIGHBOURS[i];
-        for &n in neighbours.iter() {
-            if n == 255 || rings[n as usize] == Ring::Removed {
+    /// A ring is an edge if any of its 6 hex neighbors is NOT in the rings map.
+    fn is_edge_static(rings: &BTreeMap<Hex, Ring>, pos: Hex) -> bool {
+        for n in hex_neighbors(pos) {
+            if !rings.contains_key(&n) {
                 return true;
             }
         }
@@ -710,16 +545,25 @@ impl ZertzBoard {
     fn check_winner(&mut self) {
         // F2: if all remaining rings are occupied (none empty), award them to the
         // current player as an isolated group before checking win conditions.
-        let no_empty_rings = !self.rings.iter().any(|r| *r == Ring::Empty);
-        let marbles_on_board = self.rings.iter().any(|r| matches!(r, Ring::Occupied(_)));
+        let no_empty_rings = !self.rings.values().any(|r| *r == Ring::Empty);
+        let marbles_on_board = self.rings.values().any(|r| matches!(r, Ring::Occupied(_)));
         if no_empty_rings && marbles_on_board {
             self.board_full = true;
             let pi = Self::player_index(self.next_player);
-            for ring in &mut self.rings {
-                if let Ring::Occupied(m) = *ring {
-                    self.captures[pi][m.index()] += 1;
-                    *ring = Ring::Removed;
-                }
+            let to_capture: Vec<(Hex, Marble)> = self
+                .rings
+                .iter()
+                .filter_map(|(&h, &r)| {
+                    if let Ring::Occupied(m) = r {
+                        Some((h, m))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (h, m) in to_capture {
+                self.captures[pi][m.index()] += 1;
+                self.rings.remove(&h);
             }
         }
 
@@ -746,7 +590,7 @@ impl ZertzBoard {
         // If no marbles remain on the board and supply is empty, all marbles are
         // in captures — someone must already have won above.
         let supply_empty = self.supply.iter().all(|&s| s == 0);
-        let marbles_on_board = self.rings.iter().any(|r| matches!(r, Ring::Occupied(_)));
+        let marbles_on_board = self.rings.values().any(|r| matches!(r, Ring::Occupied(_)));
         debug_assert!(
             marbles_on_board || !supply_empty,
             "all marbles distributed but no winner detected\n  supply={:?}\n  captures A={:?}\n  captures B={:?}",
@@ -777,7 +621,7 @@ impl ZertzBoard {
         &self.supply
     }
 
-    pub fn rings(&self) -> &[Ring] {
+    pub fn rings(&self) -> &BTreeMap<Hex, Ring> {
         &self.rings
     }
 
@@ -785,7 +629,7 @@ impl ZertzBoard {
     /// where repetition detection is not needed.
     pub fn clone_light(&self) -> Self {
         ZertzBoard {
-            rings: self.rings,
+            rings: self.rings.clone(),
             supply: self.supply,
             captures: self.captures,
             next_player: self.next_player,
@@ -811,31 +655,32 @@ impl ZertzBoard {
                 remove,
             } => {
                 self.take_marble(color)?;
-                self.rings[place_at as usize] = Ring::Occupied(color);
-                self.rings[remove as usize] = Ring::Removed;
+                self.rings.insert(place_at, Ring::Occupied(color));
+                self.rings.remove(&remove);
                 self.resolve_isolation();
             }
             ZertzMove::PlaceOnly { color, place_at } => {
                 self.take_marble(color)?;
-                self.rings[place_at as usize] = Ring::Occupied(color);
+                self.rings.insert(place_at, Ring::Occupied(color));
                 self.resolve_isolation();
             }
             ZertzMove::Capture { jumps, len } => {
                 let pi = Self::player_index(self.next_player);
                 for i in 0..len as usize {
                     let (from, over, to) = jumps[i];
-                    let marble_from = self.rings[from as usize];
-                    let captured = match self.rings[over as usize] {
-                        Ring::Occupied(m) => m,
+                    let marble_from = *self.rings.get(&from).unwrap_or(&Ring::Empty);
+                    let captured = match self.rings.get(&over) {
+                        Some(Ring::Occupied(m)) => *m,
                         _ => {
                             return Err(format!(
-                                "no marble to jump over at position {over} (hop {i})"
+                                "no marble to jump over at position ({},{}) (hop {i})",
+                                over.0, over.1
                             ))
                         }
                     };
-                    self.rings[from as usize] = Ring::Empty;
-                    self.rings[over as usize] = Ring::Empty;
-                    self.rings[to as usize] = marble_from;
+                    self.rings.insert(from, Ring::Empty);
+                    self.rings.insert(over, Ring::Empty);
+                    self.rings.insert(to, marble_from);
                     self.captures[pi][captured.index()] += 1;
                     self.jump_captures[pi][captured.index()] += 1;
                 }
@@ -915,22 +760,22 @@ impl ZertzBoard {
     /// After a ring removal, check if any components became isolated and
     /// award those marbles to the current player.
     fn resolve_isolation(&mut self) {
-        let mut visited = [false; BOARD_SIZE];
-        let mut components: Vec<Vec<usize>> = Vec::new();
+        let mut visited: HashSet<Hex> = HashSet::new();
+        let mut components: Vec<Vec<Hex>> = Vec::new();
 
-        for start in 0..BOARD_SIZE {
-            if self.rings[start] == Ring::Removed || visited[start] {
+        for &pos in self.rings.keys() {
+            if visited.contains(&pos) {
                 continue;
             }
             let mut component = Vec::new();
-            let mut queue = vec![start];
-            visited[start] = true;
-            while let Some(pos) = queue.pop() {
-                component.push(pos);
-                for &n in NEIGHBOURS[pos].iter() {
-                    if n != 255 && !visited[n as usize] && self.rings[n as usize] != Ring::Removed {
-                        visited[n as usize] = true;
-                        queue.push(n as usize);
+            let mut queue = vec![pos];
+            visited.insert(pos);
+            while let Some(cur) = queue.pop() {
+                component.push(cur);
+                for n in hex_neighbors(cur) {
+                    if !visited.contains(&n) && self.rings.contains_key(&n) {
+                        visited.insert(n);
+                        queue.push(n);
                     }
                 }
             }
@@ -948,18 +793,20 @@ impl ZertzBoard {
 
         for comp in &components {
             if comp.len() < largest_size {
-                let has_vacant = comp.iter().any(|&pos| self.rings[pos] == Ring::Empty);
+                let has_vacant = comp
+                    .iter()
+                    .any(|pos| self.rings.get(pos) == Some(&Ring::Empty));
                 if has_vacant {
                     // Isolated group still has empty rings — cannot claim (rule D.2).
                     // Rings and marbles stay on the board.
                     continue;
                 }
                 for &pos in comp {
-                    if let Ring::Occupied(m) = self.rings[pos] {
+                    if let Some(Ring::Occupied(m)) = self.rings.get(&pos) {
                         self.captures[pi][m.index()] += 1;
                         self.isolation_captures[pi][m.index()] += 1;
                     }
-                    self.rings[pos] = Ring::Removed;
+                    self.rings.remove(&pos);
                 }
             }
         }
@@ -973,7 +820,11 @@ impl ZertzBoard {
 
 impl Display for ZertzBoard {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Supply: W={} G={} B={}", self.supply[0], self.supply[1], self.supply[2])?;
+        writeln!(
+            f,
+            "Supply: W={} G={} B={}",
+            self.supply[0], self.supply[1], self.supply[2]
+        )?;
         writeln!(
             f,
             "Player A captures: W={} G={} B={}",
@@ -986,23 +837,30 @@ impl Display for ZertzBoard {
         )?;
         writeln!(f, "Next: {:?}", self.next_player)?;
 
-        let mut idx = 0;
-        for (row_idx, &len) in ROW_LENGTHS.iter().enumerate() {
+        let radius = hex::RADIUS;
+        for ri in 0..7 {
+            let r = ri as i8 - radius;
+            let q_min = (-radius).max(-radius - r);
+            let q_max = radius.min(radius - r);
             // Indent for hex layout.
-            let indent = (3usize).saturating_sub(row_idx).max(row_idx.saturating_sub(3));
+            let indent = (3usize).saturating_sub(ri).max(ri.saturating_sub(3));
             for _ in 0..indent {
                 write!(f, " ")?;
             }
-            for col in 0..len {
-                if col > 0 {
+            let mut first = true;
+            let mut q = q_min;
+            while q <= q_max {
+                if !first {
                     write!(f, " ")?;
                 }
-                match self.rings[idx] {
-                    Ring::Empty => write!(f, ".")?,
-                    Ring::Occupied(m) => write!(f, "{m}")?,
-                    Ring::Removed => write!(f, " ")?,
+                first = false;
+                let h: Hex = (q, r);
+                match self.rings.get(&h) {
+                    Some(Ring::Empty) => write!(f, ".")?,
+                    Some(Ring::Occupied(m)) => write!(f, "{m}")?,
+                    Some(Ring::Removed) | None => write!(f, " ")?,
                 }
-                idx += 1;
+                q += 1;
             }
             writeln!(f)?;
         }

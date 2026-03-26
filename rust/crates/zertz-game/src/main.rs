@@ -1,4 +1,5 @@
 mod board_encoding;
+pub mod hex;
 mod mcts;
 mod move_encoding;
 mod parser;

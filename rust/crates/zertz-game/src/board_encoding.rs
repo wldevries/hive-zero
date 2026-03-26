@@ -14,7 +14,10 @@
 
 use core_game::game::{Game, Player};
 
-use crate::zertz::{BOARD_SIZE, Marble, Ring, ROW_LENGTHS, ZertzBoard};
+use crate::hex::{all_hexes, hex_to_grid};
+use crate::zertz::{Marble, Ring, ZertzBoard};
+
+const BOARD_SIZE: usize = crate::hex::BOARD_SIZE;
 
 pub const GRID_SIZE: usize = 7;
 pub const NUM_CHANNELS: usize = 14;
@@ -24,18 +27,6 @@ const INITIAL_SUPPLY: [f32; 3] = [6.0, 8.0, 10.0];
 
 /// Total marbles for capture normalization.
 const TOTAL_MARBLES: f32 = 24.0;
-
-/// Map cell index (0..37) to (row, col) in the 7x7 grid.
-fn cell_to_grid(cell: usize) -> (usize, usize) {
-    let mut idx = 0;
-    for (row, &len) in ROW_LENGTHS.iter().enumerate() {
-        if cell < idx + len {
-            return (row, cell - idx);
-        }
-        idx += len;
-    }
-    unreachable!("cell index {cell} out of range");
-}
 
 /// Encode a ZertzBoard into flat tensor buffers.
 ///
@@ -56,12 +47,13 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32]) {
         Player::Player2 => (1usize, 0usize),
     };
 
-    // Per-cell channels
-    for cell in 0..BOARD_SIZE {
-        let (row, col) = cell_to_grid(cell);
+    // Per-cell channels: iterate over all hexes on the board
+    for h in all_hexes() {
+        let (row, col) = hex_to_grid(h);
         let base = row * GRID_SIZE + col; // position in grid
 
-        match rings[cell] {
+        let ring = rings.get(&h).copied().unwrap_or(Ring::Removed);
+        match ring {
             Ring::Occupied(Marble::White) => board_out[0 * GRID_SIZE * GRID_SIZE + base] = 1.0,
             Ring::Occupied(Marble::Grey) => board_out[1 * GRID_SIZE * GRID_SIZE + base] = 1.0,
             Ring::Occupied(Marble::Black) => board_out[2 * GRID_SIZE * GRID_SIZE + base] = 1.0,
@@ -89,11 +81,12 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32]) {
     ];
 
     // Fill broadcast channels over all valid cells
-    for cell in 0..BOARD_SIZE {
-        let (row, col) = cell_to_grid(cell);
+    for h in all_hexes() {
+        let (row, col) = hex_to_grid(h);
         let base = row * GRID_SIZE + col;
 
-        if rings[cell] != Ring::Removed {
+        let ring = rings.get(&h).copied().unwrap_or(Ring::Removed);
+        if ring != Ring::Removed {
             board_out[4 * GRID_SIZE * GRID_SIZE + base] = player_val;
             board_out[5 * GRID_SIZE * GRID_SIZE + base] = supply_norm[0];
             board_out[6 * GRID_SIZE * GRID_SIZE + base] = supply_norm[1];
@@ -113,9 +106,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cell_to_grid_bounds() {
-        for cell in 0..BOARD_SIZE {
-            let (row, col) = cell_to_grid(cell);
+    fn test_hex_to_grid_bounds() {
+        for h in all_hexes() {
+            let (row, col) = hex_to_grid(h);
             assert!(row < GRID_SIZE);
             assert!(col < GRID_SIZE);
         }
