@@ -49,38 +49,6 @@ pub fn hex_neighbors(h: Hex) -> [Hex; 6] {
     ]
 }
 
-/// Rotate a direction index (0-5) clockwise by `n` steps.
-/// Direction order: E=0, NE=1, NW=2, W=3, SW=4, SE=5.
-#[inline]
-pub fn rotate_dir(dir: usize, n: u8) -> usize {
-    (dir + n as usize) % 6
-}
-
-/// Mirror a direction index across the E-W axis.
-/// E(0)↔E(0), NE(1)↔SE(5), NW(2)↔SW(4), W(3)↔W(3).
-#[inline]
-pub fn mirror_dir(dir: usize) -> usize {
-    match dir {
-        0 => 0, // E stays E
-        1 => 5, // NE -> SE
-        2 => 4, // NW -> SW
-        3 => 3, // W stays W
-        4 => 2, // SW -> NW
-        5 => 1, // SE -> NE
-        _ => dir,
-    }
-}
-
-/// Apply D6 symmetry transform to a direction index.
-/// sym 0-5: rotate by sym steps. sym 6-11: mirror then rotate by (sym-6) steps.
-#[inline]
-pub fn transform_dir(dir: usize, sym: u8) -> usize {
-    if sym < 6 {
-        rotate_dir(dir, sym)
-    } else {
-        rotate_dir(mirror_dir(dir), sym - 6)
-    }
-}
 
 #[cfg(test)]
 mod tests {

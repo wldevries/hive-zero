@@ -126,15 +126,15 @@ pub fn format_move_uhp(game: &Game, mv: &Move) -> String {
     piece_str
 }
 
-/// Transform the directional part of a UHP move string by a D6 symmetry index (0-11).
+/// Transform the directional part of a UHP move string by a D6 symmetry.
 ///
 /// UHP direction characters map to direction indices:
 ///   suffix '-' = E(0), '/' = NE(1), '\\' = NW(2)
 ///   prefix '-' = W(3), '/' = SW(4), '\\' = SE(5)
 ///
 /// Moves without a direction (first move, beetle stacking, pass) are unchanged.
-pub fn transform_uhp_move(move_str: &str, sym: u8) -> String {
-    if sym == 0 {
+pub fn transform_uhp_move(move_str: &str, sym: core_game::symmetry::D6Symmetry) -> String {
+    if sym == core_game::symmetry::D6Symmetry::default() {
         return move_str.to_string();
     }
 
@@ -178,7 +178,7 @@ pub fn transform_uhp_move(move_str: &str, sym: u8) -> String {
         return move_str.to_string();
     };
 
-    let new_dir = crate::hex::transform_dir(orig_dir, sym);
+    let new_dir = sym.transform_dir(orig_dir);
     let ch = dir_char[new_dir];
     if dir_is_prefix[new_dir] {
         format!("{} {}{}", parts[0], ch, ref_piece_str)
@@ -227,58 +227,63 @@ pub fn play_uhp_unchecked(game: &mut Game, move_str: &str) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core_game::symmetry::D6Symmetry;
+
+    fn sym(index: u8) -> D6Symmetry {
+        D6Symmetry::from_index(index)
+    }
 
     #[test]
     fn test_transform_identity() {
-        assert_eq!(transform_uhp_move("wS1 wQ1-", 0), "wS1 wQ1-");
-        assert_eq!(transform_uhp_move("wQ1", 0), "wQ1");
-        assert_eq!(transform_uhp_move("wB1 wQ1", 0), "wB1 wQ1"); // beetle stack
+        assert_eq!(transform_uhp_move("wS1 wQ1-", sym(0)), "wS1 wQ1-");
+        assert_eq!(transform_uhp_move("wQ1", sym(0)), "wQ1");
+        assert_eq!(transform_uhp_move("wB1 wQ1", sym(0)), "wB1 wQ1"); // beetle stack
     }
 
     #[test]
     fn test_transform_rotate_60() {
         // E(0) -> NE(1): suffix '-' -> suffix '/'
-        assert_eq!(transform_uhp_move("wS1 wQ1-", 1), "wS1 wQ1/");
+        assert_eq!(transform_uhp_move("wS1 wQ1-", sym(1)), "wS1 wQ1/");
         // NE(1) -> NW(2): suffix '/' -> prefix '\\'
-        assert_eq!(transform_uhp_move("wS1 wQ1/", 1), "wS1 \\wQ1");
+        assert_eq!(transform_uhp_move("wS1 wQ1/", sym(1)), "wS1 \\wQ1");
         // W(3) -> SW(4): prefix '-' -> prefix '/'
-        assert_eq!(transform_uhp_move("wS1 -wQ1", 1), "wS1 /wQ1");
+        assert_eq!(transform_uhp_move("wS1 -wQ1", sym(1)), "wS1 /wQ1");
         // SE(5) -> E(0): suffix '\\' -> suffix '-'
-        assert_eq!(transform_uhp_move("wS1 wQ1\\", 1), "wS1 wQ1-");
+        assert_eq!(transform_uhp_move("wS1 wQ1\\", sym(1)), "wS1 wQ1-");
     }
 
     #[test]
     fn test_transform_rotate_180() {
         // E(0) -> W(3): suffix '-' -> prefix '-'
-        assert_eq!(transform_uhp_move("wS1 wQ1-", 3), "wS1 -wQ1");
+        assert_eq!(transform_uhp_move("wS1 wQ1-", sym(3)), "wS1 -wQ1");
         // NE(1) -> SW(4): suffix '/' -> prefix '/'
-        assert_eq!(transform_uhp_move("wS1 wQ1/", 3), "wS1 /wQ1");
+        assert_eq!(transform_uhp_move("wS1 wQ1/", sym(3)), "wS1 /wQ1");
     }
 
     #[test]
     fn test_transform_mirror() {
         // Mirror: E(0)->E(0), NE(1)->SE(5), NW(2)->SW(4), W(3)->W(3), SW(4)->NW(2), SE(5)->NE(1)
-        assert_eq!(transform_uhp_move("wS1 wQ1-", 6), "wS1 wQ1-");   // E stays E
-        assert_eq!(transform_uhp_move("wS1 wQ1/", 6), "wS1 wQ1\\");  // NE(1)->SE(5): suffix'/'->suffix'\\'
-        assert_eq!(transform_uhp_move("wS1 \\wQ1", 6), "wS1 /wQ1");  // NW(2)->SW(4): prefix'\\'->prefix'/'
-        assert_eq!(transform_uhp_move("wS1 -wQ1", 6), "wS1 -wQ1");   // W stays W
-        assert_eq!(transform_uhp_move("wS1 /wQ1", 6), "wS1 \\wQ1");  // SW(4)->NW(2): prefix'/'->prefix'\\'
-        assert_eq!(transform_uhp_move("wS1 wQ1\\", 6), "wS1 wQ1/");  // SE(5)->NE(1): suffix'\\'->suffix'/'
+        assert_eq!(transform_uhp_move("wS1 wQ1-", sym(6)), "wS1 wQ1-");   // E stays E
+        assert_eq!(transform_uhp_move("wS1 wQ1/", sym(6)), "wS1 wQ1\\");  // NE(1)->SE(5): suffix'/'->suffix'\\'
+        assert_eq!(transform_uhp_move("wS1 \\wQ1", sym(6)), "wS1 /wQ1");  // NW(2)->SW(4): prefix'\\'->prefix'/'
+        assert_eq!(transform_uhp_move("wS1 -wQ1", sym(6)), "wS1 -wQ1");   // W stays W
+        assert_eq!(transform_uhp_move("wS1 /wQ1", sym(6)), "wS1 \\wQ1");  // SW(4)->NW(2): prefix'/'->prefix'\\'
+        assert_eq!(transform_uhp_move("wS1 wQ1\\", sym(6)), "wS1 wQ1/");  // SE(5)->NE(1): suffix'\\'->suffix'/'
     }
 
     #[test]
     fn test_transform_no_direction() {
         // First move, pass, beetle stacking — all unchanged
-        assert_eq!(transform_uhp_move("wQ1", 5), "wQ1");
-        assert_eq!(transform_uhp_move("pass", 5), "pass");
-        assert_eq!(transform_uhp_move("wB1 wQ1", 5), "wB1 wQ1");
+        assert_eq!(transform_uhp_move("wQ1", sym(5)), "wQ1");
+        assert_eq!(transform_uhp_move("pass", sym(5)), "pass");
+        assert_eq!(transform_uhp_move("wB1 wQ1", sym(5)), "wB1 wQ1");
     }
 
     #[test]
     fn test_transform_roundtrip_12() {
         // All 12 transforms of the same move should be valid and distinct where expected
         let original = "wS1 wQ1-"; // E
-        let results: Vec<String> = (0..12).map(|s| transform_uhp_move(original, s)).collect();
+        let results: Vec<String> = (0..12).map(|s| transform_uhp_move(original, sym(s))).collect();
         // sym 0 and sym 6 both map E->E
         assert_eq!(results[0], results[6]);
         // sym 3 maps E->W

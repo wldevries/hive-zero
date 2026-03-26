@@ -15,6 +15,7 @@ use core_game::mcts::search::MctsSearch;
 use hive_game::move_encoding::{self, POLICY_SIZE, encode_game_move};
 use hive_game::piece::{Piece, PieceColor, PieceType};
 use core_game::game::GameEngine;
+use core_game::symmetry::Symmetry;
 
 use rand::Rng;
 use rand::distributions::WeightedIndex;
@@ -366,10 +367,10 @@ impl PySelfPlaySession {
         // Opening sequence state: tracks games that have abandoned their sequence early
         let mut opening_done: Vec<bool> = vec![false; num_games];
 
-        // Per-game D6 symmetry for opening book moves (0-11: 6 rotations × 2 mirrors)
-        let opening_syms: Vec<u8> = {
+        // Per-game D6 symmetry for opening book moves
+        let opening_syms: Vec<core_game::symmetry::D6Symmetry> = {
             let mut rng = rand::thread_rng();
-            (0..num_games).map(|_| rng.gen_range(0..12u8)).collect()
+            (0..num_games).map(|_| core_game::symmetry::D6Symmetry::random(&mut rng)).collect()
         };
 
         // Resignation state
