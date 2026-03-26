@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from hive.nn.training import (
-    _HEX_SYM_FNS, _SYM_PERMS, _GRID_CELLS, _NUM_POLICY_CH,
+    _SYM_PERMS, _GRID_CELLS, _NUM_POLICY_CH,
     HiveDataset,
 )
 from hive.encoding.board_encoder import NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE
@@ -21,81 +21,6 @@ def cell(row, col):
 def hex_to_cell(q, r):
     """Axial hex to flat cell index."""
     return cell(r + CENTER, q + CENTER)
-
-
-# --- Group algebra ---
-
-class TestD6Group:
-    """Verify the 12 symmetry functions form the dihedral group D6."""
-
-    @pytest.fixture(params=[(3, -2), (0, 0), (5, 5), (-4, 1)])
-    def point(self, request):
-        return request.param
-
-    def test_r1_order_6(self, point):
-        """60-degree rotation applied 6 times returns to start."""
-        fn = _HEX_SYM_FNS[1]
-        q, r = point
-        for _ in range(6):
-            q, r = fn(q, r)
-        assert (q, r) == point
-
-    def test_r2_order_3(self, point):
-        """120-degree rotation applied 3 times returns to start."""
-        fn = _HEX_SYM_FNS[2]
-        q, r = point
-        for _ in range(3):
-            q, r = fn(q, r)
-        assert (q, r) == point
-
-    def test_r3_order_2(self, point):
-        """180-degree rotation applied 2 times returns to start."""
-        fn = _HEX_SYM_FNS[3]
-        q, r = point
-        for _ in range(2):
-            q, r = fn(q, r)
-        assert (q, r) == point
-
-    def test_reflections_are_involutions(self, point):
-        """Each reflection applied twice returns to start."""
-        q, r = point
-        for i in range(6, 12):
-            fn = _HEX_SYM_FNS[i]
-            q2, r2 = fn(*fn(q, r))
-            assert (q2, r2) == (q, r), f"S{i-6} is not an involution"
-
-    def test_12_distinct_images(self, point):
-        """All 12 symmetries produce distinct results for generic points.
-
-        Points on symmetry axes (e.g. q=r) have smaller orbits — skip those.
-        """
-        q, r = point
-        if q == 0 and r == 0:
-            pytest.skip("origin is fixed by all symmetries")
-        results = set()
-        for fn in _HEX_SYM_FNS:
-            results.add(fn(q, r))
-        # Points on a symmetry axis have orbit size 6 instead of 12
-        assert len(results) in (6, 12)
-        if q != r and q != -r and r != 0 and q != 0 and q + r != 0:
-            assert len(results) == 12, f"Generic point {point} should have full orbit"
-
-    def test_identity_is_identity(self, point):
-        assert _HEX_SYM_FNS[0](*point) == point
-
-    def test_r1_compose_r1_equals_r2(self, point):
-        """R1 . R1 = R2 (60 + 60 = 120)."""
-        r1 = _HEX_SYM_FNS[1]
-        r2 = _HEX_SYM_FNS[2]
-        q, r = r1(*r1(*point))
-        assert (q, r) == r2(*point)
-
-    def test_r1_compose_r5_equals_identity(self, point):
-        """R1 . R5 = identity (60 + 300 = 360)."""
-        r1 = _HEX_SYM_FNS[1]
-        r5 = _HEX_SYM_FNS[5]
-        q, r = r1(*r5(*point))
-        assert (q, r) == point
 
 
 # --- Permutation tables ---

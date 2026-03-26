@@ -897,6 +897,36 @@ impl PyBatchMCTS {
     }
 }
 
+/// Compute the 12 D6 symmetry gather-permutation tables for a grid_size x grid_size board.
+///
+/// Returns a list of 12 numpy arrays, each of shape (grid_size*grid_size,).
+/// perm[output_cell] = input_cell, or grid_size*grid_size (sentinel for out-of-bounds → zero).
+#[pyfunction]
+fn d6_grid_permutations<'py>(py: Python<'py>, grid_size: usize) -> Vec<Bound<'py, PyArray1<i64>>> {
+    use core_game::symmetry::{D6Symmetry, Symmetry};
+
+    let center = grid_size as i32 / 2;
+    let num_cells = grid_size * grid_size;
+
+    D6Symmetry::all().iter().map(|sym| {
+        let mut perm = vec![num_cells as i64; num_cells];
+        for row in 0..grid_size {
+            for col in 0..grid_size {
+                let q = col as i32 - center;
+                let r = row as i32 - center;
+                let (q2, r2) = sym.transform_hex(q, r);
+                let nr = r2 + center;
+                let nc = q2 + center;
+                if nr >= 0 && nr < grid_size as i32 && nc >= 0 && nc < grid_size as i32 {
+                    perm[nr as usize * grid_size + nc as usize] = (row * grid_size + col) as i64;
+                }
+            }
+        }
+        let arr = numpy::ndarray::Array1::from(perm);
+        PyArray1::from_owned_array_bound(py, arr)
+    }).collect()
+}
+
 /// Parse SGF content and return list of UHP move strings.
 #[pyfunction]
 fn parse_sgf_moves(content: &str) -> PyResult<Vec<String>> {
@@ -918,5 +948,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMCTS>()?;
     m.add_class::<PyBatchMCTS>()?;
     m.add_function(wrap_pyfunction!(parse_sgf_moves, m)?)?;
+    m.add_function(wrap_pyfunction!(d6_grid_permutations, m)?)?;
     Ok(())
 }

@@ -16,47 +16,17 @@ from ..encoding.move_encoder import POLICY_SIZE
 
 # ---------------------------------------------------------------------------
 # Hex D6 symmetry: 6 rotations + 6 reflections in axial coordinates (q, r).
-# Precompute gather permutations for the 23x23 grid so augmentation in
-# __getitem__ is just a numpy fancy-index.
+# Gather permutations for the 23x23 grid computed in Rust (D6Symmetry) so
+# augmentation in __getitem__ is just a numpy fancy-index.
 # ---------------------------------------------------------------------------
 _GRID_CELLS = GRID_SIZE * GRID_SIZE
 _NUM_POLICY_CH = POLICY_SIZE // _GRID_CELLS  # 11
 
-_HEX_SYM_FNS = [
-    lambda q, r: (q, r),          # R0: identity
-    lambda q, r: (-r, q + r),     # R1: 60°
-    lambda q, r: (-q - r, q),     # R2: 120°
-    lambda q, r: (-q, -r),        # R3: 180°
-    lambda q, r: (r, -q - r),     # R4: 240°
-    lambda q, r: (q + r, -q),     # R5: 300°
-    lambda q, r: (-q, q + r),     # S0
-    lambda q, r: (r, q),          # S1
-    lambda q, r: (q + r, -r),     # S2
-    lambda q, r: (q, -q - r),     # S3
-    lambda q, r: (-r, -q),        # S4
-    lambda q, r: (-q - r, r),     # S5
-]
+def _load_sym_perms():
+    from hive_engine import d6_grid_permutations
+    return [np.array(p) for p in d6_grid_permutations(GRID_SIZE)]
 
-def _precompute_sym_perms():
-    """Build gather permutation for each D6 symmetry.
-
-    perm[output_cell] = input_cell, or _GRID_CELLS (sentinel → zero).
-    """
-    center = GRID_SIZE // 2
-    perms = []
-    for fn in _HEX_SYM_FNS:
-        perm = np.full(_GRID_CELLS, _GRID_CELLS, dtype=np.int64)
-        for row in range(GRID_SIZE):
-            for col in range(GRID_SIZE):
-                q, r = col - center, row - center
-                q2, r2 = fn(q, r)
-                nr, nc = r2 + center, q2 + center
-                if 0 <= nr < GRID_SIZE and 0 <= nc < GRID_SIZE:
-                    perm[nr * GRID_SIZE + nc] = row * GRID_SIZE + col
-        perms.append(perm)
-    return perms
-
-_SYM_PERMS = _precompute_sym_perms()
+_SYM_PERMS = _load_sym_perms()
 
 
 class HiveDataset(Dataset):
