@@ -491,7 +491,7 @@ impl GameTrait for Game {
     type Move = Move;
     type Symmetry = D6Symmetry;
 
-    fn current_player(&self) -> Player {
+    fn next_player(&self) -> Player {
         Game::color_to_player(self.turn_color)
     }
 

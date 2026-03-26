@@ -18,7 +18,7 @@ impl Player {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Outcome {
     Ongoing,
     Draw,
@@ -34,7 +34,7 @@ pub trait Game: Clone + Send {
     type Symmetry: Symmetry;
 
     /// Whose turn is it?
-    fn current_player(&self) -> Player;
+    fn next_player(&self) -> Player;
 
     /// Current game outcome.
     fn outcome(&self) -> Outcome;

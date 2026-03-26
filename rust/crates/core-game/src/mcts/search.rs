@@ -160,7 +160,7 @@ fn expand_with_policy<G: GameEngine>(
     policy: &[f32],
 ) {
     arena.get_mut(node_id).is_expanded = true;
-    let child_turn = game.current_player().opposite();
+    let child_turn = game.next_player().opposite();
 
     let (_mask, indexed_moves) = game.get_legal_move_mask();
     if indexed_moves.is_empty() {
@@ -235,7 +235,7 @@ impl<G: GameEngine> MctsSearch<G> {
     pub fn init(&mut self, game: &G, policy: &[f32]) {
         self.arena.reset();
         self.root_game = Some(game.clone());
-        let root = self.arena.alloc(None, G::pass_move(), 0.0, game.current_player());
+        let root = self.arena.alloc(None, G::pass_move(), 0.0, game.next_player());
         self.root = root;
         let mut game_copy = game.clone();
         expand_with_policy::<G>(&mut self.arena, root, &mut game_copy, policy);

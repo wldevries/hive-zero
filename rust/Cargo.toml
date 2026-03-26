@@ -4,6 +4,7 @@ members = [
     "crates/core-game",
     "crates/hive-game",
     "crates/engine-zero",
+    "crates/zertz-game",
 ]
 
 [workspace.dependencies]
