@@ -7,7 +7,7 @@ with Python only handling NN inference and training.
 from __future__ import annotations
 import numpy as np
 
-from ..encoding.move_encoder import POLICY_SIZE
+from ..encoding.move_encoder import policy_size as compute_policy_size
 
 
 class RustParallelSelfPlay:
@@ -51,12 +51,14 @@ class RustParallelSelfPlay:
         model = self.model
         device = self.device
 
+        ps = compute_policy_size(getattr(model, 'grid_size', 23) if model else 23)
+
         def eval_fn(board_batch, reserve_batch):
             board_4d = np.asarray(board_batch)
             reserves = np.asarray(reserve_batch)
             if model is None:
                 n = board_4d.shape[0]
-                return (np.ones((n, POLICY_SIZE), dtype=np.float32) / POLICY_SIZE,
+                return (np.ones((n, ps), dtype=np.float32) / ps,
                         np.zeros(n, dtype=np.float32))
             # Data arrives as uint16 (raw bf16 bits) from Rust — reinterpret as bfloat16
             bt = torch.from_numpy(board_4d).view(torch.bfloat16).pin_memory().to(device, non_blocking=True)
@@ -77,6 +79,7 @@ class RustParallelSelfPlay:
         """
         from hive_engine import RustSelfPlaySession
 
+        grid_size = getattr(self.model, 'grid_size', 23) if self.model else 23
         session = RustSelfPlaySession(
             num_games=num_games,
             simulations=self.simulations,
@@ -94,6 +97,7 @@ class RustParallelSelfPlay:
             random_opening_moves_min=self.random_opening_moves[0] if isinstance(self.random_opening_moves, tuple) else self.random_opening_moves,
             random_opening_moves_max=self.random_opening_moves[1] if isinstance(self.random_opening_moves, tuple) else self.random_opening_moves,
             skip_timeout_games=self.skip_timeout_games,
+            grid_size=grid_size,
         )
 
         from tqdm import tqdm

@@ -61,17 +61,28 @@ pub trait Game: Clone + Send {
 pub trait NNGame: Game {
     /// Number of channels in the board tensor encoding.
     const BOARD_CHANNELS: usize;
-    /// Spatial grid dimension (board is GRID_SIZE x GRID_SIZE).
-    const GRID_SIZE: usize;
     /// Size of the reserve/auxiliary input vector.
     const RESERVE_SIZE: usize;
-    /// Total size of the policy output vector.
-    const POLICY_SIZE: usize;
+    /// Number of policy channels (piece types per player).
+    const NUM_POLICY_CHANNELS: usize;
+
+    /// Spatial grid dimension for NN encoding (runtime, may differ from physical board size).
+    fn grid_size(&self) -> usize;
+
+    /// Total size of the board tensor: BOARD_CHANNELS * grid_size * grid_size.
+    fn board_tensor_size(&self) -> usize {
+        Self::BOARD_CHANNELS * self.grid_size() * self.grid_size()
+    }
+
+    /// Total size of the policy output vector: NUM_POLICY_CHANNELS * grid_size * grid_size.
+    fn policy_size(&self) -> usize {
+        Self::NUM_POLICY_CHANNELS * self.grid_size() * self.grid_size()
+    }
 
     /// Encode the board state into a flat tensor and reserve vector.
     fn encode_board(&self, board_out: &mut [f32], reserve_out: &mut [f32]);
 
-    /// Get the legal move mask (POLICY_SIZE) and indexed moves.
+    /// Get the legal move mask (policy_size()) and indexed moves.
     fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(usize, Self::Move)>);
 }
 

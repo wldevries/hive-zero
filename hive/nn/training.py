@@ -11,22 +11,19 @@ from typing import Optional
 from tqdm import tqdm
 
 from .model import HiveNet, create_model, save_model
-from ..encoding.board_encoder import NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE
-from ..encoding.move_encoder import POLICY_SIZE
+from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
+from ..encoding.move_encoder import NUM_POLICY_CHANNELS, policy_size as compute_policy_size
 
 # ---------------------------------------------------------------------------
-# Hex D6 symmetry: 6 rotations + 6 reflections in axial coordinates (q, r).
-# Gather permutations for the 23x23 grid computed in Rust (D6Symmetry) so
-# augmentation in __getitem__ is just a numpy fancy-index.
+# Hex D6 symmetry: lazy-loaded per grid_size.
 # ---------------------------------------------------------------------------
-_GRID_CELLS = GRID_SIZE * GRID_SIZE
-_NUM_POLICY_CH = POLICY_SIZE // _GRID_CELLS  # 11
+_SYM_PERMS_CACHE: dict[int, list] = {}
 
-def _load_sym_perms():
-    from hive_engine import d6_grid_permutations
-    return [np.array(p) for p in d6_grid_permutations(GRID_SIZE)]
-
-_SYM_PERMS = _load_sym_perms()
+def _load_sym_perms(grid_size: int):
+    if grid_size not in _SYM_PERMS_CACHE:
+        from hive_engine import d6_grid_permutations
+        _SYM_PERMS_CACHE[grid_size] = [np.array(p) for p in d6_grid_permutations(grid_size)]
+    return _SYM_PERMS_CACHE[grid_size]
 
 
 class HiveDataset(Dataset):
@@ -36,18 +33,21 @@ class HiveDataset(Dataset):
     and a ring buffer to avoid GC pressure from thousands of individual arrays.
     """
 
-    def __init__(self, max_size: int = 50_000):
+    def __init__(self, max_size: int = 50_000, grid_size: int = DEFAULT_GRID_SIZE):
         """Args:
             max_size: Maximum number of samples to keep.
+            grid_size: Spatial grid dimension for NN encoding.
         """
         self.max_size = max_size
+        self.grid_size = grid_size
+        self._ps = compute_policy_size(grid_size)
         self._count = 0  # total samples added (for ring buffer index)
         self._size = 0   # current number of valid samples
         self.augment_symmetry = False  # set True to apply random D6 augmentation
         # Pre-allocate contiguous arrays
-        self.board_tensors = np.zeros((max_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
+        self.board_tensors = np.zeros((max_size, NUM_CHANNELS, grid_size, grid_size), dtype=np.float32)
         self.reserve_vectors = np.zeros((max_size, RESERVE_SIZE), dtype=np.float32)
-        self.policy_targets = np.zeros((max_size, POLICY_SIZE), dtype=np.float32)
+        self.policy_targets = np.zeros((max_size, self._ps), dtype=np.float32)
         self.value_targets = np.zeros(max_size, dtype=np.float32)
         self.weights = np.ones(max_size, dtype=np.float32)
         self.value_only = np.zeros(max_size, dtype=np.bool_)
@@ -93,7 +93,7 @@ class HiveDataset(Dataset):
                   opp_mobility: np.ndarray | None = None):
         """Bulk insert from contiguous arrays. Much faster than per-sample add."""
         n = board_tensors.shape[0]
-        boards_flat = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
+        boards_flat = board_tensors.reshape(n, NUM_CHANNELS, self.grid_size, self.grid_size)
         for i in range(n):
             idx = self._count % self.max_size
             self.board_tensors[idx] = boards_flat[i]
@@ -126,14 +126,17 @@ class HiveDataset(Dataset):
         if self.augment_symmetry:
             sym = random.randint(0, 11)
             if sym != 0:  # 0 = identity, skip
-                perm = _SYM_PERMS[sym]
-                # Board: (NUM_CHANNELS, 23, 23) → permute spatial cells
-                bf = board.reshape(NUM_CHANNELS, _GRID_CELLS)
+                gs = self.grid_size
+                gc = gs * gs
+                sym_perms = _load_sym_perms(gs)
+                perm = sym_perms[sym]
+                # Board: (NUM_CHANNELS, gs, gs) → permute spatial cells
+                bf = board.reshape(NUM_CHANNELS, gc)
                 padded = np.concatenate([bf, np.zeros((NUM_CHANNELS, 1), dtype=np.float32)], axis=1)
-                board = padded[:, perm].reshape(NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
-                # Policy: (11*23*23,) → (11, 529) → permute → flatten
-                pf = policy.reshape(_NUM_POLICY_CH, _GRID_CELLS)
-                padded_p = np.concatenate([pf, np.zeros((_NUM_POLICY_CH, 1), dtype=np.float32)], axis=1)
+                board = padded[:, perm].reshape(NUM_CHANNELS, gs, gs)
+                # Policy: (11*gs*gs,) → (11, gc) → permute → flatten
+                pf = policy.reshape(NUM_POLICY_CHANNELS, gc)
+                padded_p = np.concatenate([pf, np.zeros((NUM_POLICY_CHANNELS, 1), dtype=np.float32)], axis=1)
                 policy = padded_p[:, perm].reshape(-1)
         else:
             board = board.copy()

@@ -678,11 +678,13 @@ fn run_debug(args: &[String]) {
 
 fn run_mcts(simulations: u32, batch_size: usize) {
     use core_game::mcts::search::MctsSearch;
-    use hive_game::move_encoding::POLICY_SIZE;
+    use core_game::game::NNGame;
+    use hive_game::move_encoding::policy_size;
     use hive_game::uhp::format_move_uhp;
 
     let mut game = Game::new();
-    let uniform_policy = vec![1.0 / POLICY_SIZE as f32; POLICY_SIZE];
+    let ps = game.policy_size();
+    let uniform_policy = vec![1.0 / ps as f32; ps];
     let mut search = MctsSearch::<Game>::new(100_000);
     search.init(&game, &uniform_policy);
 

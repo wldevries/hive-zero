@@ -38,6 +38,8 @@ def main():
                               help="Residual blocks in network")
     train_parser.add_argument("--channels", type=int, default=64,
                               help="Channels in network")
+    train_parser.add_argument("--grid-size", type=int, default=23,
+                              help="NN encoding grid size (must be odd, default 23)")
     train_parser.add_argument("--max-moves", type=int, default=200,
                               help="Max moves per self-play game")
     train_parser.add_argument("--replay-window", type=int, default=8,
@@ -105,6 +107,8 @@ def main():
     pretrain_parser.add_argument("--device", default="cuda")
     pretrain_parser.add_argument("--blocks", type=int, default=6)
     pretrain_parser.add_argument("--channels", type=int, default=64)
+    pretrain_parser.add_argument("--grid-size", type=int, default=23,
+                                 help="NN encoding grid size (must be odd, default 23)")
     pretrain_parser.add_argument("--lr", type=float, default=0.005,
                                  help="Learning rate (default: 0.005)")
     pretrain_parser.add_argument("--epochs", type=int, default=3,
@@ -160,6 +164,7 @@ def main():
         pretrainer = Pretrainer(
             model_path=args.model, device=args.device,
             num_blocks=args.blocks, channels=args.channels, lr=args.lr,
+            grid_size=args.grid_size,
         )
         pretrainer.run(
             games=games, zip_index=zip_index,
@@ -210,7 +215,8 @@ def main():
         from hive.selfplay.selfplay import SelfPlayTrainer
         trainer = SelfPlayTrainer(
             model_path=args.model, device=args.device,
-            num_blocks=args.blocks, channels=args.channels, lr=args.lr
+            num_blocks=args.blocks, channels=args.channels, lr=args.lr,
+            grid_size=args.grid_size,
         )
         eval_config = None
         if args.eval_every > 0:

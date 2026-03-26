@@ -7,12 +7,12 @@ use pyo3::types::PyTuple;
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use rayon::prelude::*;
 
-use hive_game::board::GRID_SIZE;
 use hive_game::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE};
 use hive_game::game::{Game, GameState};
 use hive_game::hex::hex_neighbors;
+use core_game::game::NNGame;
 use core_game::mcts::search::MctsSearch;
-use hive_game::move_encoding::{self, POLICY_SIZE, encode_game_move};
+use hive_game::move_encoding::{self, encode_game_move};
 use hive_game::piece::{Piece, PieceColor, PieceType};
 use core_game::symmetry::Symmetry;
 
@@ -20,7 +20,6 @@ use rand::Rng;
 use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
 
-const BOARD_SIZE: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 const DECISIVE_WEIGHT: f32 = 10.0;
 
 /// Wrapper to send raw pointers across threads (safe when indices are unique).
@@ -138,15 +137,17 @@ struct SelfPlayConfig {
     random_opening_moves_min: u32,
     random_opening_moves_max: u32,
     skip_timeout_games: bool,
+    grid_size: usize,
 }
 
 /// Result of a self-play session, returned to Python.
 #[pyclass(name = "SelfPlayResult")]
 pub struct PySelfPlayResult {
+    grid_size: usize,
     // Contiguous training data
-    board_data: Vec<f32>,   // [total_samples * BOARD_SIZE]
+    board_data: Vec<f32>,   // [total_samples * board_size]
     reserve_data: Vec<f32>, // [total_samples * RESERVE_SIZE]
-    policy_data: Vec<f32>,  // [total_samples * POLICY_SIZE]
+    policy_data: Vec<f32>,  // [total_samples * policy_size]
     value_targets: Vec<f32>,
     weights: Vec<f32>,
     value_only_flags: Vec<bool>,
@@ -194,14 +195,16 @@ impl PySelfPlayResult {
         Bound<'py, PyArray2<f32>>,
     ) {
         let n = self.num_samples;
+        let board_size = NUM_CHANNELS * self.grid_size * self.grid_size;
+        let ps = move_encoding::policy_size(self.grid_size);
         let boards = numpy::ndarray::Array2::from_shape_vec(
-            (n, BOARD_SIZE), self.board_data.clone(),
+            (n, board_size), self.board_data.clone(),
         ).unwrap();
         let reserves = numpy::ndarray::Array2::from_shape_vec(
             (n, RESERVE_SIZE), self.reserve_data.clone(),
         ).unwrap();
         let policies = numpy::ndarray::Array2::from_shape_vec(
-            (n, POLICY_SIZE), self.policy_data.clone(),
+            (n, ps), self.policy_data.clone(),
         ).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
         let weights = numpy::ndarray::Array1::from(self.weights.clone());
@@ -287,6 +290,7 @@ impl PySelfPlaySession {
         random_opening_moves_min = 0,
         random_opening_moves_max = 0,
         skip_timeout_games = false,
+        grid_size = 23,
     ))]
     fn new(
         num_games: usize,
@@ -305,6 +309,7 @@ impl PySelfPlaySession {
         random_opening_moves_min: u32,
         random_opening_moves_max: u32,
         skip_timeout_games: bool,
+        grid_size: usize,
     ) -> Self {
         PySelfPlaySession {
             config: SelfPlayConfig {
@@ -312,6 +317,7 @@ impl PySelfPlaySession {
                 playout_cap_p, fast_cap, c_puct, leaf_batch_size,
                 resign_threshold, resign_moves, resign_min_moves, calibration_frac,
                 random_opening_moves_min, random_opening_moves_max, skip_timeout_games,
+                grid_size,
             },
         }
     }
@@ -331,9 +337,12 @@ impl PySelfPlaySession {
         let cfg = &self.config;
         let num_games = cfg.num_games;
         let use_playout_cap = cfg.playout_cap_p > 0.0;
+        let grid_size = cfg.grid_size;
+        let board_size = NUM_CHANNELS * grid_size * grid_size;
+        let policy_size = move_encoding::policy_size(grid_size);
 
         // --- Initialize state ---
-        let mut games: Vec<Game> = (0..num_games).map(|_| Game::new()).collect();
+        let mut games: Vec<Game> = (0..num_games).map(|_| Game::new_with_grid_size(grid_size)).collect();
         let mut searches: Vec<MctsSearch<Game>> = (0..num_games).map(|_| {
             let mut s = MctsSearch::<Game>::new(100_000);
             s.c_puct = cfg.c_puct;
@@ -468,35 +477,37 @@ impl PySelfPlaySession {
             // --- Encode positions (sequential — per-board work is too small for rayon) ---
             let mut turn_board_offsets: Vec<usize> = Vec::with_capacity(n);
             let mut turn_reserve_offsets: Vec<usize> = Vec::with_capacity(n);
-            let mut flat_boards_bf16 = vec![0u16; n * BOARD_SIZE];
+            let mut flat_boards_bf16 = vec![0u16; n * board_size];
             let mut flat_reserves_bf16 = vec![0u16; n * RESERVE_SIZE];
             for (i, &gi) in mcts_games.iter().enumerate() {
                 // Encode f32 into training buffer
                 let board_off = board_buf.len();
                 let reserve_off = reserve_buf.len();
-                board_buf.resize(board_off + BOARD_SIZE, 0.0);
+                board_buf.resize(board_off + board_size, 0.0);
                 reserve_buf.resize(reserve_off + RESERVE_SIZE, 0.0);
                 board_encoding::encode_board(
                     &games[gi],
-                    &mut board_buf[board_off..board_off + BOARD_SIZE],
+                    &mut board_buf[board_off..board_off + board_size],
                     &mut reserve_buf[reserve_off..reserve_off + RESERVE_SIZE],
+                    grid_size,
                 );
                 turn_board_offsets.push(board_off);
                 turn_reserve_offsets.push(reserve_off);
                 // Encode bf16 for GPU eval
                 board_encoding::encode_board_bf16(
                     &games[gi],
-                    &mut flat_boards_bf16[i * BOARD_SIZE..(i + 1) * BOARD_SIZE],
+                    &mut flat_boards_bf16[i * board_size..(i + 1) * board_size],
                     &mut flat_reserves_bf16[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
+                    grid_size,
                 );
             }
 
             // --- GPU: initial policy eval (bf16) ---
             let board_arr = numpy::ndarray::Array2::from_shape_vec(
-                (n, BOARD_SIZE), flat_boards_bf16,
+                (n, board_size), flat_boards_bf16,
             ).unwrap();
             let board_np = PyArray2::from_owned_array_bound(py, board_arr);
-            let board_4d = board_np.reshape([n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+            let board_4d = board_np.reshape([n, NUM_CHANNELS, grid_size, grid_size]).unwrap();
             let reserve_arr = numpy::ndarray::Array2::from_shape_vec(
                 (n, RESERVE_SIZE), flat_reserves_bf16,
             ).unwrap();
@@ -521,7 +532,7 @@ impl PySelfPlaySession {
                     let search = unsafe { &mut *sp.0 };
                     search.c_puct = c_puct;
                     search.use_forced_playouts = true;
-                    let policy = &init_policies[i * POLICY_SIZE..(i + 1) * POLICY_SIZE];
+                    let policy = &init_policies[i * policy_size..(i + 1) * policy_size];
                     search.init(&game_clones[i], policy);
                 });
             }
@@ -570,6 +581,7 @@ impl PySelfPlaySession {
                     &sim_caps,
                     cfg.leaf_batch_size,
                     eval_fn,
+                    grid_size,
                 );
             }
 
@@ -642,11 +654,11 @@ impl PySelfPlaySession {
                 }
 
                 // Build policy vector
-                let mut policy_vector = vec![0.0f32; POLICY_SIZE];
+                let mut policy_vector = vec![0.0f32; policy_size];
                 for (j, (mv, _)) in dist.iter().enumerate() {
                     if mv.piece.is_some() {
-                        if let Some(idx) = encode_game_move(mv) {
-                            if idx < POLICY_SIZE {
+                        if let Some(idx) = encode_game_move(mv, grid_size) {
+                            if idx < policy_size {
                                 policy_vector[idx] = probs[j];
                             }
                         }
@@ -771,7 +783,7 @@ impl PySelfPlaySession {
             let policy_only = !decisive && outcome_w == 0.0;
 
             for record in &histories[gi] {
-                let board = &board_buf[record.board_offset..record.board_offset + BOARD_SIZE];
+                let board = &board_buf[record.board_offset..record.board_offset + board_size];
                 let reserve = &reserve_buf[record.reserve_offset..record.reserve_offset + RESERVE_SIZE];
                 let value = match record.turn_color {
                     PieceColor::White => outcome_w,
@@ -811,6 +823,7 @@ impl PySelfPlaySession {
         }
 
         PySelfPlayResult {
+            grid_size,
             board_data: result_board_data,
             reserve_data: result_reserve_data,
             policy_data: result_policy_data,
@@ -852,7 +865,10 @@ fn run_simulations_internal(
     per_game_caps: &[usize],    // cap for each entry in `searching`
     rounds_per_flush: usize,    // GPU call every N rounds; 1 = flush every round
     eval_fn: &Bound<'_, PyAny>,
+    grid_size: usize,
 ) {
+    let board_size = NUM_CHANNELS * grid_size * grid_size;
+    let policy_size = move_encoding::policy_size(grid_size);
     let mut sims_done: Vec<usize> = vec![0; searching.len()];
     let mut still_searching: Vec<usize> = (0..searching.len()).collect();
     let mut round: usize = 0;
@@ -864,7 +880,7 @@ fn run_simulations_internal(
     let mut pending_reserves: Vec<u16> = Vec::new();
 
     // Reusable encoding buffer to avoid per-leaf allocation
-    let mut enc_board = vec![0u16; BOARD_SIZE];
+    let mut enc_board = vec![0u16; board_size];
     let mut enc_reserve = vec![0u16; RESERVE_SIZE];
 
     while !still_searching.is_empty() || !pending_leaves.is_empty() {
@@ -876,7 +892,7 @@ fn run_simulations_internal(
                 let leaves = search.select_leaves(1);
                 sims_done[si] += leaves.len().max(1);
                 for (_, game) in &leaves {
-                    board_encoding::encode_board_bf16(game, &mut enc_board, &mut enc_reserve);
+                    board_encoding::encode_board_bf16(game, &mut enc_board, &mut enc_reserve, grid_size);
                     pending_gi.push(gi);
                     pending_boards.extend_from_slice(&enc_board);
                     pending_reserves.extend_from_slice(&enc_reserve);
@@ -900,10 +916,10 @@ fn run_simulations_internal(
             let reserves_data = std::mem::take(&mut pending_reserves);
 
             let board_arr = numpy::ndarray::Array2::from_shape_vec(
-                (total, BOARD_SIZE), boards_data,
+                (total, board_size), boards_data,
             ).unwrap();
             let board_np = PyArray2::from_owned_array_bound(py, board_arr);
-            let board_4d = board_np.reshape([total, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+            let board_4d = board_np.reshape([total, NUM_CHANNELS, grid_size, grid_size]).unwrap();
             let reserve_arr = numpy::ndarray::Array2::from_shape_vec(
                 (total, RESERVE_SIZE), reserves_data,
             ).unwrap();
@@ -925,7 +941,7 @@ fn run_simulations_internal(
             for (i, &gi) in pending_gi.iter().enumerate() {
                 let entry = gi_groups.entry(gi).or_default();
                 entry.0.push(drained_leaves[i].clone());
-                entry.1.push(policy_data[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].to_vec());
+                entry.1.push(policy_data[i * policy_size..(i + 1) * policy_size].to_vec());
                 entry.2.push(value_data[i]);
             }
 

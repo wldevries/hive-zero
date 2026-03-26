@@ -5,8 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..encoding.board_encoder import NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE
-from ..encoding.move_encoder import POLICY_SIZE
+from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
+from ..encoding.move_encoder import NUM_POLICY_CHANNELS, policy_size
 
 
 class ResBlock(nn.Module):
@@ -39,8 +39,14 @@ class HiveNet(nn.Module):
           (my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility)
     """
 
-    def __init__(self, num_blocks: int = 10, channels: int = 128):
+    def __init__(self, num_blocks: int = 10, channels: int = 128,
+                 grid_size: int = DEFAULT_GRID_SIZE):
         super().__init__()
+        if grid_size > DEFAULT_GRID_SIZE:
+            raise ValueError(f"grid_size {grid_size} exceeds max board size {DEFAULT_GRID_SIZE}")
+        if grid_size % 2 == 0:
+            raise ValueError(f"grid_size must be odd, got {grid_size}")
+        self.grid_size = grid_size
 
         # Input convolution
         self.input_conv = nn.Conv2d(NUM_CHANNELS, channels, 3, padding=1, bias=False)
@@ -53,7 +59,7 @@ class HiveNet(nn.Module):
         # Outputs per-cell logits: one channel per piece (11 pieces per player).
         # Channel = piece index (0=Queen, 1-2=Spider, 3-4=Beetle, 5-7=Grasshopper, 8-10=Ant).
         # Covers both placement and movement — no separate direction channels.
-        self.num_policy_channels = 11
+        self.num_policy_channels = NUM_POLICY_CHANNELS
         self.policy_conv = nn.Conv2d(channels, channels, 1, bias=False)
         self.policy_bn = nn.BatchNorm2d(channels)
         self.policy_out = nn.Conv2d(channels, self.num_policy_channels, 1)
@@ -61,7 +67,7 @@ class HiveNet(nn.Module):
         # Value head
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(1)
-        value_input_size = GRID_SIZE * GRID_SIZE + RESERVE_SIZE
+        value_input_size = grid_size * grid_size + RESERVE_SIZE
         self.value_fc1 = nn.Linear(value_input_size, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
@@ -112,9 +118,10 @@ class HiveNet(nn.Module):
         return policy_logits, value, aux
 
 
-def create_model(num_blocks: int = 10, channels: int = 128) -> HiveNet:
+def create_model(num_blocks: int = 10, channels: int = 128,
+                 grid_size: int = DEFAULT_GRID_SIZE) -> HiveNet:
     """Create a new HiveNet model."""
-    return HiveNet(num_blocks=num_blocks, channels=channels)
+    return HiveNet(num_blocks=num_blocks, channels=channels, grid_size=grid_size)
 
 
 def save_checkpoint(model: HiveNet, path: str, iteration: int = 0,
@@ -124,6 +131,7 @@ def save_checkpoint(model: HiveNet, path: str, iteration: int = 0,
         "model_state_dict": model.state_dict(),
         "num_blocks": model.res_blocks.__len__(),
         "channels": model.input_conv.out_channels,
+        "grid_size": model.grid_size,
         "iteration": iteration,
         "metadata": metadata or {},
     }
@@ -135,7 +143,8 @@ def load_checkpoint(path: str) -> tuple[HiveNet, dict]:
     checkpoint = torch.load(path, weights_only=False)
     num_blocks = checkpoint.get("num_blocks", 10)
     channels = checkpoint.get("channels", 128)
-    model = HiveNet(num_blocks=num_blocks, channels=channels)
+    grid_size = checkpoint.get("grid_size", DEFAULT_GRID_SIZE)
+    model = HiveNet(num_blocks=num_blocks, channels=channels, grid_size=grid_size)
 
     # Support both checkpoint format and raw state_dict
     state_dict = checkpoint.get("model_state_dict", checkpoint)

@@ -4,12 +4,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 
-use hive_game::board::GRID_SIZE;
 use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
 use hive_game::game::{self, Game};
+use core_game::game::NNGame;
 use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::MctsSearch;
-use hive_game::move_encoding::{self, POLICY_SIZE};
+use hive_game::move_encoding;
 use hive_game::piece::{Piece, PieceColor, PieceType};
 
 /// Create a 1D numpy array from a slice.
@@ -39,14 +39,22 @@ pub struct PyGame {
 #[pymethods]
 impl PyGame {
     #[new]
-    #[pyo3(signature = (tournament_mode=false))]
-    fn new(tournament_mode: bool) -> Self {
+    #[pyo3(signature = (tournament_mode=false, grid_size=23))]
+    fn new(tournament_mode: bool, grid_size: usize) -> PyResult<Self> {
+        if grid_size % 2 == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("grid_size must be odd, got {grid_size}")));
+        }
+        if grid_size > hive_game::board::GRID_SIZE {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("grid_size {grid_size} exceeds max board size {}", hive_game::board::GRID_SIZE)));
+        }
         let game = if tournament_mode {
-            game::Game::new_tournament()
+            game::Game::new_tournament_with_grid_size(grid_size)
         } else {
-            game::Game::new()
+            game::Game::new_with_grid_size(grid_size)
         };
-        PyGame { game }
+        Ok(PyGame { game })
     }
 
     /// Deep copy.
@@ -120,22 +128,30 @@ impl PyGame {
     }
 
     /// Encode board state as numpy arrays.
-    /// Returns (board_tensor[23,23,23], reserve_vector[10]).
+    /// Returns (board_tensor[C,H,W], reserve_vector[10]).
     fn encode_board<'py>(&self, py: Python<'py>) -> (Bound<'py, PyArray3<f32>>, Bound<'py, PyArray1<f32>>) {
-        let mut board_data = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
+        let gs = self.game.nn_grid_size;
+        let mut board_data = vec![0.0f32; NUM_CHANNELS * gs * gs];
         let mut reserve_data = vec![0.0f32; RESERVE_SIZE];
-        hive_game::board_encoding::encode_board(&self.game, &mut board_data, &mut reserve_data);
+        hive_game::board_encoding::encode_board(&self.game, &mut board_data, &mut reserve_data, gs);
 
-        let board_tensor = make_array3(py, &board_data, NUM_CHANNELS, GRID_SIZE, GRID_SIZE);
+        let board_tensor = make_array3(py, &board_data, NUM_CHANNELS, gs, gs);
         let reserve_vec = make_array1(py, &reserve_data);
         (board_tensor, reserve_vec)
+    }
+
+    /// Get the NN encoding grid size.
+    #[getter]
+    fn grid_size(&self) -> usize {
+        self.game.nn_grid_size
     }
 
     /// Get legal move mask and indexed moves.
     fn get_legal_move_mask<'py>(
         &mut self, py: Python<'py>
     ) -> (Bound<'py, PyArray1<f32>>, Vec<(usize, String, Option<(i8, i8)>, (i8, i8))>) {
-        let (mask, indexed_moves) = move_encoding::get_legal_move_mask(&mut self.game);
+        let gs = self.game.nn_grid_size;
+        let (mask, indexed_moves) = move_encoding::get_legal_move_mask(&mut self.game, gs);
         let mask_array = make_array1(py, &mask);
         let moves_list: Vec<_> = indexed_moves.iter().map(|(idx, mv)| {
             let piece_str = mv.piece.unwrap().to_uhp_string();
@@ -148,7 +164,7 @@ impl PyGame {
     #[pyo3(signature = (piece_str, from_pos, to_pos))]
     fn encode_move(&self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) -> i64 {
         let piece = Piece::from_str(piece_str).expect("invalid piece string");
-        match move_encoding::encode_move_checked(piece, from_pos, to_pos) {
+        match move_encoding::encode_move_checked(piece, from_pos, to_pos, self.game.nn_grid_size) {
             Some(idx) => idx as i64,
             None => -1,
         }
@@ -377,7 +393,11 @@ impl PyMCTS {
         &self, py: Python<'py>,
     ) -> (Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>) {
         let n = self.search.stashed_leaves.len();
-        let board_size = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
+        // Use the grid_size from the first leaf game (all should share the same)
+        let gs = self.search.stashed_leaves.first()
+            .map(|(_, g)| g.nn_grid_size)
+            .unwrap_or(hive_game::board::GRID_SIZE);
+        let board_size = NUM_CHANNELS * gs * gs;
         let mut all_boards = vec![0.0f32; n * board_size];
         let mut all_reserves = vec![0.0f32; n * RESERVE_SIZE];
 
@@ -386,11 +406,20 @@ impl PyMCTS {
                 game,
                 &mut all_boards[i * board_size..(i + 1) * board_size],
                 &mut all_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
+                gs,
             );
         }
 
         (make_array2(py, &all_boards, n, board_size),
          make_array2(py, &all_reserves, n, RESERVE_SIZE))
+    }
+
+    /// Get the policy size for this MCTS instance.
+    fn policy_size(&self) -> usize {
+        // Derive from stashed leaves or fall back to default
+        self.search.stashed_leaves.first()
+            .map(|(_, g)| g.policy_size())
+            .unwrap_or(move_encoding::policy_size(hive_game::board::GRID_SIZE))
     }
 
     /// Expand leaves with NN output and backpropagate values.
@@ -405,8 +434,11 @@ impl PyMCTS {
         let mut leaves = std::mem::take(&mut self.search.stashed_leaves);
         let n = leaves.len();
 
+        let ps = leaves.first()
+            .map(|(_, g)| g.policy_size())
+            .unwrap_or(move_encoding::policy_size(hive_game::board::GRID_SIZE));
         let policies_vec: Vec<Vec<f32>> = (0..n).map(|i| {
-            policy_data[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].to_vec()
+            policy_data[i * ps..(i + 1) * ps].to_vec()
         }).collect();
         let values_vec: Vec<f32> = value_data[..n].to_vec();
 
@@ -430,12 +462,14 @@ impl PyMCTS {
 
 impl PyMCTS {
     fn eval_single(&self, py: Python<'_>, game: &game::Game, eval_fn: &Bound<'_, PyAny>) -> Vec<f32> {
-        let mut board_data = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
+        let gs = game.nn_grid_size;
+        let board_size = NUM_CHANNELS * gs * gs;
+        let mut board_data = vec![0.0f32; board_size];
         let mut reserve_data = vec![0.0f32; RESERVE_SIZE];
-        hive_game::board_encoding::encode_board(game, &mut board_data, &mut reserve_data);
+        hive_game::board_encoding::encode_board(game, &mut board_data, &mut reserve_data, gs);
 
-        let board_arr = make_array2(py, &board_data, 1, NUM_CHANNELS * GRID_SIZE * GRID_SIZE);
-        let board_4d = board_arr.reshape([1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+        let board_arr = make_array2(py, &board_data, 1, board_size);
+        let board_4d = board_arr.reshape([1, NUM_CHANNELS, gs, gs]).unwrap();
         let reserve_arr = make_array2(py, &reserve_data, 1, RESERVE_SIZE);
 
         let result = eval_fn.call1((board_4d, reserve_arr)).expect("eval_fn call failed");
@@ -452,7 +486,9 @@ impl PyMCTS {
         eval_fn: &Bound<'_, PyAny>,
     ) -> (Vec<Vec<f32>>, Vec<f32>) {
         let n = leaves.len();
-        let board_size = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
+        let gs = leaves.first().map(|(_, g)| g.nn_grid_size).unwrap_or(hive_game::board::GRID_SIZE);
+        let board_size = NUM_CHANNELS * gs * gs;
+        let ps = move_encoding::policy_size(gs);
         let mut all_boards = vec![0.0f32; n * board_size];
         let mut all_reserves = vec![0.0f32; n * RESERVE_SIZE];
 
@@ -461,11 +497,12 @@ impl PyMCTS {
                 game,
                 &mut all_boards[i * board_size..(i + 1) * board_size],
                 &mut all_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
+                gs,
             );
         }
 
         let board_arr = make_array2(py, &all_boards, n, board_size);
-        let board_4d = board_arr.reshape([n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+        let board_4d = board_arr.reshape([n, NUM_CHANNELS, gs, gs]).unwrap();
         let reserve_arr = make_array2(py, &all_reserves, n, RESERVE_SIZE);
 
         let result = eval_fn.call1((board_4d, reserve_arr)).expect("eval_fn call failed");
@@ -475,7 +512,7 @@ impl PyMCTS {
         let value_arr: PyReadonlyArray1<f32> = tuple.get_item(1).unwrap().extract().unwrap();
 
         let policies: Vec<Vec<f32>> = (0..n).map(|i| {
-            policy_arr.as_slice().unwrap()[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].to_vec()
+            policy_arr.as_slice().unwrap()[i * ps..(i + 1) * ps].to_vec()
         }).collect();
         let values: Vec<f32> = value_arr.as_slice().unwrap().to_vec();
 
@@ -491,13 +528,14 @@ pub struct PyBatchMCTS {
     leaf_batch_size: usize,
     use_forced_playouts: bool,
     last_init_values: Vec<f32>,
+    grid_size: usize,
 }
 
 #[pymethods]
 impl PyBatchMCTS {
     #[new]
-    #[pyo3(signature = (num_games, c_puct=1.5, leaf_batch_size=16, capacity=100000, use_forced_playouts=false))]
-    fn new(num_games: usize, c_puct: f32, leaf_batch_size: usize, capacity: usize, use_forced_playouts: bool) -> Self {
+    #[pyo3(signature = (num_games, c_puct=1.5, leaf_batch_size=16, capacity=100000, use_forced_playouts=false, grid_size=23))]
+    fn new(num_games: usize, c_puct: f32, leaf_batch_size: usize, capacity: usize, use_forced_playouts: bool, grid_size: usize) -> Self {
         let searches: Vec<MctsSearch<Game>> = (0..num_games)
             .map(|_| {
                 let mut s = MctsSearch::<Game>::new(capacity);
@@ -506,15 +544,16 @@ impl PyBatchMCTS {
                 s
             })
             .collect();
-        PyBatchMCTS { searches, c_puct, leaf_batch_size, use_forced_playouts, last_init_values: Vec::new() }
+        PyBatchMCTS { searches, c_puct, leaf_batch_size, use_forced_playouts, last_init_values: Vec::new(), grid_size }
     }
 
     /// Initialize MCTS trees for all games with pre-computed policies.
-    /// policies shape: [num_games, POLICY_SIZE]
+    /// policies shape: [num_games, policy_size]
     fn init_searches(&mut self, games: Vec<PyRef<PyGame>>, policies: PyReadonlyArray2<f32>) {
         use rayon::prelude::*;
 
         let policy_data = policies.as_slice().unwrap();
+        let ps = move_encoding::policy_size(self.grid_size);
         // Collect game clones first (can't send PyRef across threads)
         let game_clones: Vec<Game> = games.iter().map(|g| g.game.clone()).collect();
 
@@ -522,7 +561,7 @@ impl PyBatchMCTS {
         self.searches.par_iter_mut().enumerate().for_each(|(i, search)| {
             search.c_puct = self.c_puct;
             search.use_forced_playouts = use_forced;
-            let policy = &policy_data[i * POLICY_SIZE..(i + 1) * POLICY_SIZE];
+            let policy = &policy_data[i * ps..(i + 1) * ps];
             search.init(&game_clones[i], policy);
         });
     }
@@ -543,7 +582,8 @@ impl PyBatchMCTS {
     ) -> (Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>, Vec<usize>) {
         use rayon::prelude::*;
 
-        let board_size = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
+        let gs = self.grid_size;
+        let board_size = NUM_CHANNELS * gs * gs;
         let leaf_batch_size = self.leaf_batch_size;
         let searches = &mut self.searches;
 
@@ -569,6 +609,7 @@ impl PyBatchMCTS {
                         game,
                         &mut boards[j * board_size..(j + 1) * board_size],
                         &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
+                        gs,
                     );
                 }
 
@@ -609,7 +650,7 @@ impl PyBatchMCTS {
     }
 
     /// Expand leaves and backpropagate NN results, in parallel across games.
-    /// policies shape: [total_leaves, POLICY_SIZE], values shape: [total_leaves]
+    /// policies shape: [total_leaves, policy_size], values shape: [total_leaves]
     /// active_indices + game_leaf_counts must match what select_and_encode returned.
     fn expand_and_backprop_all(
         &mut self,
@@ -620,6 +661,7 @@ impl PyBatchMCTS {
     ) {
         use rayon::prelude::*;
 
+        let ps = move_encoding::policy_size(self.grid_size);
         let policy_data = policies.as_slice().unwrap();
         let value_data = values.as_slice().unwrap();
 
@@ -647,7 +689,7 @@ impl PyBatchMCTS {
             let mut leaves = std::mem::take(&mut search.stashed_leaves);
 
             let policies_vec: Vec<Vec<f32>> = (0..n).map(|j| {
-                policy_data[(off + j) * POLICY_SIZE..(off + j + 1) * POLICY_SIZE].to_vec()
+                policy_data[(off + j) * ps..(off + j + 1) * ps].to_vec()
             }).collect();
             let values_vec: Vec<f32> = value_data[off..off + n].to_vec();
 
@@ -677,7 +719,9 @@ impl PyBatchMCTS {
     ) {
         use rayon::prelude::*;
 
-        let board_size = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
+        let gs = self.grid_size;
+        let board_size = NUM_CHANNELS * gs * gs;
+        let ps = move_encoding::policy_size(gs);
         let leaf_batch_size = self.leaf_batch_size;
         let mut sims_done: Vec<usize> = vec![0; active_indices.len()];
         let mut searching: Vec<usize> = (0..active_indices.len()).collect();
@@ -711,6 +755,7 @@ impl PyBatchMCTS {
                             game,
                             &mut boards[j * board_size..(j + 1) * board_size],
                             &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
+                            gs,
                         );
                     }
                     search.stashed_leaves = leaves;
@@ -749,7 +794,7 @@ impl PyBatchMCTS {
 
             // --- GPU: single Python callback ---
             let board_arr = make_array2(py, &all_boards, total_leaves, board_size);
-            let board_4d = board_arr.reshape([total_leaves, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+            let board_4d = board_arr.reshape([total_leaves, NUM_CHANNELS, gs, gs]).unwrap();
             let reserve_arr = make_array2(py, &all_reserves, total_leaves, RESERVE_SIZE);
 
             let result = eval_fn.call1((board_4d, reserve_arr)).expect("eval_fn call failed");
@@ -779,7 +824,7 @@ impl PyBatchMCTS {
                 let n = leaf_counts[i];
                 let mut leaves = std::mem::take(&mut search.stashed_leaves);
                 let policies_vec: Vec<Vec<f32>> = (0..n).map(|j| {
-                    policy_data[(off + j) * POLICY_SIZE..(off + j + 1) * POLICY_SIZE].to_vec()
+                    policy_data[(off + j) * ps..(off + j + 1) * ps].to_vec()
                 }).collect();
                 let values_vec: Vec<f32> = value_data[off..off + n].to_vec();
                 search.expand_and_backprop(&mut leaves, &policies_vec, &values_vec);
@@ -804,7 +849,9 @@ impl PyBatchMCTS {
     ) {
         use rayon::prelude::*;
 
-        let board_size = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
+        let gs = self.grid_size;
+        let ps = move_encoding::policy_size(gs);
+        let board_size = NUM_CHANNELS * gs * gs;
 
         // --- Encode all positions (rayon-parallel) ---
         let game_clones: Vec<Game> = games.iter().map(|g| g.game.clone()).collect();
@@ -813,7 +860,7 @@ impl PyBatchMCTS {
         let encoded: Vec<(Vec<f32>, Vec<f32>)> = game_clones.par_iter().map(|game| {
             let mut board = vec![0.0f32; board_size];
             let mut reserve = vec![0.0f32; RESERVE_SIZE];
-            hive_game::board_encoding::encode_board(game, &mut board, &mut reserve);
+            hive_game::board_encoding::encode_board(game, &mut board, &mut reserve, gs);
             (board, reserve)
         }).collect();
 
@@ -827,7 +874,7 @@ impl PyBatchMCTS {
 
         // --- GPU: initial policy eval ---
         let board_arr = make_array2(py, &all_boards, num, board_size);
-        let board_4d = board_arr.reshape([num, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+        let board_4d = board_arr.reshape([num, NUM_CHANNELS, gs, gs]).unwrap();
         let reserve_arr = make_array2(py, &all_reserves, num, RESERVE_SIZE);
 
         let result = eval_fn.call1((board_4d, reserve_arr)).expect("eval_fn call failed");
@@ -854,7 +901,7 @@ impl PyBatchMCTS {
         active_searches.par_iter_mut().for_each(|(pos, search)| {
             search.c_puct = c_puct;
             search.use_forced_playouts = use_forced;
-            let policy = &policy_data[*pos * POLICY_SIZE..(*pos + 1) * POLICY_SIZE];
+            let policy = &policy_data[*pos * ps..(*pos + 1) * ps];
             search.init(&game_clones[*pos], policy);
         });
 

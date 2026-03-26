@@ -4,11 +4,15 @@ import numpy as np
 import pytest
 
 from hive.nn.training import (
-    _SYM_PERMS, _GRID_CELLS, _NUM_POLICY_CH,
+    _load_sym_perms,
     HiveDataset,
 )
 from hive.encoding.board_encoder import NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE
-from hive.encoding.move_encoder import POLICY_SIZE
+from hive.encoding.move_encoder import POLICY_SIZE, NUM_POLICY_CHANNELS
+
+_SYM_PERMS = _load_sym_perms(GRID_SIZE)
+_GRID_CELLS = GRID_SIZE * GRID_SIZE
+_NUM_POLICY_CH = NUM_POLICY_CHANNELS
 
 CENTER = GRID_SIZE // 2
 

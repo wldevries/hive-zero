@@ -166,6 +166,8 @@ pub struct Game {
     pub move_count: u16,
     /// When true, queen cannot be placed on the first move of each player.
     pub tournament_mode: bool,
+    /// Grid size for NN encoding (may be smaller than physical board GRID_SIZE).
+    pub nn_grid_size: usize,
     move_history: Vec<Move>,
     reserves: Reserves,
     /// Reserve snapshots for undo.
@@ -182,15 +184,32 @@ impl Game {
             turn_number: 1,
             move_count: 0,
             tournament_mode: false,
+            nn_grid_size: crate::board::GRID_SIZE,
             move_history: Vec::new(),
             reserves: Reserves::new(),
             history_reserves: Vec::new(),
         }
     }
 
+    /// Standard game with a custom NN encoding grid size.
+    pub fn new_with_grid_size(nn_grid_size: usize) -> Self {
+        assert!(nn_grid_size % 2 == 1, "nn_grid_size must be odd");
+        assert!(nn_grid_size <= crate::board::GRID_SIZE,
+                "nn_grid_size {} exceeds board GRID_SIZE {}", nn_grid_size, crate::board::GRID_SIZE);
+        Game { nn_grid_size, ..Game::new() }
+    }
+
     /// Tournament game — queen cannot be placed on the first move.
     pub fn new_tournament() -> Self {
         Game { tournament_mode: true, ..Game::new() }
+    }
+
+    /// Tournament game with a custom NN encoding grid size.
+    pub fn new_tournament_with_grid_size(nn_grid_size: usize) -> Self {
+        assert!(nn_grid_size % 2 == 1, "nn_grid_size must be odd");
+        assert!(nn_grid_size <= crate::board::GRID_SIZE,
+                "nn_grid_size {} exceeds board GRID_SIZE {}", nn_grid_size, crate::board::GRID_SIZE);
+        Game { nn_grid_size, tournament_mode: true, ..Game::new() }
     }
 
     pub fn is_game_over(&self) -> bool {
@@ -523,16 +542,19 @@ impl GameTrait for Game {
 
 impl NNGame for Game {
     const BOARD_CHANNELS: usize = crate::board_encoding::NUM_CHANNELS;
-    const GRID_SIZE: usize = crate::board::GRID_SIZE;
     const RESERVE_SIZE: usize = crate::board_encoding::RESERVE_SIZE;
-    const POLICY_SIZE: usize = crate::move_encoding::POLICY_SIZE;
+    const NUM_POLICY_CHANNELS: usize = crate::move_encoding::NUM_POLICY_CHANNELS;
+
+    fn grid_size(&self) -> usize {
+        self.nn_grid_size
+    }
 
     fn encode_board(&self, board_out: &mut [f32], reserve_out: &mut [f32]) {
-        crate::board_encoding::encode_board(self, board_out, reserve_out);
+        crate::board_encoding::encode_board(self, board_out, reserve_out, self.nn_grid_size);
     }
 
     fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(usize, Move)>) {
-        crate::move_encoding::get_legal_move_mask(self)
+        crate::move_encoding::get_legal_move_mask(self, self.nn_grid_size)
     }
 }
 

@@ -150,22 +150,26 @@ def game_to_samples(
     result: str,
     verbose: bool = False,
     game_name: str = "",
+    grid_size: int = 23,
 ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, float]]:
     """Convert one SGF game to a list of training samples.
 
     Args:
         sgf_content: Raw SGF text (iso-8859-1 decoded).
         result: 'p0_wins', 'p1_wins', or 'draw'.
+        grid_size: NN encoding grid size.
 
     Returns:
         List of (board_tensor, reserve_vector, policy_target, value_target).
-          board_tensor  : shape (NUM_CHANNELS, GRID_SIZE, GRID_SIZE), float32
+          board_tensor  : shape (NUM_CHANNELS, grid_size, grid_size), float32
           reserve_vector: shape (RESERVE_SIZE,), float32
           policy_target : shape (POLICY_SIZE,), float32 one-hot
           value_target  : float, ∈ {-1.0, 0.0, +1.0}
     """
     import hive_engine
-    NUM_CHANNELS, GRID_SIZE, POLICY_SIZE = _load_encoding_consts()
+    from ..encoding.move_encoder import NUM_POLICY_CHANNELS
+    NUM_CHANNELS, _, _ = _load_encoding_consts()
+    POLICY_SIZE = NUM_POLICY_CHANNELS * grid_size * grid_size
 
     if result == "p0_wins":
         outcome = {"w": 1.0, "b": -1.0}
@@ -174,7 +178,7 @@ def game_to_samples(
     else:
         outcome = {"w": 0.0, "b": 0.0}
 
-    game = hive_engine.RustGame()
+    game = hive_engine.RustGame(grid_size=grid_size)
     samples: list[tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
 
     for move_str in parse_moves(sgf_content):
@@ -188,7 +192,7 @@ def game_to_samples(
         # Encode the position *before* the move is played.
         board_arr, reserve_arr = game.encode_board()
         board = np.array(board_arr, dtype=np.float32).reshape(
-            NUM_CHANNELS, GRID_SIZE, GRID_SIZE
+            NUM_CHANNELS, grid_size, grid_size
         )
         reserve = np.array(reserve_arr, dtype=np.float32)
         value = outcome[game.turn_color]
@@ -289,6 +293,7 @@ class Pretrainer:
         num_blocks: int = 6,
         channels: int = 64,
         lr: float = 0.005,
+        grid_size: int = 23,
     ):
         from ..nn.model import create_model, load_checkpoint, save_checkpoint
         from ..nn.training import Trainer
@@ -302,18 +307,21 @@ class Pretrainer:
             it = ckpt.get("iteration", 0)
             blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
+            gs = self.model.grid_size
             params = sum(p.numel() for p in self.model.parameters())
             print(
                 f"Resumed from {model_path} "
-                f"(iteration {it}, {blocks}b×{ch}ch, {params/1e6:.2f}M params)"
+                f"(iteration {it}, {blocks}b×{ch}ch, grid {gs}x{gs}, {params/1e6:.2f}M params)"
             )
+            grid_size = gs
         else:
-            self.model = create_model(num_blocks, channels)
+            self.model = create_model(num_blocks, channels, grid_size=grid_size)
             params = sum(p.numel() for p in self.model.parameters())
             print(
                 f"Created new model ({num_blocks} blocks, {channels} channels, "
-                f"{params/1e6:.2f}M params)"
+                f"grid {grid_size}x{grid_size}, {params/1e6:.2f}M params)"
             )
+        self.grid_size = grid_size
 
         self.model.to(device)
         self.trainer = Trainer(self.model, device=device, lr=lr)
@@ -360,7 +368,7 @@ class Pretrainer:
               f"epochs: {num_epochs} | SGD epochs/chunk: {epochs_per_chunk}")
 
         from ..nn.training import HiveDataset
-        dataset = HiveDataset(max_size=buffer_size)
+        dataset = HiveDataset(max_size=buffer_size, grid_size=self.grid_size)
         chunk_idx = 0
         total_positions = 0
         total_errors = 0
@@ -385,7 +393,7 @@ class Pretrainer:
                     try:
                         with zipfile.ZipFile(zip_path, "r") as zf:
                             content = zf.read(sgf_name).decode("iso-8859-1")
-                        samples = game_to_samples(content, result, verbose=verbose_samples, game_name=sgf_name)
+                        samples = game_to_samples(content, result, verbose=verbose_samples, game_name=sgf_name, grid_size=self.grid_size)
                     except Exception:
                         errors_this_epoch += 1
                         samples = []

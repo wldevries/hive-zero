@@ -4,8 +4,11 @@ Actual encoding is done in Rust (hive_engine). This file only exports the
 constants needed by the Python NN model and training code.
 """
 
-# Grid dimensions: 23x23 centered hex grid
-GRID_SIZE = 23
+# Default grid dimensions: 23x23 centered hex grid
+DEFAULT_GRID_SIZE = 23
+
+# Legacy alias — code that doesn't yet use parametric grid_size
+GRID_SIZE = DEFAULT_GRID_SIZE
 
 # 39 channels: 11 current pieces + 11 opponent pieces + 16 stacked beetles + 1 stack height
 NUM_CHANNELS = 39

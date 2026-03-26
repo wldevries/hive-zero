@@ -23,7 +23,7 @@ _cy = lambda v: _c(v, colorama.Fore.YELLOW)   # draws / secondary losses
 _cr = lambda v: _c(v, colorama.Fore.RED)      # total loss / losses in eval
 _cc = lambda v: _c(v, colorama.Fore.CYAN)     # scores / percentages
 
-from ..encoding.move_encoder import POLICY_SIZE
+from ..encoding.move_encoder import policy_size as compute_policy_size
 
 
 from ..nn.model import HiveNet, create_model, save_checkpoint, load_checkpoint
@@ -35,13 +35,15 @@ class SelfPlayTrainer:
 
     def __init__(self, model_path: str = "model.pt", device: str = "cpu",
                  num_blocks: int = 6, channels: int = 64,
-                 checkpoint_dir: str = "checkpoints", lr: float = 0.02):
+                 checkpoint_dir: str = "checkpoints", lr: float = 0.02,
+                 grid_size: int = 23):
         self.model_path = model_path
         self.model_name = os.path.splitext(os.path.basename(model_path))[0]
         self.checkpoint_dir = checkpoint_dir
         self.device = device
         self.num_blocks = num_blocks
         self.channels = channels
+        self.grid_size = grid_size
         self.start_iteration = 0
 
         if os.path.exists(model_path):
@@ -49,15 +51,17 @@ class SelfPlayTrainer:
             self.start_iteration = ckpt.get("iteration", 0)
             blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
+            gs = self.model.grid_size
             params = sum(p.numel() for p in self.model.parameters())
             print(f"Resumed from {model_path} (iteration {self.start_iteration}, "
-                  f"{blocks} blocks, {ch} channels, {params/1e6:.2f}M params)")
+                  f"{blocks} blocks, {ch} channels, grid {gs}x{gs}, {params/1e6:.2f}M params)")
             if blocks != num_blocks or ch != channels:
                 print(f"  WARNING: --blocks {num_blocks} --channels {channels} ignored "
                       f"(checkpoint shape: {blocks} blocks, {ch} channels)")
+            self.grid_size = gs
         else:
-            self.model = create_model(num_blocks, channels)
-            print(f"Created new model ({num_blocks} blocks, {channels} channels)")
+            self.model = create_model(num_blocks, channels, grid_size=grid_size)
+            print(f"Created new model ({num_blocks} blocks, {channels} channels, grid {grid_size}x{grid_size})")
 
         self.model.to(device)
         self.trainer = Trainer(self.model, device=device, lr=lr)
@@ -132,7 +136,8 @@ class SelfPlayTrainer:
                 self._run_checkpoint_eval(self.start_iteration, eval_sims, eval_games)
 
         # Replay buffer: keep last `replay_window` iterations of data (worst case: all games hit max_moves)
-        replay_buffer = HiveDataset(max_size=replay_window * games_per_iter * max_moves)
+        replay_buffer = HiveDataset(max_size=replay_window * games_per_iter * max_moves,
+                                     grid_size=self.grid_size)
         replay_buffer.augment_symmetry = augment_symmetry
 
         # Opening book: load boardspace game sequences if configured

@@ -472,7 +472,7 @@ impl<G: GameEngine> MctsSearch<G> {
 
     /// Encode a game state for NN evaluation.
     pub fn encode_game(game: &G) -> (Vec<f32>, Vec<f32>) {
-        let mut board = vec![0.0f32; G::BOARD_CHANNELS * G::GRID_SIZE * G::GRID_SIZE];
+        let mut board = vec![0.0f32; game.board_tensor_size()];
         let mut reserve = vec![0.0f32; G::RESERVE_SIZE];
         game.encode_board(&mut board, &mut reserve);
         (board, reserve)

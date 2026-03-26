@@ -182,7 +182,8 @@ class ModelEngine:
 
     def _newgame(self) -> list[str]:
         from hive_engine import RustGame
-        self._game = RustGame()
+        gs = getattr(self.model, 'grid_size', 23)
+        self._game = RustGame(grid_size=gs)
         return [self._game.game_string]
 
     def _play(self, move_str: str) -> list[str]:
@@ -300,7 +301,10 @@ class ModelEngine:
     def _bestmove(self) -> list[str]:
         import torch
         from hive_engine import RustBatchMCTS
-        from ..encoding.move_encoder import POLICY_SIZE
+        from ..encoding.move_encoder import policy_size as compute_policy_size
+
+        gs = getattr(self.model, 'grid_size', 23)
+        POLICY_SIZE = compute_policy_size(gs)
 
         game = self._game
         valid = game.valid_moves()
@@ -331,7 +335,7 @@ class ModelEngine:
         # Initial policy for root
         init_policy, _ = eval_fn(bt.reshape(1, *bt.shape), rv.reshape(1, -1))
 
-        batch_mcts = RustBatchMCTS(num_games=1, c_puct=1.5, leaf_batch_size=16)
+        batch_mcts = RustBatchMCTS(num_games=1, c_puct=1.5, leaf_batch_size=16, grid_size=gs)
         batch_mcts.init_searches([game], init_policy)
         batch_mcts.run_simulations([0], [self.simulations], eval_fn)
 

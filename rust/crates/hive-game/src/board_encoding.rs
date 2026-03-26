@@ -1,7 +1,7 @@
 /// Encode Hive board state as a fixed-size tensor for neural network input.
 /// Must produce bitwise-identical output to Python board_encoder.py.
 
-use crate::board::{GRID_SIZE, hex_to_grid};
+use crate::hex::Hex;
 use crate::game::Game;
 use crate::piece::{PieceColor, ALL_PIECE_TYPES, PIECE_COUNTS, PIECES_PER_PLAYER};
 
@@ -33,6 +33,19 @@ pub const RESERVE_SIZE: usize = 10;
 const STACKED_BEETLE_BASE: usize = 22;
 const STACK_HEIGHT_CH: usize = 38;
 
+/// Map hex coordinates to encoding grid indices, using grid_size for the encoding.
+#[inline]
+fn hex_to_encoding_grid(h: Hex, grid_size: usize) -> Option<(usize, usize)> {
+    let center = (grid_size / 2) as i16;
+    let col = h.0 as i16 + center;
+    let row = h.1 as i16 + center;
+    if col >= 0 && col < grid_size as i16 && row >= 0 && row < grid_size as i16 {
+        Some((row as usize, col as usize))
+    } else {
+        None
+    }
+}
+
 #[inline]
 fn piece_idx(piece: crate::piece::Piece) -> usize {
     piece.linear_index() % PIECES_PER_PLAYER
@@ -45,12 +58,13 @@ pub fn f32_to_bf16(x: f32) -> u16 {
 }
 
 /// Encode a game state into board tensor and reserve vector as bfloat16.
-/// Board tensor shape: (NUM_CHANNELS, GRID_SIZE, GRID_SIZE) = (39, 23, 23)
+/// Board tensor shape: (NUM_CHANNELS, grid_size, grid_size)
 /// Reserve vector shape: (RESERVE_SIZE,) = (10,)
-pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [u16]) {
-    debug_assert!(board_out.len() == NUM_CHANNELS * GRID_SIZE * GRID_SIZE);
+pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [u16], grid_size: usize) {
+    debug_assert!(board_out.len() == NUM_CHANNELS * grid_size * grid_size);
     debug_assert!(reserve_out.len() == RESERVE_SIZE);
 
+    let gs2 = grid_size * grid_size;
     let bf16_zero = f32_to_bf16(0.0);
     let bf16_one = f32_to_bf16(1.0);
     board_out.fill(bf16_zero);
@@ -60,13 +74,13 @@ pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [
     let is_mine = |color: PieceColor| (color == PieceColor::White) == is_white_turn;
 
     for (pos, stack) in game.board.iter_occupied() {
-        let (row, col) = match hex_to_grid(pos) {
+        let (row, col) = match hex_to_encoding_grid(pos, grid_size) {
             Some(rc) => rc,
             None => continue,
         };
-        let cell = row * GRID_SIZE + col;
+        let cell = row * grid_size + col;
 
-        board_out[STACK_HEIGHT_CH * GRID_SIZE * GRID_SIZE + cell] =
+        board_out[STACK_HEIGHT_CH * gs2 + cell] =
             f32_to_bf16(stack.height() as f32 / 7.0);
 
         for (depth, piece) in stack.iter().enumerate() {
@@ -75,13 +89,13 @@ pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [
 
             if depth == 0 {
                 let ch = if mine { idx } else { 11 + idx };
-                board_out[ch * GRID_SIZE * GRID_SIZE + cell] = bf16_one;
+                board_out[ch * gs2 + cell] = bf16_one;
             } else {
                 let player_offset = if mine { 0 } else { 8 };
                 let beetle_offset = (piece.number() as usize - 1) * 4;
                 let depth_offset = (depth - 1).min(3);
                 let ch = STACKED_BEETLE_BASE + player_offset + beetle_offset + depth_offset;
-                board_out[ch * GRID_SIZE * GRID_SIZE + cell] = bf16_one;
+                board_out[ch * gs2 + cell] = bf16_one;
             }
         }
     }
@@ -101,12 +115,13 @@ pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [
 }
 
 /// Encode a game state into board tensor and reserve vector.
-/// Board tensor shape: (NUM_CHANNELS, GRID_SIZE, GRID_SIZE) = (39, 23, 23)
+/// Board tensor shape: (NUM_CHANNELS, grid_size, grid_size)
 /// Reserve vector shape: (RESERVE_SIZE,) = (10,)
-pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32]) {
-    debug_assert!(board_out.len() == NUM_CHANNELS * GRID_SIZE * GRID_SIZE);
+pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32], grid_size: usize) {
+    debug_assert!(board_out.len() == NUM_CHANNELS * grid_size * grid_size);
     debug_assert!(reserve_out.len() == RESERVE_SIZE);
 
+    let gs2 = grid_size * grid_size;
     board_out.fill(0.0);
     reserve_out.fill(0.0);
 
@@ -114,14 +129,14 @@ pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32])
     let is_mine = |color: PieceColor| (color == PieceColor::White) == is_white_turn;
 
     for (pos, stack) in game.board.iter_occupied() {
-        let (row, col) = match hex_to_grid(pos) {
+        let (row, col) = match hex_to_encoding_grid(pos, grid_size) {
             Some(rc) => rc,
             None => continue,
         };
-        let cell = row * GRID_SIZE + col;
+        let cell = row * grid_size + col;
 
         // Stack height
-        board_out[STACK_HEIGHT_CH * GRID_SIZE * GRID_SIZE + cell] =
+        board_out[STACK_HEIGHT_CH * gs2 + cell] =
             stack.height() as f32 / 7.0;
 
         // stack.iter() goes bottom-to-top; depth 0 = base piece
@@ -132,14 +147,14 @@ pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32])
             if depth == 0 {
                 // Base layer: any piece type, current-player-relative
                 let ch = if mine { idx } else { 11 + idx };
-                board_out[ch * GRID_SIZE * GRID_SIZE + cell] = 1.0;
+                board_out[ch * gs2 + cell] = 1.0;
             } else {
                 // Stacked piece — must be a beetle
                 let player_offset = if mine { 0 } else { 8 };
                 let beetle_offset = (piece.number() as usize - 1) * 4;
                 let depth_offset = (depth - 1).min(3); // depths 1-4 → offsets 0-3
                 let ch = STACKED_BEETLE_BASE + player_offset + beetle_offset + depth_offset;
-                board_out[ch * GRID_SIZE * GRID_SIZE + cell] = 1.0;
+                board_out[ch * gs2 + cell] = 1.0;
             }
         }
     }
@@ -162,18 +177,21 @@ pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32])
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::GRID_SIZE;
     use crate::piece::{Piece, PieceType};
     use crate::game::{Game, Move};
 
     fn encode(game: &Game) -> (Vec<f32>, Vec<f32>) {
-        let mut bt = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
+        let gs = game.nn_grid_size;
+        let mut bt = vec![0.0f32; NUM_CHANNELS * gs * gs];
         let mut rv = vec![0.0f32; RESERVE_SIZE];
-        encode_board(game, &mut bt, &mut rv);
+        encode_board(game, &mut bt, &mut rv, gs);
         (bt, rv)
     }
 
     fn at(bt: &[f32], ch: usize, row: usize, col: usize) -> f32 {
-        bt[ch * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col]
+        let gs = GRID_SIZE; // tests use default grid size
+        bt[ch * gs * gs + row * gs + col]
     }
 
     #[test]
