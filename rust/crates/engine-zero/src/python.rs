@@ -11,7 +11,6 @@ use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::MctsSearch;
 use hive_game::move_encoding::{self, POLICY_SIZE};
 use hive_game::piece::{Piece, PieceColor, PieceType};
-use core_game::game::GameEngine;
 
 /// Create a 1D numpy array from a slice.
 fn make_array1<'py>(py: Python<'py>, data: &[f32]) -> Bound<'py, PyArray1<f32>> {

@@ -5,7 +5,8 @@ use crate::board::Board;
 use crate::piece::{Piece, PieceColor, PieceType, PIECE_COUNTS, ALL_PIECE_TYPES, player_pieces};
 use crate::rules::{get_moves, get_placements};
 
-use core_game::game::{GameEngine, Player, Outcome};
+use core_game::game::{Game as GameTrait, NNGame, Player, Outcome};
+use core_game::symmetry::D6Symmetry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameState {
@@ -486,13 +487,9 @@ impl Game {
     }
 }
 
-impl GameEngine for Game {
+impl GameTrait for Game {
     type Move = Move;
-
-    const BOARD_CHANNELS: usize = crate::board_encoding::NUM_CHANNELS;
-    const GRID_SIZE: usize = crate::board::GRID_SIZE;
-    const RESERVE_SIZE: usize = crate::board_encoding::RESERVE_SIZE;
-    const POLICY_SIZE: usize = crate::move_encoding::POLICY_SIZE;
+    type Symmetry = D6Symmetry;
 
     fn current_player(&self) -> Player {
         Game::color_to_player(self.turn_color)
@@ -515,20 +512,27 @@ impl GameEngine for Game {
         Game::play_move(self, mv)
     }
 
-    fn encode_board(&self, board_out: &mut [f32], reserve_out: &mut [f32]) {
-        crate::board_encoding::encode_board(self, board_out, reserve_out);
-    }
-
-    fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(usize, Move)>) {
-        crate::move_encoding::get_legal_move_mask(self)
-    }
-
     fn pass_move() -> Move {
         Move::pass()
     }
 
     fn is_pass(mv: &Move) -> bool {
         mv.is_pass()
+    }
+}
+
+impl NNGame for Game {
+    const BOARD_CHANNELS: usize = crate::board_encoding::NUM_CHANNELS;
+    const GRID_SIZE: usize = crate::board::GRID_SIZE;
+    const RESERVE_SIZE: usize = crate::board_encoding::RESERVE_SIZE;
+    const POLICY_SIZE: usize = crate::move_encoding::POLICY_SIZE;
+
+    fn encode_board(&self, board_out: &mut [f32], reserve_out: &mut [f32]) {
+        crate::board_encoding::encode_board(self, board_out, reserve_out);
+    }
+
+    fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(usize, Move)>) {
+        crate::move_encoding::get_legal_move_mask(self)
     }
 }
 

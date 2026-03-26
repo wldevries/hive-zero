@@ -14,7 +14,6 @@ use hive_game::hex::hex_neighbors;
 use core_game::mcts::search::MctsSearch;
 use hive_game::move_encoding::{self, POLICY_SIZE, encode_game_move};
 use hive_game::piece::{Piece, PieceColor, PieceType};
-use core_game::game::GameEngine;
 use core_game::symmetry::Symmetry;
 
 use rand::Rng;

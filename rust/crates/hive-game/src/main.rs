@@ -678,7 +678,6 @@ fn run_debug(args: &[String]) {
 
 fn run_mcts(simulations: u32, batch_size: usize) {
     use core_game::mcts::search::MctsSearch;
-    use core_game::game::GameEngine;
     use hive_game::move_encoding::POLICY_SIZE;
     use hive_game::uhp::format_move_uhp;
 
