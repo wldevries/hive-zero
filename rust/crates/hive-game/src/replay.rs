@@ -55,7 +55,7 @@ pub fn replay_game_verbose(content: &str) -> ReplayResult {
     let gtype = sgf::game_type(content);
     let p0 = sgf::extract_player(content, 0);
     let p1 = sgf::extract_player(content, 1);
-    let result_field = sgf::extract_field(content, "RE[").unwrap_or_default();
+    let result_field = sgf::extract_prop(content, "RE").unwrap_or_default();
 
     println!("Game type: {}", gtype);
     println!("White (P0): {}  |  Black (P1): {}", p0, p1);

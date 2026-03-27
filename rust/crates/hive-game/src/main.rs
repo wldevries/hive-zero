@@ -780,7 +780,7 @@ fn main() {
             let path = args
                 .get(2)
                 .map(|s| s.as_str())
-                .unwrap_or("games/boardspace");
+                .unwrap_or("games/hive/boardspace");
             run_replay(path);
         }
         "debug" => {
@@ -794,7 +794,7 @@ fn main() {
             let path = args
                 .get(2)
                 .map(|s| s.as_str())
-                .unwrap_or("games/boardspace");
+                .unwrap_or("games/hive/boardspace");
             let skip_timeout = args.iter().any(|a| a == "--skip-timeout-games");
             run_process(path, skip_timeout);
         }

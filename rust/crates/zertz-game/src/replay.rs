@@ -4,7 +4,7 @@
 //! `ZertzMove` values, and plays them on a `ZertzBoard`.
 
 use crate::hex::boardspace_to_hex;
-use crate::parser::{Color, Coord, GameRecord, Turn, Variant};
+use crate::sgf::{Color, Coord, GameRecord, Turn, Variant};
 use crate::zertz::{
     find_capture_path, find_intermediate, Marble, ZertzBoard, ZertzMove, MAX_CAPTURE_JUMPS,
 };

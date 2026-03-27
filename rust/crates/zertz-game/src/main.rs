@@ -2,7 +2,7 @@ mod board_encoding;
 pub mod hex;
 mod mcts;
 mod move_encoding;
-mod parser;
+mod sgf;
 mod random_play;
 mod replay;
 mod zertz;
@@ -43,7 +43,7 @@ impl ReplayStats {
         };
 
         let before = self.total_games;
-        let result = parser::iter_games_in_zip(file, |sgf_name, record| {
+        let result = sgf::iter_games_in_zip(file, |sgf_name, record| {
             self.total_games += 1;
             let game_id = format!("{zip_name}/{sgf_name}");
 
@@ -187,7 +187,7 @@ fn run_debug(zip_path: &str, sgf_name: &str) {
     println!("{contents}");
     println!();
 
-    let record = parser::parse_game(&contents).expect("failed to parse game");
+    let record = sgf::parse_game(&contents).expect("failed to parse game");
     println!("Variant: {:?}", record.variant);
     println!("Players: {} vs {}", record.player0, record.player1);
     println!("Result: {}", record.result);
@@ -259,7 +259,7 @@ fn main() {
             let path = args
                 .get(2)
                 .map(|s| s.as_str())
-                .unwrap_or("../games/boardspace");
+                .unwrap_or("../games/zertz");
             run_replay(path);
         }
         "debug" => {

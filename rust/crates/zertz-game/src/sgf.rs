@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+pub use core_game::sgf::{extract_player, extract_prop};
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -137,17 +139,7 @@ enum RawAction {
 // Header parsing
 // ---------------------------------------------------------------------------
 
-fn extract_prop<'a>(text: &'a str, key: &str) -> Option<&'a str> {
-    let pattern = format!("{key}[");
-    let start = text.find(&pattern)?;
-    let value_start = start + pattern.len();
-    let end = text[value_start..].find(']')?;
-    Some(&text[value_start..value_start + end])
-}
-
-fn parse_header(
-    text: &str,
-) -> (Variant, String, String, String, String) {
+fn parse_header(text: &str) -> (Variant, String, String, String, String) {
     let variant = match extract_prop(text, "SU") {
         Some(su) => {
             let su_lower = su.to_lowercase();
@@ -165,16 +157,8 @@ fn parse_header(
         None => Variant::Standard,
     };
 
-    let p0 = extract_prop(text, "P0")
-        .unwrap_or("")
-        .trim_start_matches("id ")
-        .trim_matches('"')
-        .to_string();
-    let p1 = extract_prop(text, "P1")
-        .unwrap_or("")
-        .trim_start_matches("id ")
-        .trim_matches('"')
-        .to_string();
+    let p0 = extract_player(text, 0);
+    let p1 = extract_player(text, 1);
     let result = extract_prop(text, "RE").unwrap_or("").to_string();
     let game_name = extract_prop(text, "GN").unwrap_or("").to_string();
 

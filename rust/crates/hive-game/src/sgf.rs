@@ -1,24 +1,32 @@
-/// Boardspace SGF file parser — extracts UHP move strings from Hive SGF files.
+/// Boardspace SGF file parser for Hive games.
 ///
-/// Port of hive/sgf.py to Rust.
+/// Boardspace uses an SGF-like format (not UHP) where each player action is
+/// encoded as a `;P0[...]` or `;P1[...]` entry. This module handles the
+/// Hive-specific action types (Drop, Move, Movdone, Pick, Pickb) and maps
+/// boardspace grid coordinates to axial hex coordinates.
 
 use crate::game::{Game, Move};
 use crate::hex::Hex;
 use crate::piece::{Piece, PieceColor, PieceType};
 
+pub use core_game::sgf::{
+    extract_player, extract_prop, is_timeout, result_from_metadata, scan_player_actions,
+};
+
+// ---------------------------------------------------------------------------
+// Hive-specific: expansion detection and game type
+// ---------------------------------------------------------------------------
+
 /// Check if content contains expansion pieces (M=Mosquito, L=Ladybug, P=Pillbug).
 fn has_expansion_pieces(content: &str) -> bool {
-    // Match \b[wb][MLP]\d*\b — piece names with expansion types
     let bytes = content.as_bytes();
     for i in 0..bytes.len().saturating_sub(1) {
         let c0 = bytes[i];
         let c1 = bytes[i + 1];
         if (c0 == b'w' || c0 == b'b') && (c1 == b'M' || c1 == b'L' || c1 == b'P') {
-            // Check word boundary before
             if i > 0 && bytes[i - 1].is_ascii_alphanumeric() {
                 continue;
             }
-            // Check what follows: optional digit(s) then word boundary
             let mut j = i + 2;
             while j < bytes.len() && bytes[j].is_ascii_digit() {
                 j += 1;
@@ -31,16 +39,11 @@ fn has_expansion_pieces(content: &str) -> bool {
     false
 }
 
-/// Return "base" or "expansion" for the game type.
+/// Return `"base"` or `"expansion"` for the game type.
 pub fn game_type(content: &str) -> &'static str {
-    // Check SU field first
-    if let Some(start) = content.find("SU[") {
-        let rest = &content[start + 3..];
-        if let Some(end) = rest.find(']') {
-            let su = &rest[..end].to_lowercase();
-            if su.contains("hive-") {
-                return "expansion";
-            }
+    if let Some(su) = extract_prop(content, "SU") {
+        if su.to_lowercase().contains("hive-") {
+            return "expansion";
         }
     }
     if has_expansion_pieces(content) {
@@ -49,36 +52,11 @@ pub fn game_type(content: &str) -> &'static str {
     "base"
 }
 
-/// Extract a field value like RE[...] or P0[id "..."] from SGF content.
-pub fn extract_field(content: &str, prefix: &str) -> Option<String> {
-    let start = content.find(prefix)?;
-    let rest = &content[start + prefix.len()..];
-    let end = rest.find(']')?;
-    Some(rest[..end].to_string())
-}
-
-/// Extract player name from P0[id "name"] or P1[id "name"].
-pub fn extract_player(content: &str, player_idx: u8) -> String {
-    let prefix = format!("P{}[id \"", player_idx);
-    if let Some(start) = content.find(&prefix) {
-        let rest = &content[start + prefix.len()..];
-        if let Some(end) = rest.find('"') {
-            return rest[..end].to_string();
-        }
-    }
-    if player_idx == 0 {
-        "White".to_string()
-    } else {
-        "Black".to_string()
-    }
-}
-
-
 // ---------------------------------------------------------------------------
-// Direct SGF → Game replay (no UHP string intermediary)
+// Hive-specific: direct SGF → Game replay
 // ---------------------------------------------------------------------------
 
-/// Parse a piece name from SGF (with optional color prefix, case-insensitive type).
+/// Parse a piece name from an SGF action string (with optional color prefix).
 fn parse_piece_sgf(s: &str, default_color: PieceColor) -> Option<Piece> {
     let bytes = s.as_bytes();
     if bytes.is_empty() {
@@ -106,13 +84,13 @@ fn parse_piece_sgf(s: &str, default_color: PieceColor) -> Option<Piece> {
     Some(Piece::new(color, piece_type, number))
 }
 
-/// Convert Boardspace column string to index (A=0, B=1, ...).
+/// Convert a boardspace column letter to a 0-based index ('A'=0, 'B'=1, ...).
 #[inline]
 fn col_to_index(s: &str) -> i32 {
     (s.as_bytes()[0].to_ascii_uppercase() - b'A') as i32
 }
 
-/// Convert Boardspace grid coords to hex, given the origin of the first move.
+/// Convert boardspace grid coords to axial hex, relative to the first-move origin.
 #[inline]
 fn boardspace_to_hex(col: i32, row: i32, origin_col: i32, origin_row: i32) -> Hex {
     let q = (col - origin_col) as i8;
@@ -130,7 +108,7 @@ fn starts_with_ci(s: &str, prefix: &[u8]) -> bool {
             .all(|(a, p)| a.to_ascii_lowercase() == *p)
 }
 
-/// Build a Move from a piece and Boardspace destination coords, using the live game state.
+/// Build a Move from a piece and boardspace destination coords.
 fn make_move(game: &Game, piece: Piece, col: i32, row: i32, origin: &mut Option<(i32, i32)>) -> Move {
     let hex = if let Some((oc, or)) = *origin {
         boardspace_to_hex(col, row, oc, or)
@@ -146,8 +124,7 @@ fn make_move(game: &Game, piece: Piece, col: i32, row: i32, origin: &mut Option<
     }
 }
 
-/// Replay SGF content directly into a Game, converting Boardspace coords to hex
-/// without building UHP strings. Returns Ok(moves_played) on success.
+/// Replay SGF content directly into a Game. Returns `Ok(moves_played)` on success.
 pub fn replay_into_game(content: &str, game: &mut Game) -> Result<usize, String> {
     replay_into_game_inner(content, game, &mut |_, _| {})
 }
@@ -171,45 +148,13 @@ fn replay_into_game_inner(
     // Pending move awaiting "done": (piece, dest_col, dest_row)
     let mut pending: Option<(Piece, i32, i32)> = None;
 
-    let bytes = content.as_bytes();
-    let mut i = 0;
+    // Collect all actions first so we can use early-return error propagation.
+    let mut actions: Vec<(u8, String)> = Vec::new();
+    scan_player_actions(content, |p, a| actions.push((p, a.to_string())));
 
-    while i < bytes.len() {
-        if bytes[i] != b';' {
-            i += 1;
-            continue;
-        }
-        i += 1;
-
-        // Skip whitespace
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-
-        if i >= bytes.len() || bytes[i] != b'P' { continue; }
-        i += 1;
-
-        if i >= bytes.len() || (bytes[i] != b'0' && bytes[i] != b'1') { continue; }
-        let player_color = if bytes[i] == b'0' { PieceColor::White } else { PieceColor::Black };
-        i += 1;
-
-        if i >= bytes.len() || bytes[i] != b'[' { continue; }
-        i += 1;
-
-        // Skip turn number
-        while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
-        while i < bytes.len() && bytes[i] == b' ' { i += 1; }
-
-        // Read action until matching ']'
-        let action_start = i;
-        let mut bracket_depth = 1;
-        while i < bytes.len() && bracket_depth > 0 {
-            if bytes[i] == b'[' { bracket_depth += 1; }
-            else if bytes[i] == b']' { bracket_depth -= 1; }
-            if bracket_depth > 0 { i += 1; }
-        }
-        let action = content[action_start..i].trim();
-        i += 1;
+    for (player_idx, action) in &actions {
+        let player_color = if *player_idx == 0 { PieceColor::White } else { PieceColor::Black };
+        let action = action.as_str();
 
         // done / start → finalize pending move
         if starts_with_ci(action, b"done") || starts_with_ci(action, b"start") {
@@ -262,7 +207,7 @@ fn replay_into_game_inner(
             continue;
         }
 
-        // movedone (must check before "move")
+        // Movedone (must check before "move"): "Movedone W wS1 N 13 /wQ"
         if starts_with_ci(action, b"movedone ") {
             let mut parts = action.split_whitespace();
             parts.next(); // skip "movedone"
@@ -329,54 +274,9 @@ fn replay_into_game_inner(
     Ok(move_count)
 }
 
-/// Determine game result from SGF metadata (RE field, Resign, AcceptDraw).
-/// Returns "p0_wins", "p1_wins", "draw", or "unknown".
-pub fn result_from_metadata(content: &str, p0: &str, p1: &str) -> &'static str {
-    // Newer format: explicit RE field containing winner's name
-    if let Some(re_val) = extract_field(content, "RE[") {
-        if re_val.contains(p0) {
-            return "p0_wins";
-        }
-        if re_val.contains(p1) {
-            return "p1_wins";
-        }
-        if re_val.to_lowercase().contains("draw") {
-            return "draw";
-        }
-    }
-
-    // Older format: resign action — the resigning player loses
-    let bytes = content.as_bytes();
-    for i in 0..bytes.len().saturating_sub(10) {
-        if bytes[i] == b'P' && (bytes[i + 1] == b'0' || bytes[i + 1] == b'1') && bytes[i + 2] == b'[' {
-            // Find the action text
-            let rest = &content[i + 2..];
-            if let Some(end) = rest.find(']') {
-                let inner = &rest[1..end];
-                let lower = inner.to_lowercase();
-                if lower.contains(" resign") {
-                    return if bytes[i + 1] == b'0' { "p1_wins" } else { "p0_wins" };
-                }
-                if lower.contains(" acceptdraw") {
-                    return "draw";
-                }
-            }
-        }
-    }
-
-    "unknown"
-}
-
-/// Check if the game was a timeout (one player ran out of time).
-pub fn is_timeout(content: &str) -> bool {
-    if let Some(re_val) = extract_field(content, "RE[") {
-        let lower = re_val.to_lowercase();
-        if lower.contains("time") || lower.contains("timeout") {
-            return true;
-        }
-    }
-    false
-}
+// ---------------------------------------------------------------------------
+// Determine game result from SGF metadata
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -393,5 +293,4 @@ mod tests {
         assert_eq!(game_type("SU[Hive-ULP]"), "expansion");
         assert_eq!(game_type("some wM1 content"), "expansion");
     }
-
 }
