@@ -7,8 +7,6 @@ mod random_play;
 mod replay;
 mod zertz;
 
-use std::path::Path;
-
 // ---------------------------------------------------------------------------
 // MCTS demo
 // ---------------------------------------------------------------------------
@@ -63,16 +61,22 @@ fn main() {
             let sgf_name = args.get(3).expect("need sgf name");
             replay::run_debug(zip_path, sgf_name);
         }
+        "process" => {
+            let path = args.get(2).map(|s| s.as_str()).unwrap_or("../games/zertz");
+            let skip_timeout = args.iter().any(|a| a == "--skip-timeout-games");
+            replay::run_process(path, skip_timeout);
+        }
         "mcts" => {
             let sims: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(800);
             run_mcts_demo(sims);
         }
         _ => {
-            eprintln!("Usage: zertz-zero <random [N]|replay [path]|debug <zip> <sgf>|mcts [sims]>");
-            eprintln!("  random [N]     - play N random games (default 100)");
-            eprintln!("  replay [path]  - replay boardspace games from zip dir/file");
-            eprintln!("  debug <z> <s>  - verbose replay of a single game from zip");
-            eprintln!("  mcts [sims]    - run MCTS demo with uniform policy (default 800)");
+            eprintln!("Usage: zertz-zero <random [N]|replay [path]|process [path]|debug <zip> <sgf>|mcts [sims]>");
+            eprintln!("  random [N]              - play N random games (default 100)");
+            eprintln!("  replay [path]           - replay boardspace games from zip dir/file");
+            eprintln!("  process [path]          - compute ELO rankings, write CSVs");
+            eprintln!("  debug <zip> <sgf>       - verbose replay of a single game from zip");
+            eprintln!("  mcts [sims]             - run MCTS demo with uniform policy (default 800)");
             std::process::exit(1);
         }
     }
