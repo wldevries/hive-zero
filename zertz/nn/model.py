@@ -11,17 +11,18 @@ from shared.nn.resblock import ResBlock
 NUM_CHANNELS = 4
 GRID_SIZE = 7
 POLICY_SIZE = 5587
-RESERVE_SIZE = 9  # [supply_W, supply_G, supply_B, cur_cap_W/G/B, opp_cap_W/G/B]
+RESERVE_SIZE = 15  # [supply_W/G/B, cur_cap_W/G/B, opp_cap_W/G/B, cur_combo_W/G/B, opp_combo_W/G/B]
 
 
 class ZertzNet(nn.Module):
     """AlphaZero-style network for Zertz.
 
-    Input:  (batch, 4, 7, 7) board tensor + (batch, 9) reserve vector
+    Input:  (batch, 4, 7, 7) board tensor + (batch, 15) reserve vector
     Output: policy_logits (batch, 5587), value (batch, 1) in [-1, 1]
 
-    Reserve vector: [supply_W, supply_G, supply_B, cur_cap_W/G/B, opp_cap_W/G/B]
-    all normalized to [0, 1] by initial supply per color.
+    Reserve vector: [supply_W/G/B, cur_cap_W/G/B, opp_cap_W/G/B,
+                     cur_combo_W/G/B, opp_combo_W/G/B]
+    where combo = min(cap, 2)/2, progress toward the 2-of-each-color win condition.
 
     Policy head is a linear layer over the flattened trunk output.
     Value head concatenates the reserve vector before its FC layers.

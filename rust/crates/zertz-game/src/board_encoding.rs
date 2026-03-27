@@ -21,8 +21,13 @@ const BOARD_SIZE: usize = crate::hex::BOARD_SIZE;
 pub const GRID_SIZE: usize = 7;
 pub const NUM_CHANNELS: usize = 4;
 
-/// Reserve vector: [supply_W, supply_G, supply_B, cur_cap_W, cur_cap_G, cur_cap_B, opp_cap_W, opp_cap_G, opp_cap_B]
-pub const RESERVE_SIZE: usize = 9;
+/// Reserve vector (15 elements):
+///   [0-2]:  supply_W/G/B normalized by initial supply
+///   [3-5]:  cur_cap_W/G/B normalized by initial supply
+///   [6-8]:  opp_cap_W/G/B normalized by initial supply
+///   [9-11]: min(cur_cap_W,2)/2, min(cur_cap_G,2)/2, min(cur_cap_B,2)/2  (combo win progress)
+///   [12-14]: min(opp_cap_W,2)/2, min(opp_cap_G,2)/2, min(opp_cap_B,2)/2
+pub const RESERVE_SIZE: usize = 15;
 
 /// Initial supply for normalization: [6, 8, 10].
 const INITIAL_SUPPLY: [f32; 3] = [6.0, 8.0, 10.0];
@@ -30,7 +35,7 @@ const INITIAL_SUPPLY: [f32; 3] = [6.0, 8.0, 10.0];
 /// Encode a ZertzBoard into flat tensor buffers.
 ///
 /// `board_out` must have length NUM_CHANNELS * GRID_SIZE * GRID_SIZE (= 196).
-/// `reserve_out` must have length RESERVE_SIZE (= 9).
+/// `reserve_out` must have length RESERVE_SIZE (= 15).
 pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut [f32]) {
     debug_assert_eq!(board_out.len(), NUM_CHANNELS * GRID_SIZE * GRID_SIZE);
     debug_assert_eq!(reserve_out.len(), RESERVE_SIZE);
@@ -73,6 +78,13 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut
     reserve_out[6] = captures[opp_pi][0] as f32 / INITIAL_SUPPLY[0];
     reserve_out[7] = captures[opp_pi][1] as f32 / INITIAL_SUPPLY[1];
     reserve_out[8] = captures[opp_pi][2] as f32 / INITIAL_SUPPLY[2];
+    // Combo win progress: min(cap, 2) / 2 per color (win condition: ≥2 of each color)
+    reserve_out[9]  = captures[cur_pi][0].min(2) as f32 / 2.0;
+    reserve_out[10] = captures[cur_pi][1].min(2) as f32 / 2.0;
+    reserve_out[11] = captures[cur_pi][2].min(2) as f32 / 2.0;
+    reserve_out[12] = captures[opp_pi][0].min(2) as f32 / 2.0;
+    reserve_out[13] = captures[opp_pi][1].min(2) as f32 / 2.0;
+    reserve_out[14] = captures[opp_pi][2].min(2) as f32 / 2.0;
 }
 
 #[cfg(test)]
