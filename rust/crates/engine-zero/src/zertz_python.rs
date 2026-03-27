@@ -7,7 +7,7 @@ use rand::Rng;
 use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
 
-use zertz_game::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS};
+use zertz_game::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
 use zertz_game::hex::{is_valid, Hex};
 use zertz_game::mcts::arena::NodeId;
 use zertz_game::mcts::search::MctsSearch;
@@ -24,6 +24,7 @@ const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 #[pyclass(name = "ZertzSelfPlayResult")]
 pub struct PyZertzSelfPlayResult {
     board_data: Vec<f32>,
+    reserve_data: Vec<f32>,
     policy_data: Vec<f32>,
     value_targets: Vec<f32>,
     weights: Vec<f32>,
@@ -43,8 +44,9 @@ pub struct PyZertzSelfPlayResult {
 
 #[pymethods]
 impl PyZertzSelfPlayResult {
-    /// Returns (boards[N,C,H,W], policies[N,POLICY_SIZE], values[N], weights[N], value_only[N])
+    /// Returns (boards[N,C,H,W], reserves[N,RESERVE_SIZE], policies[N,POLICY_SIZE], values[N], weights[N], value_only[N])
     fn training_data<'py>(&self, py: Python<'py>) -> (
+        Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray1<f32>>,
@@ -55,6 +57,9 @@ impl PyZertzSelfPlayResult {
         let boards = numpy::ndarray::Array2::from_shape_vec(
             (n, BOARD_FLAT), self.board_data.clone(),
         ).unwrap();
+        let reserves = numpy::ndarray::Array2::from_shape_vec(
+            (n, RESERVE_SIZE), self.reserve_data.clone(),
+        ).unwrap();
         let policies = numpy::ndarray::Array2::from_shape_vec(
             (n, POLICY_SIZE), self.policy_data.clone(),
         ).unwrap();
@@ -62,6 +67,7 @@ impl PyZertzSelfPlayResult {
         let weights = numpy::ndarray::Array1::from(self.weights.clone());
         (
             PyArray2::from_owned_array_bound(py, boards),
+            PyArray2::from_owned_array_bound(py, reserves),
             PyArray2::from_owned_array_bound(py, policies),
             PyArray1::from_owned_array_bound(py, values),
             PyArray1::from_owned_array_bound(py, weights),
@@ -88,6 +94,7 @@ impl PyZertzSelfPlayResult {
 
 struct TurnRecord {
     board_offset: usize,
+    reserve_offset: usize,
     player: Player,
     is_value_only: bool,
     policy_vector: Vec<f32>,
@@ -169,6 +176,7 @@ impl PyZertzSelfPlaySession {
 
         let mut histories: Vec<Vec<TurnRecord>> = (0..num_games).map(|_| Vec::new()).collect();
         let mut board_buf: Vec<f32> = Vec::new();
+        let mut reserve_buf: Vec<f32> = Vec::new();
 
         let mut rng = rand::thread_rng();
 
@@ -204,21 +212,28 @@ impl PyZertzSelfPlaySession {
 
             // Encode current positions
             let mut turn_board_offsets: Vec<usize> = Vec::with_capacity(n);
+            let mut turn_reserve_offsets: Vec<usize> = Vec::with_capacity(n);
             let mut flat_boards = vec![0f32; n * BOARD_FLAT];
+            let mut flat_reserves = vec![0f32; n * RESERVE_SIZE];
             for (i, &gi) in mcts_games.iter().enumerate() {
-                let off = board_buf.len();
-                board_buf.resize(off + BOARD_FLAT, 0.0);
-                encode_board(&boards[gi], &mut board_buf[off..off + BOARD_FLAT]);
-                encode_board(&boards[gi], &mut flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT]);
-                turn_board_offsets.push(off);
+                let boff = board_buf.len();
+                board_buf.resize(boff + BOARD_FLAT, 0.0);
+                let roff = reserve_buf.len();
+                reserve_buf.resize(roff + RESERVE_SIZE, 0.0);
+                encode_board(&boards[gi], &mut board_buf[boff..boff + BOARD_FLAT], &mut reserve_buf[roff..roff + RESERVE_SIZE]);
+                encode_board(&boards[gi], &mut flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT], &mut flat_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE]);
+                turn_board_offsets.push(boff);
+                turn_reserve_offsets.push(roff);
             }
 
             // Initial NN eval for MCTS root policy
             let board_arr = numpy::ndarray::Array2::from_shape_vec((n, BOARD_FLAT), flat_boards).unwrap();
             let board_np = PyArray2::from_owned_array_bound(py, board_arr);
             let board_4d = board_np.reshape([n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+            let reserve_arr = numpy::ndarray::Array2::from_shape_vec((n, RESERVE_SIZE), flat_reserves).unwrap();
+            let reserve_np = PyArray2::from_owned_array_bound(py, reserve_arr);
 
-            let result = eval_fn.call1((board_4d,))?;
+            let result = eval_fn.call1((board_4d, reserve_np))?;
             let tuple = result.downcast::<PyTuple>().map_err(|_| {
                 pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value) tuple")
             })?;
@@ -265,17 +280,21 @@ impl PyZertzSelfPlaySession {
 
                 let nl = leaf_ids.len();
                 let mut leaf_boards_flat = vec![0f32; nl * BOARD_FLAT];
+                let mut leaf_reserves_flat = vec![0f32; nl * RESERVE_SIZE];
                 for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
                     let gi = mcts_games[i];
-                    let encoded = searches[gi].encode_leaf(leaf);
-                    leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&encoded);
+                    let (board_enc, reserve_enc) = searches[gi].encode_leaf(leaf);
+                    leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
+                    leaf_reserves_flat[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
                 }
 
                 let leaf_arr = numpy::ndarray::Array2::from_shape_vec((nl, BOARD_FLAT), leaf_boards_flat).unwrap();
                 let leaf_np = PyArray2::from_owned_array_bound(py, leaf_arr);
                 let leaf_4d = leaf_np.reshape([nl, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+                let leaf_res_arr = numpy::ndarray::Array2::from_shape_vec((nl, RESERVE_SIZE), leaf_reserves_flat).unwrap();
+                let leaf_res_np = PyArray2::from_owned_array_bound(py, leaf_res_arr);
 
-                let leaf_result = eval_fn.call1((leaf_4d,))?;
+                let leaf_result = eval_fn.call1((leaf_4d, leaf_res_np))?;
                 let leaf_tuple = leaf_result.downcast::<PyTuple>().map_err(|_| {
                     pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value) tuple")
                 })?;
@@ -314,6 +333,7 @@ impl PyZertzSelfPlaySession {
 
                 histories[gi].push(TurnRecord {
                     board_offset: turn_board_offsets[i],
+                    reserve_offset: turn_reserve_offsets[i],
                     player: boards[gi].next_player(),
                     is_value_only: !is_full[i],
                     policy_vector: policy_vec,
@@ -368,6 +388,7 @@ impl PyZertzSelfPlaySession {
         // --- Build training data ---
         let total_samples: usize = histories.iter().map(|h| h.len()).sum();
         let mut board_data = Vec::with_capacity(total_samples * BOARD_FLAT);
+        let mut reserve_data = Vec::with_capacity(total_samples * RESERVE_SIZE);
         let mut policy_data = Vec::with_capacity(total_samples * POLICY_SIZE);
         let mut value_targets = Vec::with_capacity(total_samples);
         let mut weights = Vec::with_capacity(total_samples);
@@ -378,6 +399,9 @@ impl PyZertzSelfPlaySession {
             for record in history {
                 board_data.extend_from_slice(
                     &board_buf[record.board_offset..record.board_offset + BOARD_FLAT],
+                );
+                reserve_data.extend_from_slice(
+                    &reserve_buf[record.reserve_offset..record.reserve_offset + RESERVE_SIZE],
                 );
                 policy_data.extend_from_slice(&record.policy_vector);
                 let value = match outcome {
@@ -394,6 +418,7 @@ impl PyZertzSelfPlaySession {
 
         Ok(PyZertzSelfPlayResult {
             board_data,
+            reserve_data,
             policy_data,
             value_targets,
             weights,
@@ -561,10 +586,12 @@ impl PyZertzGame {
         }
     }
 
-    fn encode<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        let mut buf = vec![0f32; BOARD_FLAT];
-        encode_board(&self.board, &mut buf);
-        PyArray1::from_vec_bound(py, buf)
+    /// Returns (board[C*H*W], reserve[RESERVE_SIZE])
+    fn encode<'py>(&self, py: Python<'py>) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>) {
+        let mut board_buf = vec![0f32; BOARD_FLAT];
+        let mut reserve_buf = vec![0f32; RESERVE_SIZE];
+        encode_board(&self.board, &mut board_buf, &mut reserve_buf);
+        (PyArray1::from_vec_bound(py, board_buf), PyArray1::from_vec_bound(py, reserve_buf))
     }
 
     /// Run MCTS for `simulations` sims and return the best move string.
@@ -585,13 +612,16 @@ impl PyZertzGame {
         search.c_puct = c_puct;
 
         // Initial NN eval on root position
-        let mut buf = vec![0f32; BOARD_FLAT];
-        encode_board(&self.board, &mut buf);
-        let root_arr = numpy::ndarray::Array2::from_shape_vec((1, BOARD_FLAT), buf).unwrap();
+        let mut board_buf = vec![0f32; BOARD_FLAT];
+        let mut reserve_buf = vec![0f32; RESERVE_SIZE];
+        encode_board(&self.board, &mut board_buf, &mut reserve_buf);
+        let root_arr = numpy::ndarray::Array2::from_shape_vec((1, BOARD_FLAT), board_buf).unwrap();
         let root_np = PyArray2::from_owned_array_bound(py, root_arr);
         let root_4d = root_np.reshape([1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+        let root_res_arr = numpy::ndarray::Array2::from_shape_vec((1, RESERVE_SIZE), reserve_buf).unwrap();
+        let root_res_np = PyArray2::from_owned_array_bound(py, root_res_arr);
 
-        let result = eval_fn.call1((root_4d,))?;
+        let result = eval_fn.call1((root_4d, root_res_np))?;
         let tuple = result.downcast::<PyTuple>().map_err(|_| {
             pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value) tuple")
         })?;
@@ -610,16 +640,20 @@ impl PyZertzGame {
             let nl = leaves.len();
 
             let mut flat = vec![0f32; nl * BOARD_FLAT];
+            let mut flat_res = vec![0f32; nl * RESERVE_SIZE];
             for (k, &leaf) in leaves.iter().enumerate() {
-                let enc = search.encode_leaf(leaf);
-                flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&enc);
+                let (board_enc, reserve_enc) = search.encode_leaf(leaf);
+                flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
+                flat_res[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
             }
 
             let leaf_arr = numpy::ndarray::Array2::from_shape_vec((nl, BOARD_FLAT), flat).unwrap();
             let leaf_np = PyArray2::from_owned_array_bound(py, leaf_arr);
             let leaf_4d = leaf_np.reshape([nl, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+            let leaf_res_arr = numpy::ndarray::Array2::from_shape_vec((nl, RESERVE_SIZE), flat_res).unwrap();
+            let leaf_res_np = PyArray2::from_owned_array_bound(py, leaf_res_arr);
 
-            let res = eval_fn.call1((leaf_4d,))?;
+            let res = eval_fn.call1((leaf_4d, leaf_res_np))?;
             let tup = res.downcast::<PyTuple>().map_err(|_| {
                 pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value) tuple")
             })?;
@@ -655,5 +689,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ZERTZ_POLICY_SIZE", POLICY_SIZE)?;
     m.add("ZERTZ_NUM_CHANNELS", NUM_CHANNELS)?;
     m.add("ZERTZ_GRID_SIZE", GRID_SIZE)?;
+    m.add("ZERTZ_RESERVE_SIZE", RESERVE_SIZE)?;
     Ok(())
 }

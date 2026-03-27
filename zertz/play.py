@@ -10,11 +10,11 @@ def make_eval_fn(model, device):
     """Return a callable that runs the ZertzNet on a board tensor batch."""
     model.eval()
 
-    def eval_fn(board_np):
-        # board_np is (N, C, H, W) numpy array from Rust
-        t = torch.from_numpy(np.array(board_np)).float().to(device)
+    def eval_fn(board_np, reserve_np):
+        board = torch.from_numpy(np.array(board_np)).float().to(device)
+        reserve = torch.from_numpy(np.array(reserve_np)).float().to(device)
         with torch.no_grad():
-            policy_logits, value = model(t)
+            policy_logits, value = model(board, reserve)
         policy = torch.softmax(policy_logits, dim=-1).cpu().numpy()
         value = value.squeeze(-1).cpu().numpy()
         return policy, value

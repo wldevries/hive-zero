@@ -19,16 +19,21 @@ use crate::zertz::{Marble, Ring, ZertzBoard};
 const BOARD_SIZE: usize = crate::hex::BOARD_SIZE;
 
 pub const GRID_SIZE: usize = 7;
-pub const NUM_CHANNELS: usize = 13;
+pub const NUM_CHANNELS: usize = 4;
+
+/// Reserve vector: [supply_W, supply_G, supply_B, cur_cap_W, cur_cap_G, cur_cap_B, opp_cap_W, opp_cap_G, opp_cap_B]
+pub const RESERVE_SIZE: usize = 9;
 
 /// Initial supply for normalization: [6, 8, 10].
 const INITIAL_SUPPLY: [f32; 3] = [6.0, 8.0, 10.0];
 
 /// Encode a ZertzBoard into flat tensor buffers.
 ///
-/// `board_out` must have length NUM_CHANNELS * GRID_SIZE * GRID_SIZE (= 686).
-pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32]) {
+/// `board_out` must have length NUM_CHANNELS * GRID_SIZE * GRID_SIZE (= 196).
+/// `reserve_out` must have length RESERVE_SIZE (= 9).
+pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut [f32]) {
     debug_assert_eq!(board_out.len(), NUM_CHANNELS * GRID_SIZE * GRID_SIZE);
+    debug_assert_eq!(reserve_out.len(), RESERVE_SIZE);
 
     // Zero out
     board_out.fill(0.0);
@@ -58,40 +63,16 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32]) {
         }
     }
 
-    // Broadcast channels (constant across all valid cells): supply and captures
-    let supply_norm: [f32; 3] = [
-        supply[0] as f32 / INITIAL_SUPPLY[0],
-        supply[1] as f32 / INITIAL_SUPPLY[1],
-        supply[2] as f32 / INITIAL_SUPPLY[2],
-    ];
-    // Normalize captures by initial supply per color so each is in [0, 1]
-    let cur_caps: [f32; 3] = [
-        captures[cur_pi][0] as f32 / INITIAL_SUPPLY[0],
-        captures[cur_pi][1] as f32 / INITIAL_SUPPLY[1],
-        captures[cur_pi][2] as f32 / INITIAL_SUPPLY[2],
-    ];
-    let opp_caps: [f32; 3] = [
-        captures[opp_pi][0] as f32 / INITIAL_SUPPLY[0],
-        captures[opp_pi][1] as f32 / INITIAL_SUPPLY[1],
-        captures[opp_pi][2] as f32 / INITIAL_SUPPLY[2],
-    ];
-
-    for h in all_hexes() {
-        let (row, col) = hex_to_grid(h);
-        let base = row * GRID_SIZE + col;
-
-        if rings[hex_to_index(h)] != Ring::Removed {
-            board_out[4 * GRID_SIZE * GRID_SIZE + base] = supply_norm[0];
-            board_out[5 * GRID_SIZE * GRID_SIZE + base] = supply_norm[1];
-            board_out[6 * GRID_SIZE * GRID_SIZE + base] = supply_norm[2];
-            board_out[7 * GRID_SIZE * GRID_SIZE + base] = cur_caps[0];
-            board_out[8 * GRID_SIZE * GRID_SIZE + base] = cur_caps[1];
-            board_out[9 * GRID_SIZE * GRID_SIZE + base] = cur_caps[2];
-            board_out[10 * GRID_SIZE * GRID_SIZE + base] = opp_caps[0];
-            board_out[11 * GRID_SIZE * GRID_SIZE + base] = opp_caps[1];
-            board_out[12 * GRID_SIZE * GRID_SIZE + base] = opp_caps[2];
-        }
-    }
+    // Reserve vector: supply and captures normalized by initial supply per color
+    reserve_out[0] = supply[0] as f32 / INITIAL_SUPPLY[0];
+    reserve_out[1] = supply[1] as f32 / INITIAL_SUPPLY[1];
+    reserve_out[2] = supply[2] as f32 / INITIAL_SUPPLY[2];
+    reserve_out[3] = captures[cur_pi][0] as f32 / INITIAL_SUPPLY[0];
+    reserve_out[4] = captures[cur_pi][1] as f32 / INITIAL_SUPPLY[1];
+    reserve_out[5] = captures[cur_pi][2] as f32 / INITIAL_SUPPLY[2];
+    reserve_out[6] = captures[opp_pi][0] as f32 / INITIAL_SUPPLY[0];
+    reserve_out[7] = captures[opp_pi][1] as f32 / INITIAL_SUPPLY[1];
+    reserve_out[8] = captures[opp_pi][2] as f32 / INITIAL_SUPPLY[2];
 }
 
 #[cfg(test)]
@@ -111,9 +92,10 @@ mod tests {
     fn test_encode_default_board() {
         let board = ZertzBoard::default();
         let mut buf = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
-        encode_board(&board, &mut buf);
+        let mut reserve = vec![0.0f32; RESERVE_SIZE];
+        encode_board(&board, &mut buf, &mut reserve);
 
-        // Default board: all rings empty, supply full
+        // Default board: all rings empty
         // Channel 3 (empty rings) should have 37 cells set to 1.0
         let ch3_start = 3 * GRID_SIZE * GRID_SIZE;
         let ch3_end = 4 * GRID_SIZE * GRID_SIZE;
@@ -123,9 +105,11 @@ mod tests {
             .count();
         assert_eq!(empty_count, BOARD_SIZE);
 
-        // Channel 4 (supply white normalized) should be 1.0 on valid cells
-        let ch4_start = 4 * GRID_SIZE * GRID_SIZE;
-        let val = buf[ch4_start]; // cell 0 is valid
-        assert!((val - 1.0).abs() < 1e-6);
+        // Reserve: supply fully stocked → all 1.0; captures → all 0.0
+        assert!((reserve[0] - 1.0).abs() < 1e-6); // supply W = 6/6
+        assert!((reserve[1] - 1.0).abs() < 1e-6); // supply G = 8/8
+        assert!((reserve[2] - 1.0).abs() < 1e-6); // supply B = 10/10
+        assert_eq!(reserve[3], 0.0);               // cur caps W
+        assert_eq!(reserve[6], 0.0);               // opp caps W
     }
 }

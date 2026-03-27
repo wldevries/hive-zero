@@ -73,17 +73,16 @@ class SelfPlayTrainer:
         self.model.to(device)
         self.trainer = Trainer(model=self.model, device=device, lr=lr)
 
-    def _eval_fn(self, board_tensor_np):
+    def _eval_fn(self, board_tensor_np, reserve_np):
         """NN inference callback for Rust self-play."""
-        board = torch.from_numpy(np.array(board_tensor_np)).to(
-            self.device, dtype=torch.float32
-        )
+        board = torch.from_numpy(np.array(board_tensor_np)).to(self.device, dtype=torch.float32)
+        reserve = torch.from_numpy(np.array(reserve_np)).to(self.device, dtype=torch.float32)
         with torch.no_grad():
             with torch.autocast(
                 device_type="cuda" if self.device != "cpu" else "cpu",
                 dtype=torch.bfloat16,
             ):
-                policy_logits, value = self.model(board)
+                policy_logits, value = self.model(board, reserve)
         policy = torch.softmax(policy_logits, dim=1).float().cpu().numpy()
         value = value.float().cpu().numpy().squeeze(1)
         return policy, value
@@ -197,9 +196,10 @@ class SelfPlayTrainer:
                 print(f"  Playout cap: {fs}/{tt} full-search turns ({pct:.0f}%)")
 
             buf_start = time.time()
-            boards, policies, values, weights, value_only = result.training_data()
+            boards, reserves, policies, values, weights, value_only = result.training_data()
             dataset.add_batch(
                 board_tensors=np.array(boards),
+                reserve_vectors=np.array(reserves),
                 policy_targets=np.array(policies),
                 value_targets=np.array(values),
                 weights=np.array(weights),
