@@ -83,8 +83,8 @@ def main():
                               help="Play N (or N-M for a random range) random moves at the start of each game before MCTS")
     train_parser.add_argument("--opening-book", type=str, default=None,
                               help="Path to game_outcomes.csv to enable boardspace opening positions")
-    train_parser.add_argument("--opening-boardspace-dir", type=str, default="games/boardspace",
-                              help="Directory containing boardspace SGF zip archives (default: games/boardspace)")
+    train_parser.add_argument("--opening-boardspace-dir", type=str, default="games/hive/boardspace",
+                              help="Directory containing boardspace SGF zip archives (default: games/hive/boardspace)")
     train_parser.add_argument("--boardspace-frac", type=float, default=1.0,
                               help="Fraction of games using book openings; remainder use --random-opening-moves (default: 1.0)")
     train_parser.add_argument("--skip-timeout-games", action="store_true",
@@ -98,7 +98,7 @@ def main():
     )
     pretrain_parser.add_argument("--games-csv", default="games/game_outcomes.csv")
     pretrain_parser.add_argument("--elo-csv", default="games/player_elo.csv")
-    pretrain_parser.add_argument("--boardspace-dir", default="games/boardspace")
+    pretrain_parser.add_argument("--boardspace-dir", default="games/hive/boardspace")
     pretrain_parser.add_argument("--min-elo", type=float, default=1600.0,
                                  help="Minimum ELO for both players (default: 1600)")
     pretrain_parser.add_argument("--min-games", type=int, default=20,
