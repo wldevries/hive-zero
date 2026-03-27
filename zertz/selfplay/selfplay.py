@@ -196,10 +196,13 @@ class SelfPlayTrainer:
             for epoch in range(epochs_per_iter):
                 losses = self.trainer.train_epoch(dataset, batch_size=batch_size)
                 lr = self.trainer._current_lr
+                total_s = f"{losses['total_loss']:.4f}"
+                policy_s = f"{losses['policy_loss']:.4f}"
+                value_s = f"{losses['value_loss']:.4f}"
                 print(
-                    f"  Epoch {epoch + 1}: loss={_cy(f\"{losses['total_loss']:.4f}\")} "
-                    f"(policy={_cc(f\"{losses['policy_loss']:.4f}\")}, "
-                    f"value={_cc(f\"{losses['value_loss']:.4f}\")}, "
+                    f"  Epoch {epoch + 1}: loss={_cy(total_s)} "
+                    f"(policy={_cc(policy_s)}, "
+                    f"value={_cc(value_s)}, "
                     f"lr={lr:.4f})"
                 )
 
