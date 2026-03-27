@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import csv
 
-from ..training_log import LOG_HEADER
+from shared.training_log import LOG_HEADER
 import os
 import random
 import time

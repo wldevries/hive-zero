@@ -9,6 +9,10 @@ dependencies = [
     "colorama>=0.4.6",
 ]
 
+[project.scripts]
+hive = "hive.cli:main"
+zertz = "zertz.cli:main"
+
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"

@@ -6,7 +6,7 @@ import numpy as np
 import os
 from typing import Optional
 
-from ..training_log import LOG_HEADER, csv_comment
+from shared.training_log import LOG_HEADER, csv_comment
 
 import colorama
 colorama.init()
