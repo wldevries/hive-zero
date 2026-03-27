@@ -328,6 +328,7 @@ class SelfPlayTrainer:
                             f"{avg_gl:.1f},{med_gl},{avg_dl:.1f},{med_dl}\n")
             self._comment = ""
             self._log.flush()
+            os.fsync(self._log.fileno())
 
             # Save latest model + periodic checkpoint
             metadata = {
@@ -451,6 +452,7 @@ class SelfPlayTrainer:
             self._log.write(f"{iteration},pit-bootstrap,{simulations},{w},{l},{d},0,0,0,"
                             f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
             self._log.flush()
+            os.fsync(self._log.fileno())
             return
 
         print(f"\n--- Checkpoint eval: challenger (i{iteration}) vs best ({num_games} games) ---")
@@ -489,6 +491,7 @@ class SelfPlayTrainer:
         self._log.write(f"{iteration},pit,{simulations},{w},{l},{d},0,0,0,"
                         f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
         self._log.flush()
+        os.fsync(self._log.fileno())
 
     def _run_eval(self, eval_config: dict, iteration: int, replay_buffer=None):
         """Run evaluation games against Mzinga and feed samples back."""
@@ -539,6 +542,7 @@ class SelfPlayTrainer:
                             f"{len(replay_buffer) if replay_buffer else 0},"
                             f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
             self._log.flush()
+            os.fsync(self._log.fileno())
         except Exception as e:
             print(f"  Eval failed: {e}")
         finally:
