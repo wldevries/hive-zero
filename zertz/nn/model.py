@@ -38,8 +38,8 @@ class ZertzNet(nn.Module):
 
         trunk_flat = channels * GRID_SIZE * GRID_SIZE
 
-        # Policy head: flatten trunk → linear → POLICY_SIZE
-        self.policy_fc = nn.Linear(trunk_flat, POLICY_SIZE)
+        # Policy head: flatten trunk → concat reserve → linear → POLICY_SIZE
+        self.policy_fc = nn.Linear(trunk_flat + RESERVE_SIZE, POLICY_SIZE)
 
         # Value head: 1x1 conv → flatten → concat reserve → FC(256) → tanh
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
@@ -62,8 +62,9 @@ class ZertzNet(nn.Module):
         for block in self.res_blocks:
             x = block(x)
 
-        # Policy head
+        # Policy head: concat reserve so move choice can condition on capture progress
         p = x.view(x.size(0), -1)
+        p = torch.cat([p, reserve_vector], dim=1)
         policy_logits = self.policy_fc(p)
 
         # Value head: squeeze to 1 channel, flatten, concat reserve
