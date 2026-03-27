@@ -8,10 +8,11 @@ use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
 
 use zertz_game::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS};
+use zertz_game::hex::{is_valid, Hex};
 use zertz_game::mcts::arena::NodeId;
 use zertz_game::mcts::search::MctsSearch;
 use zertz_game::move_encoding::{encode_move, POLICY_SIZE};
-use zertz_game::zertz::{ZertzBoard, ZertzMove};
+use zertz_game::zertz::{Marble, ZertzBoard, ZertzMove, MAX_CAPTURE_JUMPS};
 use core_game::game::{Game, Outcome, Player};
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
@@ -412,12 +413,245 @@ impl PyZertzSelfPlaySession {
 }
 
 // ---------------------------------------------------------------------------
+// Move string utilities  (A-G columns, 1-7 rows, matching board display)
+// ---------------------------------------------------------------------------
+
+fn hex_to_coord(h: Hex) -> String {
+    let (q, r) = h;
+    let col = (b'A' + (q + 3) as u8) as char;
+    let row = 4 - r;  // r=-3→7, r=0→4, r=3→1
+    format!("{}{}", col, row)
+}
+
+fn coord_to_hex(s: &str) -> Result<Hex, String> {
+    let s = s.trim();
+    let bytes = s.as_bytes();
+    if bytes.len() != 2 {
+        return Err(format!("Expected cell like D4, got '{}'", s));
+    }
+    let col_b = bytes[0].to_ascii_uppercase();
+    let row_b = bytes[1];
+    if !(b'A'..=b'G').contains(&col_b) {
+        return Err(format!("Column must be A-G, got '{}'", col_b as char));
+    }
+    if !(b'1'..=b'7').contains(&row_b) {
+        return Err(format!("Row must be 1-7, got '{}'", row_b as char));
+    }
+    let q = col_b as i8 - b'A' as i8 - 3;
+    let r = 4 - (row_b - b'0') as i8;
+    let h = (q, r);
+    if !is_valid(h) {
+        return Err(format!("'{}' is not on the Zertz board", s));
+    }
+    Ok(h)
+}
+
+pub fn move_to_str(mv: ZertzMove) -> String {
+    match mv {
+        ZertzMove::Place { color, place_at, remove } =>
+            format!("{} {} {}", color, hex_to_coord(place_at), hex_to_coord(remove)),
+        ZertzMove::PlaceOnly { color, place_at } =>
+            format!("{} {}", color, hex_to_coord(place_at)),
+        ZertzMove::Capture { jumps, len } => {
+            let mut s = format!("CAP {}", hex_to_coord(jumps[0].0));
+            for i in 0..len as usize {
+                s.push(' ');
+                s.push_str(&hex_to_coord(jumps[i].2));
+            }
+            s
+        }
+        ZertzMove::Pass => "pass".to_string(),
+    }
+}
+
+fn str_to_move(s: &str) -> Result<ZertzMove, String> {
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err("Empty move string".to_string());
+    }
+    let first = parts[0].to_ascii_uppercase();
+    match first.as_str() {
+        "CAP" => {
+            if parts.len() < 3 {
+                return Err("CAP needs at least from + one landing: CAP D4 D6".to_string());
+            }
+            let positions: Result<Vec<Hex>, _> = parts[1..].iter().map(|s| coord_to_hex(s)).collect();
+            let positions = positions?;
+            let n_hops = positions.len() - 1;
+            if n_hops > MAX_CAPTURE_JUMPS {
+                return Err(format!("Too many hops (max {})", MAX_CAPTURE_JUMPS));
+            }
+            let mut jumps = [((0i8, 0i8), (0i8, 0i8), (0i8, 0i8)); MAX_CAPTURE_JUMPS];
+            for i in 0..n_hops {
+                let (fq, fr) = positions[i];
+                let (tq, tr) = positions[i + 1];
+                let dq = tq - fq;
+                let dr = tr - fr;
+                if dq % 2 != 0 || dr % 2 != 0 {
+                    return Err(format!(
+                        "Hop from {} to {} is not a valid 2-step jump",
+                        hex_to_coord(positions[i]), hex_to_coord(positions[i + 1])
+                    ));
+                }
+                jumps[i] = (positions[i], (fq + dq / 2, fr + dr / 2), positions[i + 1]);
+            }
+            Ok(ZertzMove::Capture { jumps, len: n_hops as u8 })
+        }
+        "PASS" => Ok(ZertzMove::Pass),
+        "W" | "G" | "B" => {
+            let color = match first.as_str() {
+                "W" => Marble::White,
+                "G" => Marble::Grey,
+                _   => Marble::Black,
+            };
+            match parts.len() {
+                2 => Ok(ZertzMove::PlaceOnly { color, place_at: coord_to_hex(parts[1])? }),
+                3 => Ok(ZertzMove::Place { color, place_at: coord_to_hex(parts[1])?, remove: coord_to_hex(parts[2])? }),
+                _ => Err(format!("Expected 'W/G/B place [remove]', got '{}'", s)),
+            }
+        }
+        _ => Err(format!("Unknown move format '{}': expected CAP/W/G/B/pass", s)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZertzGame — interactive game state exposed to Python
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "ZertzGame")]
+struct PyZertzGame {
+    board: ZertzBoard,
+}
+
+#[pymethods]
+impl PyZertzGame {
+    #[new]
+    fn new() -> Self {
+        PyZertzGame { board: ZertzBoard::default() }
+    }
+
+    fn valid_moves(&self) -> Vec<String> {
+        self.board.legal_moves().into_iter().map(move_to_str).collect()
+    }
+
+    fn play(&mut self, move_str: &str) -> PyResult<()> {
+        let mv = str_to_move(move_str)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        self.board.play(mv)
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+
+    fn board_str(&self) -> String {
+        format!("{}", self.board)
+    }
+
+    fn outcome(&self) -> &str {
+        match self.board.outcome() {
+            Outcome::Ongoing              => "ongoing",
+            Outcome::WonBy(Player::Player1) => "p1",
+            Outcome::WonBy(Player::Player2) => "p2",
+            Outcome::Draw                 => "draw",
+        }
+    }
+
+    fn next_player(&self) -> u8 {
+        match self.board.next_player() {
+            Player::Player1 => 0,
+            Player::Player2 => 1,
+        }
+    }
+
+    fn encode<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        let mut buf = vec![0f32; BOARD_FLAT];
+        encode_board(&self.board, &mut buf);
+        PyArray1::from_vec_bound(py, buf)
+    }
+
+    /// Run MCTS for `simulations` sims and return the best move string.
+    /// eval_fn(boards[N, C, H, W]) -> (policy[N, POLICY_SIZE], value[N])
+    #[pyo3(signature = (eval_fn, simulations=200, c_puct=1.5))]
+    fn best_move(
+        &self,
+        py: Python<'_>,
+        eval_fn: &Bound<'_, PyAny>,
+        simulations: usize,
+        c_puct: f32,
+    ) -> PyResult<String> {
+        if self.board.outcome() != Outcome::Ongoing {
+            return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
+        }
+
+        let mut search = MctsSearch::new(simulations + 64);
+        search.c_puct = c_puct;
+
+        // Initial NN eval on root position
+        let mut buf = vec![0f32; BOARD_FLAT];
+        encode_board(&self.board, &mut buf);
+        let root_arr = numpy::ndarray::Array2::from_shape_vec((1, BOARD_FLAT), buf).unwrap();
+        let root_np = PyArray2::from_owned_array_bound(py, root_arr);
+        let root_4d = root_np.reshape([1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+
+        let result = eval_fn.call1((root_4d,))?;
+        let tuple = result.downcast::<PyTuple>().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value) tuple")
+        })?;
+        let policy_arr: PyReadonlyArray2<f32> = tuple.get_item(0)?.extract()?;
+        let root_policy = policy_arr.as_slice()?.to_vec();
+
+        search.init(&self.board, &root_policy);
+        search.apply_root_dirichlet(0.3, 0.25);
+
+        // Simulation rounds (batch_size=8)
+        let batch = 8usize;
+        let mut done = 0usize;
+        while done < simulations {
+            let leaves = search.select_leaves(batch.min(simulations - done));
+            if leaves.is_empty() { break; }
+            let nl = leaves.len();
+
+            let mut flat = vec![0f32; nl * BOARD_FLAT];
+            for (k, &leaf) in leaves.iter().enumerate() {
+                let enc = search.encode_leaf(leaf);
+                flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&enc);
+            }
+
+            let leaf_arr = numpy::ndarray::Array2::from_shape_vec((nl, BOARD_FLAT), flat).unwrap();
+            let leaf_np = PyArray2::from_owned_array_bound(py, leaf_arr);
+            let leaf_4d = leaf_np.reshape([nl, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+
+            let res = eval_fn.call1((leaf_4d,))?;
+            let tup = res.downcast::<PyTuple>().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value) tuple")
+            })?;
+            let lp: PyReadonlyArray2<f32> = tup.get_item(0)?.extract()?;
+            let lv: PyReadonlyArray1<f32> = tup.get_item(1)?.extract()?;
+
+            let leaf_policies: Vec<Vec<f32>> = (0..nl)
+                .map(|k| lp.as_slice().unwrap()[k * POLICY_SIZE..(k + 1) * POLICY_SIZE].to_vec())
+                .collect();
+            let leaf_values: Vec<f32> = lv.as_slice()?.to_vec();
+
+            search.expand_and_backprop(&leaves, &leaf_policies, &leaf_values);
+            done += nl;
+        }
+
+        let dist = search.get_pruned_visit_distribution();
+        let best = dist.iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(mv, _)| move_to_str(*mv))
+            .unwrap_or_else(|| "pass".to_string());
+        Ok(best)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyZertzSelfPlaySession>()?;
     m.add_class::<PyZertzSelfPlayResult>()?;
+    m.add_class::<PyZertzGame>()?;
     m.add("ZERTZ_POLICY_SIZE", POLICY_SIZE)?;
     m.add("ZERTZ_NUM_CHANNELS", NUM_CHANNELS)?;
     m.add("ZERTZ_GRID_SIZE", GRID_SIZE)?;

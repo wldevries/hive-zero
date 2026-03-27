@@ -37,9 +37,24 @@ def main():
     )
     train_parser.add_argument("--comment", type=str, default="")
 
+    # Play mode
+    play_parser = subparsers.add_parser("play", help="Play against the AI")
+    play_parser.add_argument("--model", type=str, default=None, help="Model checkpoint (omit for random AI)")
+    play_parser.add_argument("--device", type=str, default="cuda")
+    play_parser.add_argument("--simulations", type=int, default=200)
+    play_parser.add_argument("--color", type=str, default=None, help="p1 or p2 (default: random)")
+
     args = parser.parse_args()
 
-    if args.command == "train":
+    if args.command == "play":
+        from zertz.play import run
+        run(
+            model_path=args.model,
+            device=args.device,
+            simulations=args.simulations,
+            human_color=args.color,
+        )
+    elif args.command == "train":
         from zertz.selfplay.selfplay import SelfPlayTrainer
 
         trainer = SelfPlayTrainer(
