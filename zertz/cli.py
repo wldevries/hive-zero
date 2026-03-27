@@ -17,7 +17,7 @@ def main():
     train_parser.add_argument("--games", type=int, default=20)
     train_parser.add_argument("--simulations", type=int, default=100)
     train_parser.add_argument("--epochs", type=int, default=1)
-    train_parser.add_argument("--batch-size", type=int, default=256)
+    train_parser.add_argument("--training-batch-size", type=int, default=256)
     train_parser.add_argument("--blocks", type=int, default=6)
     train_parser.add_argument("--channels", type=int, default=64)
     train_parser.add_argument("--lr", type=float, default=0.02)
@@ -27,6 +27,9 @@ def main():
     train_parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/zertz")
     train_parser.add_argument("--playout-cap-p", type=float, default=0.0)
     train_parser.add_argument("--fast-cap", type=int, default=20)
+    train_parser.add_argument("--play-batch-size", type=int, default=1,
+                              help="MCTS selection rounds per GPU inference call. "
+                                   "Actual batch = play_batch_size × active_games.")
     train_parser.add_argument("--comment", type=str, default="")
 
     args = parser.parse_args()
@@ -43,12 +46,13 @@ def main():
             games_per_iter=args.games,
             simulations=args.simulations,
             epochs_per_iter=args.epochs,
-            batch_size=args.batch_size,
+            batch_size=args.training_batch_size,
             max_moves=args.max_moves,
             replay_window=args.replay_window,
             checkpoint_every=args.checkpoint_every,
             playout_cap_p=args.playout_cap_p,
             fast_cap=args.fast_cap,
+            play_batch_size=args.play_batch_size,
             time_limit_minutes=args.time_limit,
             comment=args.comment,
         )

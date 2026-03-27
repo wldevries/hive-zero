@@ -14,7 +14,7 @@
 
 use core_game::game::{Game, Player};
 
-use crate::hex::{all_hexes, hex_to_grid};
+use crate::hex::{all_hexes, hex_to_grid, hex_to_index};
 use crate::zertz::{Marble, Ring, ZertzBoard};
 
 const BOARD_SIZE: usize = crate::hex::BOARD_SIZE;
@@ -52,7 +52,7 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32]) {
         let (row, col) = hex_to_grid(h);
         let base = row * GRID_SIZE + col; // position in grid
 
-        let ring = rings.get(&h).copied().unwrap_or(Ring::Removed);
+        let ring = rings[hex_to_index(h)];
         match ring {
             Ring::Occupied(Marble::White) => board_out[0 * GRID_SIZE * GRID_SIZE + base] = 1.0,
             Ring::Occupied(Marble::Grey) => board_out[1 * GRID_SIZE * GRID_SIZE + base] = 1.0,
@@ -85,7 +85,7 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32]) {
         let (row, col) = hex_to_grid(h);
         let base = row * GRID_SIZE + col;
 
-        let ring = rings.get(&h).copied().unwrap_or(Ring::Removed);
+        let ring = rings[hex_to_index(h)];
         if ring != Ring::Removed {
             board_out[4 * GRID_SIZE * GRID_SIZE + base] = player_val;
             board_out[5 * GRID_SIZE * GRID_SIZE + base] = supply_norm[0];

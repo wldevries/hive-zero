@@ -100,7 +100,7 @@ pub struct PyZertzSelfPlaySession {
     temperature: f32,
     temp_threshold: u32,
     c_puct: f32,
-    leaf_batch_size: usize,
+    play_batch_size: usize,
     playout_cap_p: f32,
     fast_cap: usize,
 }
@@ -115,7 +115,7 @@ impl PyZertzSelfPlaySession {
         temperature = 1.0,
         temp_threshold = 15,
         c_puct = 1.5,
-        leaf_batch_size = 8,
+        play_batch_size = 1,
         playout_cap_p = 0.0,
         fast_cap = 20,
     ))]
@@ -126,13 +126,13 @@ impl PyZertzSelfPlaySession {
         temperature: f32,
         temp_threshold: u32,
         c_puct: f32,
-        leaf_batch_size: usize,
+        play_batch_size: usize,
         playout_cap_p: f32,
         fast_cap: usize,
     ) -> Self {
         PyZertzSelfPlaySession {
             num_games, simulations, max_moves, temperature, temp_threshold,
-            c_puct, leaf_batch_size, playout_cap_p, fast_cap,
+            c_puct, play_batch_size, playout_cap_p, fast_cap,
         }
     }
 
@@ -227,20 +227,29 @@ impl PyZertzSelfPlaySession {
             }
 
             // --- Simulation rounds ---
+            // play_batch_size = number of selection rounds per NN call (same semantics as Hive).
+            // Each round selects 1 leaf per active game, so the actual NN batch is
+            // play_batch_size × active_games.
             let mut game_sims: Vec<usize> = vec![0; n];
             loop {
                 let mut leaf_ids: Vec<NodeId> = Vec::new();
                 let mut leaf_game_idx: Vec<usize> = Vec::new();
 
-                for (i, &gi) in mcts_games.iter().enumerate() {
-                    if game_sims[i] >= sim_caps[i] { continue; }
-                    let leaves = searches[gi].select_leaves(self.leaf_batch_size);
-                    let count = leaves.len();
-                    for leaf in leaves {
-                        leaf_ids.push(leaf);
-                        leaf_game_idx.push(i);
+                // Run play_batch_size rounds; each round = 1 leaf per active game.
+                for _round in 0..self.play_batch_size {
+                    let mut any_collected = false;
+                    for (i, &gi) in mcts_games.iter().enumerate() {
+                        if game_sims[i] >= sim_caps[i] { continue; }
+                        let leaves = searches[gi].select_leaves(1);
+                        let count = leaves.len();
+                        if count > 0 { any_collected = true; }
+                        for leaf in leaves {
+                            leaf_ids.push(leaf);
+                            leaf_game_idx.push(i);
+                        }
+                        game_sims[i] += count;
                     }
-                    game_sims[i] += count;
+                    if !any_collected { break; }
                 }
 
                 if leaf_ids.is_empty() { break; }
@@ -283,7 +292,7 @@ impl PyZertzSelfPlaySession {
                     );
                 }
 
-                if game_sims.iter().zip(sim_caps.iter()).all(|(s, c)| s >= c) { break; }
+                if game_sims.iter().zip(sim_caps.iter()).all(|(s, c)| *s >= *c) { break; }
             }
 
             // --- Select and apply moves ---

@@ -94,7 +94,7 @@ fn select_leaf(
             let mv = arena.get(node_id).edges[best_idx].mv;
             let child_board = {
                 let mut b = arena.get(node_id).board.clone_light();
-                b.play(mv).expect("legal move failed in MCTS selection");
+                b.play_mcts(mv).expect("legal move failed in MCTS selection");
                 b
             };
             let new_node = MctsNode {

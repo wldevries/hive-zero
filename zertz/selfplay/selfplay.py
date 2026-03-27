@@ -85,6 +85,7 @@ class SelfPlayTrainer:
         checkpoint_every: int = 10,
         playout_cap_p: float = 0.0,
         fast_cap: int = 20,
+        play_batch_size: int = 1,
         time_limit_minutes: Optional[float] = None,
         comment: str = "",
     ):
@@ -123,6 +124,7 @@ class SelfPlayTrainer:
                 max_moves=max_moves,
                 playout_cap_p=playout_cap_p,
                 fast_cap=fast_cap,
+                play_batch_size=play_batch_size,
             )
             self.model.eval()
 
