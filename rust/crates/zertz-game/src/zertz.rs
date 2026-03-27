@@ -850,55 +850,150 @@ impl ZertzBoard {
 
 impl Display for ZertzBoard {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // ANSI color codes matching the board display.
+        const CW: &str = "\x1b[96m"; // bright cyan  — White
+        const CG: &str = "\x1b[93m"; // bright yellow — Grey
+        const CB: &str = "\x1b[95m"; // bright magenta — Black
+        const CR: &str = "\x1b[0m";  // reset
         writeln!(
             f,
-            "Supply: W={} G={} B={}",
+            "Supply:      W={CW}{}{CR} G={CG}{}{CR} B={CB}{}{CR}",
             self.supply[0], self.supply[1], self.supply[2]
         )?;
         writeln!(
             f,
-            "Captures P1: W={} G={} B={}",
+            "Captures P1: W={CW}{}{CR} G={CG}{}{CR} B={CB}{}{CR}",
             self.captures[0][0], self.captures[0][1], self.captures[0][2]
         )?;
         writeln!(
             f,
-            "Captures P2: W={} G={} B={}",
+            "Captures P2: W={CW}{}{CR} G={CG}{}{CR} B={CB}{}{CR}",
             self.captures[1][0], self.captures[1][1], self.captures[1][2]
         )?;
 
-        let radius = hex::RADIUS;
-        for ri in 0..7 {
-            let r = ri as i8 - radius;
-            let q_min = (-radius).max(-radius - r);
-            let q_max = radius.min(radius - r);
-            // Indent for hex layout.
-            let indent = (3usize).saturating_sub(ri).max(ri.saturating_sub(3));
-            for _ in 0..indent {
-                write!(f, " ")?;
-            }
-            let mut first = true;
-            let mut q = q_min;
-            while q <= q_max {
-                if !first {
-                    write!(f, " ")?;
-                }
-                first = false;
-                let h: Hex = (q, r);
-                let state = if is_valid(h) {
-                    self.rings[hex_to_index(h)]
-                } else {
-                    Ring::Removed
-                };
-                match state {
-                    Ring::Empty => write!(f, ".")?,
-                    Ring::Occupied(m) => write!(f, "{m}")?,
-                    Ring::Removed => write!(f, " ")?,
-                }
-                q += 1;
-            }
-            writeln!(f)?;
+        // Staggered board display.
+        //
+        // Each cell (q, r) appears at display row  drow = 2r + q + 2*RADIUS
+        // and visual column position              pos  = (q + RADIUS) * STEP + SHIFT
+        //
+        // SHIFT = STEP reserves one extra column-width on the left so that row
+        // labels can sit at "outer-rim" positions (one step beyond the left
+        // boundary of the board) and are always visible regardless of ring state.
+        //
+        // Row labels (7 at top, 1 at bottom):  outer-rim drow and pos come from
+        //   q_outer = (leftmost q for that r) - 1
+        //   drow    = 2r + q_outer + 2*RADIUS
+        //   pos     = (q_outer + RADIUS) * STEP + SHIFT   (evaluates to 0..9)
+        //
+        // Column labels (A..G): outer-rim position one step below the last ring
+        // of each column.  For columns A/G the outer row falls within the 13
+        // board rows; for B/F one row below; C/D/E need one or two extra rows.
+        const STEP: usize = 3;
+        const SHIFT: usize = STEP;
+        let rad = hex::RADIUS as i32; // 3
+        let n_rows = (rad as usize) * 4 + 1; // 13
+
+        // Visual position for a (possibly negative) col_idx.
+        let vpos = |ci: i32| -> usize { ((ci + rad) * STEP as i32 + SHIFT as i32) as usize };
+
+        // Gather all row-label items: (drow, pos, char).
+        // drow = -1 is an extra row above the board (for label '7').
+        let mut row_labels: Vec<(i32, usize, char)> = Vec::new();
+        for r in -rad..=rad {
+            let q_leftmost = (-rad).max(-rad - r);
+            let q_outer    = q_leftmost - 1;
+            let drow = 2 * r + q_outer + 2 * rad;
+            let pos  = vpos(q_outer);
+            let ch   = (b'0' + (4 - r) as u8) as char; // r=-3→'7', r=3→'1'
+            row_labels.push((drow, pos, ch));
         }
 
+        // Gather all column-label items: (drow, pos, char).
+        let mut col_labels: Vec<(i32, usize, char)> = Vec::new();
+        for q in -rad..=rad {
+            let r_bottom = rad.min(rad - q);
+            let r_outer  = r_bottom + 1;
+            let drow = 2 * r_outer + q + 2 * rad;
+            let pos  = vpos(q);
+            let ch   = (b'A' + (q + rad) as u8) as char;
+            col_labels.push((drow, pos, ch));
+        }
+
+        // Render one output line: place (pos, content) pairs left-to-right,
+        // trimming trailing whitespace.
+        let render = |items: &mut Vec<(usize, String)>| -> String {
+            items.sort_by_key(|(p, _)| *p);
+            // remove trailing " " (removed rings)
+            while items.last().map_or(false, |(_, c)| c == " ") {
+                items.pop();
+            }
+            let mut row = String::new();
+            let mut cursor = 0usize;
+            for (pos, cell) in items.iter() {
+                while cursor < *pos { row.push(' '); cursor += 1; }
+                row.push_str(cell);
+                cursor += 1;
+            }
+            row
+        };
+
+        // Extra top row (row label '7' sits one drow above the board).
+        if let Some((_, pos, ch)) = row_labels.iter().find(|(d, _, _)| *d == -1) {
+            let mut items = vec![(*pos, format!("\x1b[90m{ch}\x1b[0m"))];
+            writeln!(f, "{}", render(&mut items))?;
+        }
+
+        // Board rows drow = 0 .. n_rows-1.
+        for drow in 0..n_rows {
+            let mut items: Vec<(usize, String)> = Vec::new();
+
+            // Row label for this drow (always shown).
+            if let Some((_, pos, ch)) = row_labels.iter().find(|(d, _, _)| *d == drow as i32) {
+                items.push((*pos, format!("\x1b[90m{ch}\x1b[0m")));
+            }
+
+            // Column labels whose outer-rim drow falls on this board row.
+            for &(d, pos, ch) in &col_labels {
+                if d == drow as i32 {
+                    items.push((pos, format!("\x1b[90m{ch}\x1b[0m")));
+                }
+            }
+
+            // Ring cells.
+            for q in -rad..=rad {
+                let two_r = drow as i32 - 2 * rad - q;
+                if two_r % 2 != 0 { continue; }
+                let r = two_r / 2;
+                let h: Hex = (q as i8, r as i8);
+                if !is_valid(h) { continue; }
+                let pos = vpos(q);
+                let cell = match self.rings[hex_to_index(h)] {
+                    Ring::Occupied(Marble::White) => format!("{CW}W{CR}"),
+                    Ring::Occupied(Marble::Grey)  => format!("{CG}G{CR}"),
+                    Ring::Occupied(Marble::Black) => format!("{CB}B{CR}"),
+                    Ring::Removed => " ".to_string(),
+                    Ring::Empty   => "o".to_string(),
+                };
+                items.push((pos, cell));
+            }
+
+            writeln!(f, "{}", render(&mut items))?;
+        }
+
+        // Extra bottom rows for column labels C/E (drow=13) and D (drow=14).
+        let mut extra_drows: Vec<i32> = col_labels.iter()
+            .filter(|(d, _, _)| *d >= n_rows as i32)
+            .map(|(d, _, _)| *d)
+            .collect();
+        extra_drows.sort();
+        extra_drows.dedup();
+        for ed in extra_drows {
+            let mut items: Vec<(usize, String)> = col_labels.iter()
+                .filter(|(d, _, _)| *d == ed)
+                .map(|(_, pos, ch)| (*pos, format!("\x1b[90m{ch}\x1b[0m")))
+                .collect();
+            writeln!(f, "{}", render(&mut items))?;
+        }
 
         Ok(())
     }

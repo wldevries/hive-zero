@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use core_game::game::Game;
 use crate::hex::boardspace_to_hex;
 use crate::sgf::{self, Color, Coord, GameRecord, Turn, Variant};
 use crate::zertz::{
@@ -527,5 +528,150 @@ pub fn run_debug(zip_path: &str, sgf_name: &str) {
         println!("REPLAY ERROR at turn {}: {err}", result.turns_played);
     } else {
         println!("Replay OK ({} turns)", result.turns_played);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Playback: interactive step-through of a randomly chosen boardspace game
+// ---------------------------------------------------------------------------
+
+/// Collect all parseable standard game records from a zip file.
+fn collect_games_from_zip(path: &Path, out: &mut Vec<(String, GameRecord)>) {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => { eprintln!("  failed to open {}: {e}", path.display()); return; }
+    };
+    let _ = sgf::iter_games_in_zip(file, |name, record| {
+        if matches!(record.variant, Variant::Standard) {
+            out.push((name.to_string(), record));
+        }
+    });
+}
+
+pub fn run_playback(games_path: &str, auto_ms: Option<u64>) {
+    let path = Path::new(games_path);
+    if !path.exists() {
+        eprintln!("Path not found: {games_path}");
+        return;
+    }
+
+    // Collect all standard games.
+    let mut all_games: Vec<(String, GameRecord)> = Vec::new();
+    if path.is_file() && path.extension().is_some_and(|e| e == "zip") {
+        collect_games_from_zip(path, &mut all_games);
+    } else if path.is_dir() {
+        core_game::sgf::visit_zip_dir(path, &mut |p| collect_games_from_zip(p, &mut all_games));
+    } else {
+        eprintln!("Not a zip file or directory: {games_path}");
+        return;
+    }
+
+    if all_games.is_empty() {
+        eprintln!("No standard games found in {games_path}");
+        return;
+    }
+
+    // Pick one at random.
+    use rand::seq::SliceRandom;
+    let mut rng = rand::thread_rng();
+    let (sgf_name, record) = all_games.choose(&mut rng).unwrap();
+    println!("Game: {sgf_name}");
+    println!("  {} vs {}  result: {}", record.player0, record.player1, record.result);
+    println!("  {} turns", record.turns.len());
+    println!();
+
+    // Step through the game, displaying the board after each turn.
+    let mut board = crate::zertz::ZertzBoard::default();
+    println!("Initial position:");
+    println!("{board}");
+
+    for (i, (player, turn)) in record.turns.iter().enumerate() {
+        // Describe the move.
+        let p_name = if *player == 0 { &record.player0 } else { &record.player1 };
+        let turn_desc = match turn {
+            Turn::Place { color, at, remove } =>
+                format!("Place {:?} at {} remove {}", color, at, remove),
+            Turn::PlaceOnly { color, at } =>
+                format!("Place {:?} at {}", color, at),
+            Turn::Capture { jumps } => {
+                let hops: Vec<String> = jumps.iter()
+                    .map(|(from, to)| format!("{from}→{to}"))
+                    .collect();
+                format!("Capture {}", hops.join(" "))
+            }
+        };
+        println!("Turn {} | P{player} ({p_name}): {turn_desc}", i + 1);
+
+        // Build and apply the move (reuse replay_game_inner logic via coord helpers).
+        let mv = match turn {
+            Turn::Place { color, at, remove } => {
+                let place_hex = match coord_to_hex(*at) { Ok(h) => h, Err(e) => { eprintln!("  bad coord: {e}"); break; } };
+                let remove_hex = match coord_to_hex(*remove) { Ok(h) => h, Err(e) => { eprintln!("  bad coord: {e}"); break; } };
+                ZertzMove::Place { color: color_to_marble(*color), place_at: place_hex, remove: remove_hex }
+            }
+            Turn::PlaceOnly { color, at } => {
+                let place_hex = match coord_to_hex(*at) { Ok(h) => h, Err(e) => { eprintln!("  bad coord: {e}"); break; } };
+                ZertzMove::PlaceOnly { color: color_to_marble(*color), place_at: place_hex }
+            }
+            Turn::Capture { jumps } => {
+                if jumps.is_empty() { continue; }
+                let mut capture_jumps = [((0i8,0i8),(0i8,0i8),(0i8,0i8)); crate::zertz::MAX_CAPTURE_JUMPS];
+                let mut len = 0u8;
+                let mut ok = true;
+                for (from_c, to_c) in jumps {
+                    let from_h = match coord_to_hex(*from_c) { Ok(h) => h, Err(e) => { eprintln!("  bad coord: {e}"); ok = false; break; } };
+                    let to_h   = match coord_to_hex(*to_c)   { Ok(h) => h, Err(e) => { eprintln!("  bad coord: {e}"); ok = false; break; } };
+                    if let Some(over_h) = find_intermediate(board.rings(), from_h, to_h) {
+                        if (len as usize) >= crate::zertz::MAX_CAPTURE_JUMPS { eprintln!("  capture chain too long"); ok = false; break; }
+                        capture_jumps[len as usize] = (from_h, over_h, to_h);
+                        len += 1;
+                    } else {
+                        match find_capture_path(board.rings(), from_h, to_h) {
+                            Some(path) => {
+                                for (f, o, t) in path {
+                                    if (len as usize) >= crate::zertz::MAX_CAPTURE_JUMPS { eprintln!("  capture chain too long"); ok = false; break; }
+                                    capture_jumps[len as usize] = (f, o, t);
+                                    len += 1;
+                                }
+                            }
+                            None => { eprintln!("  no path between {from_c} and {to_c}"); ok = false; break; }
+                        }
+                    }
+                }
+                if !ok { break; }
+                ZertzMove::Capture { jumps: capture_jumps, len }
+            }
+        };
+
+        if let Err(e) = board.play_unchecked(mv) {
+            eprintln!("  engine error: {e}");
+            break;
+        }
+
+        // Wait or sleep between turns.
+        match auto_ms {
+            None => {
+                // Press Enter to advance.
+                use std::io::{BufRead, Write};
+                print!("  [Enter for next move, q+Enter to quit] ");
+                let _ = std::io::stdout().flush();
+                let stdin = std::io::stdin();
+                let line = stdin.lock().lines().next().and_then(|l| l.ok()).unwrap_or_default();
+                if line.trim() == "q" { break; }
+            }
+            Some(ms) => {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+        }
+
+        println!("{board}");
+    }
+
+    println!("Game over.");
+    use core_game::game::Outcome;
+    match board.outcome() {
+        Outcome::WonBy(p) => println!("Winner: P{}", if p == core_game::game::Player::Player1 { 1 } else { 2 }),
+        Outcome::Draw    => println!("Draw"),
+        Outcome::Ongoing => println!("(game ended early)"),
     }
 }
