@@ -250,6 +250,7 @@ dependencies = [
  "rand",
  "rand_distr",
  "rayon",
+ "zertz-game",
 ]
 
 [[package]]

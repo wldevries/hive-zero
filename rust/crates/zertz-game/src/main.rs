@@ -1,11 +1,4 @@
-mod board_encoding;
-pub mod hex;
-mod mcts;
-mod move_encoding;
-mod sgf;
-mod random_play;
-mod replay;
-mod zertz;
+use zertz_game::{mcts, move_encoding, random_play, replay, zertz};
 
 // ---------------------------------------------------------------------------
 // MCTS demo
