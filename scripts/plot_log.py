@@ -43,9 +43,11 @@ def _restore_geometry(fig) -> None:
 def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
     df = pd.read_csv(csv_path, skipinitialspace=True, on_bad_lines="warn")
 
-    total = df["wins_w"] + df["wins_b"] + df["draws"]
-    df["win_w_pct"] = df["wins_w"] / total * 100
-    df["win_b_pct"] = df["wins_b"] / total * 100
+    col_w = "wins_w" if "wins_w" in df.columns else "wins_p1"
+    col_b = "wins_b" if "wins_b" in df.columns else "wins_p2"
+    total = df[col_w] + df[col_b] + df["draws"]
+    df["win_w_pct"] = df[col_w] / total * 100
+    df["win_b_pct"] = df[col_b] / total * 100
     df["draw_pct"] = df["draws"] / total * 100
 
     iters = df["iter"]
@@ -58,8 +60,10 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
     fig.suptitle(csv_path.name, fontsize=13)
 
     # --- Win percentages ---
-    ax1.plot(iters, df["win_w_pct"], label="White wins %", color="steelblue")
-    ax1.plot(iters, df["win_b_pct"], label="Black wins %", color="tomato")
+    label_w = "White wins %" if col_w == "wins_w" else "P1 wins %"
+    label_b = "Black wins %" if col_b == "wins_b" else "P2 wins %"
+    ax1.plot(iters, df["win_w_pct"], label=label_w, color="steelblue")
+    ax1.plot(iters, df["win_b_pct"], label=label_b, color="tomato")
     ax1.plot(iters, df["draw_pct"], label="Draws %", color="gray", linestyle="--")
     trend = np.poly1d(np.polyfit(iters, df["draw_pct"], 1))
     ax1.plot(iters, trend(iters), color="gray", linestyle="-", linewidth=1, alpha=0.5, label="Draws trend")
@@ -81,7 +85,8 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
     ax2.plot(iters, df["loss"], label="Total loss", color="black", linewidth=1.5)
     ax2.plot(iters, df["policy_loss"], label="Policy loss", color="royalblue", linewidth=1)
     ax2.plot(iters, df["value_loss"], label="Value loss", color="darkorange", linewidth=1)
-    ax2.plot(iters, df["qd_loss"], label="QD loss", color="mediumpurple", linewidth=1)
+    if "qd_loss" in df.columns:
+        ax2.plot(iters, df["qd_loss"], label="QD loss", color="mediumpurple", linewidth=1)
     if "qe_loss" in df.columns:
         qe = pd.to_numeric(df["qe_loss"], errors="coerce")
         if qe.notna().any() and (qe > 0).any():
