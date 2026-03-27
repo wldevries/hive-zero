@@ -25,6 +25,7 @@ class HiveNet(nn.Module):
     def __init__(self, num_blocks: int = 10, channels: int = 128,
                  grid_size: int = DEFAULT_GRID_SIZE):
         super().__init__()
+        self.game = "hive"
         if grid_size > DEFAULT_GRID_SIZE:
             raise ValueError(f"grid_size {grid_size} exceeds max board size {DEFAULT_GRID_SIZE}")
         if grid_size % 2 == 0:
@@ -112,6 +113,7 @@ def save_checkpoint(model: HiveNet, path: str, iteration: int = 0,
     """Save model with training metadata."""
     checkpoint = {
         "model_state_dict": model.state_dict(),
+        "game": "hive",
         "num_blocks": model.res_blocks.__len__(),
         "channels": model.input_conv.out_channels,
         "grid_size": model.grid_size,

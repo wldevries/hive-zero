@@ -26,6 +26,7 @@ class ZertzNet(nn.Module):
 
     def __init__(self, num_blocks: int = 6, channels: int = 64):
         super().__init__()
+        self.game = "zertz"
 
         self.input_conv = nn.Conv2d(NUM_CHANNELS, channels, 3, padding=1, bias=False)
         self.input_bn = nn.BatchNorm2d(channels)
@@ -78,6 +79,7 @@ def save_checkpoint(model: ZertzNet, path: str, iteration: int = 0,
                     metadata: dict | None = None):
     checkpoint = {
         "model_state_dict": model.state_dict(),
+        "game": "zertz",
         "num_blocks": len(model.res_blocks),
         "channels": model.input_conv.out_channels,
         "iteration": iteration,

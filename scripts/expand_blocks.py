@@ -14,20 +14,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
-from hive.nn.model import HiveNet, load_checkpoint, save_checkpoint
 
 
-def expand_blocks(src_path: str, dst_path: str, add_blocks: int):
+def expand_hive(src_path, dst_path, add_blocks):
+    from hive.nn.model import HiveNet, load_checkpoint, save_checkpoint
+
     model, ckpt = load_checkpoint(src_path)
     old_blocks = len(model.res_blocks)
     channels = model.input_conv.out_channels
+    grid_size = model.grid_size
     iteration = ckpt.get("iteration", 0)
 
-    print(f"Loaded: {old_blocks} blocks, {channels} channels, iteration {iteration}")
+    print(f"Loaded: {old_blocks} blocks, {channels} channels, grid={grid_size}, iteration {iteration}")
 
-    new_model = HiveNet(num_blocks=old_blocks + add_blocks, channels=channels)
+    new_model = HiveNet(num_blocks=old_blocks + add_blocks, channels=channels, grid_size=grid_size)
 
-    # Copy all existing weights
     new_model.input_conv.load_state_dict(model.input_conv.state_dict())
     new_model.input_bn.load_state_dict(model.input_bn.state_dict())
     for i, block in enumerate(model.res_blocks):
@@ -39,6 +40,10 @@ def expand_blocks(src_path: str, dst_path: str, add_blocks: int):
     new_model.value_bn.load_state_dict(model.value_bn.state_dict())
     new_model.value_fc1.load_state_dict(model.value_fc1.state_dict())
     new_model.value_fc2.load_state_dict(model.value_fc2.state_dict())
+    new_model.qd_conv.load_state_dict(model.qd_conv.state_dict())
+    new_model.qd_bn.load_state_dict(model.qd_bn.state_dict())
+    new_model.qd_fc1.load_state_dict(model.qd_fc1.state_dict())
+    new_model.qd_fc2.load_state_dict(model.qd_fc2.state_dict())
 
     # Zero-initialize bn2.weight (gamma) on new blocks → identity at start
     for i in range(old_blocks, old_blocks + add_blocks):
@@ -46,9 +51,50 @@ def expand_blocks(src_path: str, dst_path: str, add_blocks: int):
 
     params = sum(p.numel() for p in new_model.parameters())
     print(f"Expanded: {old_blocks + add_blocks} blocks, {channels} channels, {params/1e6:.2f}M params")
-
     save_checkpoint(new_model, dst_path, iteration, ckpt.get("metadata", {}))
     print(f"Saved to {dst_path}")
+
+
+def expand_zertz(src_path, dst_path, add_blocks):
+    from zertz.nn.model import ZertzNet, load_checkpoint, save_checkpoint
+
+    model, ckpt = load_checkpoint(src_path)
+    old_blocks = len(model.res_blocks)
+    channels = model.input_conv.out_channels
+    iteration = ckpt.get("iteration", 0)
+
+    print(f"Loaded: {old_blocks} blocks, {channels} channels, iteration {iteration}")
+
+    new_model = ZertzNet(num_blocks=old_blocks + add_blocks, channels=channels)
+
+    new_model.input_conv.load_state_dict(model.input_conv.state_dict())
+    new_model.input_bn.load_state_dict(model.input_bn.state_dict())
+    for i, block in enumerate(model.res_blocks):
+        new_model.res_blocks[i].load_state_dict(block.state_dict())
+    new_model.policy_fc.load_state_dict(model.policy_fc.state_dict())
+    new_model.value_conv.load_state_dict(model.value_conv.state_dict())
+    new_model.value_bn.load_state_dict(model.value_bn.state_dict())
+    new_model.value_fc1.load_state_dict(model.value_fc1.state_dict())
+    new_model.value_fc2.load_state_dict(model.value_fc2.state_dict())
+
+    # Zero-initialize bn2.weight (gamma) on new blocks → identity at start
+    for i in range(old_blocks, old_blocks + add_blocks):
+        torch.nn.init.zeros_(new_model.res_blocks[i].bn2.weight)
+
+    params = sum(p.numel() for p in new_model.parameters())
+    print(f"Expanded: {old_blocks + add_blocks} blocks, {channels} channels, {params/1e6:.2f}M params")
+    save_checkpoint(new_model, dst_path, iteration, ckpt.get("metadata", {}))
+    print(f"Saved to {dst_path}")
+
+
+def expand_blocks(src_path: str, dst_path: str, add_blocks: int):
+    ckpt = torch.load(src_path, weights_only=False)
+    game = ckpt.get("game", "hive")
+    print(f"Game: {game}")
+    if game == "zertz":
+        expand_zertz(src_path, dst_path, add_blocks)
+    else:
+        expand_hive(src_path, dst_path, add_blocks)
 
 
 if __name__ == "__main__":
