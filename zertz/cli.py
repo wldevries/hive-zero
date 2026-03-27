@@ -12,8 +12,9 @@ def main():
     train_parser.add_argument("--model", type=str, default="zertz.pt")
     train_parser.add_argument("--device", type=str, default="cuda")
     train_parser.add_argument("--iterations", type=int, default=None)
-    train_parser.add_argument("--time-limit", type=float, default=None,
-                              help="Training time limit in minutes")
+    train_parser.add_argument(
+        "--time-limit", type=float, default=None, help="Training time limit in minutes"
+    )
     train_parser.add_argument("--games", type=int, default=20)
     train_parser.add_argument("--simulations", type=int, default=100)
     train_parser.add_argument("--epochs", type=int, default=1)
@@ -21,24 +22,32 @@ def main():
     train_parser.add_argument("--blocks", type=int, default=6)
     train_parser.add_argument("--channels", type=int, default=64)
     train_parser.add_argument("--lr", type=float, default=0.02)
-    train_parser.add_argument("--max-moves", type=int, default=200)
+    train_parser.add_argument("--max-moves", type=int, default=40)
     train_parser.add_argument("--replay-window", type=int, default=8)
     train_parser.add_argument("--checkpoint-every", type=int, default=10)
     train_parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/zertz")
     train_parser.add_argument("--playout-cap-p", type=float, default=0.0)
     train_parser.add_argument("--fast-cap", type=int, default=20)
-    train_parser.add_argument("--play-batch-size", type=int, default=2,
-                              help="MCTS simulation rounds per GPU inference call. "
-                                   "Actual batch = play_batch_size × active_games.")
+    train_parser.add_argument(
+        "--play-batch-size",
+        type=int,
+        default=2,
+        help="MCTS simulation rounds per GPU inference call. "
+        "Actual batch = play_batch_size × active_games.",
+    )
     train_parser.add_argument("--comment", type=str, default="")
 
     args = parser.parse_args()
 
     if args.command == "train":
         from zertz.selfplay.selfplay import SelfPlayTrainer
+
         trainer = SelfPlayTrainer(
-            model_path=args.model, device=args.device,
-            num_blocks=args.blocks, channels=args.channels, lr=args.lr,
+            model_path=args.model,
+            device=args.device,
+            num_blocks=args.blocks,
+            channels=args.channels,
+            lr=args.lr,
             checkpoint_dir=args.checkpoint_dir,
         )
         trainer.run(
