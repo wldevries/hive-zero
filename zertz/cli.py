@@ -27,8 +27,8 @@ def main():
     train_parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/zertz")
     train_parser.add_argument("--playout-cap-p", type=float, default=0.0)
     train_parser.add_argument("--fast-cap", type=int, default=20)
-    train_parser.add_argument("--play-batch-size", type=int, default=1,
-                              help="MCTS selection rounds per GPU inference call. "
+    train_parser.add_argument("--play-batch-size", type=int, default=2,
+                              help="MCTS simulation rounds per GPU inference call. "
                                    "Actual batch = play_batch_size × active_games.")
     train_parser.add_argument("--comment", type=str, default="")
 

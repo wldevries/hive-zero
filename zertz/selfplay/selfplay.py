@@ -85,7 +85,7 @@ class SelfPlayTrainer:
         checkpoint_every: int = 10,
         playout_cap_p: float = 0.0,
         fast_cap: int = 20,
-        play_batch_size: int = 1,
+        play_batch_size: int = 2,
         time_limit_minutes: Optional[float] = None,
         comment: str = "",
     ):
@@ -128,19 +128,20 @@ class SelfPlayTrainer:
             )
             self.model.eval()
 
+            est_total_moves = games_per_iter * 27  # rough estimate for initial bar size
             pbar = tqdm(
-                total=games_per_iter,
+                total=est_total_moves,
                 desc="  [MCTS]",
-                unit="game",
-                bar_format="{desc} {bar} {n}/{total} [{elapsed}]",
+                unit="turn",
+                bar_format="{desc} {bar} {n} turns [{elapsed}]",
                 leave=False,
             )
-            last_finished = [0]
+            last_moves = [0]
             def progress_fn(finished, total, active, total_moves):
-                delta = finished - last_finished[0]
+                delta = total_moves - last_moves[0]
                 if delta > 0:
                     pbar.update(delta)
-                last_finished[0] = finished
+                last_moves[0] = total_moves
 
             play_start = time.time()
             result = session.play_games(self._eval_fn, progress_fn=progress_fn)

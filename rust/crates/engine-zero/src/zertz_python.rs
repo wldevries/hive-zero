@@ -115,7 +115,7 @@ impl PyZertzSelfPlaySession {
         temperature = 1.0,
         temp_threshold = 15,
         c_puct = 1.5,
-        play_batch_size = 1,
+        play_batch_size = 2,
         playout_cap_p = 0.0,
         fast_cap = 20,
     ))]
