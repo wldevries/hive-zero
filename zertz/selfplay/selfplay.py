@@ -100,6 +100,7 @@ class SelfPlayTrainer:
         playout_cap_p: float = 0.0,
         fast_cap: int = 20,
         play_batch_size: int = 2,
+        temp_threshold: int = 30,
         time_limit_minutes: Optional[float] = None,
         comment: str = "",
         augment_symmetry: bool = False,
@@ -147,6 +148,7 @@ class SelfPlayTrainer:
                 num_games=games_per_iter,
                 simulations=simulations,
                 max_moves=max_moves,
+                temp_threshold=temp_threshold,
                 playout_cap_p=playout_cap_p,
                 fast_cap=fast_cap,
                 play_batch_size=play_batch_size,
@@ -222,7 +224,7 @@ class SelfPlayTrainer:
             samples = result.sample_boards()
             if samples:
                 import random
-                picks = random.sample(samples, min(3, len(samples)))
+                picks = random.sample(samples, min(4, len(samples)))
                 board_strs = [b for _, b in picks]
                 labels = [lbl for lbl, _ in picks]
                 rendered = _render_boards_horizontally(board_strs, labels=labels)

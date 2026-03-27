@@ -28,6 +28,8 @@ def main():
     train_parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/zertz")
     train_parser.add_argument("--playout-cap-p", type=float, default=0.0)
     train_parser.add_argument("--fast-cap", type=int, default=20)
+    train_parser.add_argument("--temp-threshold", type=int, default=30,
+                              help="Move number after which temperature drops to 0 (default: 30)")
     train_parser.add_argument(
         "--play-batch-size",
         type=int,
@@ -78,6 +80,7 @@ def main():
             checkpoint_every=args.checkpoint_every,
             playout_cap_p=args.playout_cap_p,
             fast_cap=args.fast_cap,
+            temp_threshold=args.temp_threshold,
             play_batch_size=args.play_batch_size,
             time_limit_minutes=args.time_limit,
             comment=args.comment,
