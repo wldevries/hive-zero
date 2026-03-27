@@ -1,15 +1,17 @@
 """Self-play training loop for Zertz AI."""
 
 from __future__ import annotations
+
 import os
-import time
 import statistics
-import torch
-import numpy as np
+import time
 from typing import Optional
-from tqdm import tqdm
 
 import colorama
+import numpy as np
+import torch
+from tqdm import tqdm
+
 colorama.init()
 _RESET = colorama.Style.RESET_ALL
 _BRIGHT = colorama.Style.BRIGHT
@@ -19,8 +21,9 @@ _cr = lambda v: f"{colorama.Fore.RED}{_BRIGHT}{v}{_RESET}"
 _cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
 
 from shared.training_log import csv_comment
-from ..nn.model import ZertzNet, create_model, save_checkpoint, load_checkpoint
-from ..nn.training import ZertzDataset, Trainer
+
+from ..nn.model import ZertzNet, create_model, load_checkpoint, save_checkpoint
+from ..nn.training import Trainer, ZertzDataset
 
 LOG_HEADER = (
     "iter,simulations,wins_p1,wins_p2,draws,positions,buffer,"
@@ -35,9 +38,15 @@ def _median(lst):
 class SelfPlayTrainer:
     """Full self-play training pipeline for Zertz."""
 
-    def __init__(self, model_path: str = "zertz.pt", device: str = "cuda",
-                 num_blocks: int = 6, channels: int = 64, lr: float = 0.02,
-                 checkpoint_dir: str = "checkpoints/zertz"):
+    def __init__(
+        self,
+        model_path: str = "zertz.pt",
+        device: str = "cuda",
+        num_blocks: int = 6,
+        channels: int = 64,
+        lr: float = 0.02,
+        checkpoint_dir: str = "checkpoints/zertz",
+    ):
         self.model_path = model_path
         self.model_name = os.path.splitext(os.path.basename(model_path))[0]
         self.checkpoint_dir = checkpoint_dir
@@ -50,19 +59,25 @@ class SelfPlayTrainer:
             blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
             params = sum(p.numel() for p in self.model.parameters())
-            print(f"Resumed from {model_path} (iteration {self.start_iteration}, "
-                  f"{blocks} blocks, {ch} channels, {params/1e6:.2f}M params)")
+            print(
+                f"Resumed from {model_path} (iteration {self.start_iteration}, "
+                f"{blocks} blocks, {ch} channels, {params / 1e6:.2f}M params)"
+            )
         else:
             self.model = create_model(num_blocks=num_blocks, channels=channels)
             params = sum(p.numel() for p in self.model.parameters())
-            print(f"New model: {num_blocks} blocks, {channels} channels, {params/1e6:.2f}M params")
+            print(
+                f"New model: {num_blocks} blocks, {channels} channels, {params / 1e6:.2f}M params"
+            )
 
         self.model.to(device)
         self.trainer = Trainer(model=self.model, device=device, lr=lr)
 
     def _eval_fn(self, board_tensor_np):
         """NN inference callback for Rust self-play."""
-        board = torch.from_numpy(np.array(board_tensor_np)).to(self.device, dtype=torch.float32)
+        board = torch.from_numpy(np.array(board_tensor_np)).to(
+            self.device, dtype=torch.float32
+        )
         with torch.no_grad():
             with torch.autocast(
                 device_type="cuda" if self.device != "cpu" else "cpu",
@@ -104,7 +119,10 @@ class SelfPlayTrainer:
         iteration = self.start_iteration
 
         while True:
-            if num_iterations is not None and (iteration - self.start_iteration) >= num_iterations:
+            if (
+                num_iterations is not None
+                and (iteration - self.start_iteration) >= num_iterations
+            ):
                 break
             if time_limit_minutes is not None:
                 if (time.time() - start_time) / 60 >= time_limit_minutes:
@@ -114,8 +132,14 @@ class SelfPlayTrainer:
             iter_start = time.time()
 
             # Header
-            cap_str = f", fast={fast_cap}, cap={int(playout_cap_p*100)}%" if playout_cap_p > 0 else ""
-            print(f"\n=== {_cc(self.model_name)}  Iteration {iteration}  [sims={simulations}{cap_str}] ===")
+            cap_str = (
+                f", fast={fast_cap}, cap={int(playout_cap_p * 100)}%"
+                if playout_cap_p > 0
+                else ""
+            )
+            print(
+                f"\n=== {_cc(self.model_name)}  Iteration {iteration}  [sims={simulations}{cap_str}] ==="
+            )
 
             # --- Self-play ---
             session = ZertzSelfPlaySession(
@@ -130,6 +154,7 @@ class SelfPlayTrainer:
 
             pbar = tqdm(total=max_moves, unit="turn", desc="  Self-play", leave=False)
             turn = [0]
+
             def progress_fn(finished, total, active, total_moves):
                 turn[0] += 1
                 advance = turn[0] - pbar.n
@@ -150,7 +175,9 @@ class SelfPlayTrainer:
             lengths = list(result.game_lengths)
             decisive = list(result.decisive_lengths)
 
-            print(f"  Results: {_cg(f'P1={p1}')}  {_cr(f'P2={p2}')}  {_cy(f'D/timeout={d}')}")
+            print(
+                f"  Results: P1={_cg(f'{p1}')}  P2={_cr(f'{p2}')}  D/timeout={_cy(f'{d}')}"
+            )
 
             if lengths:
                 avg = sum(lengths) / len(lengths)
@@ -158,8 +185,10 @@ class SelfPlayTrainer:
                 mn, mx = min(lengths), max(lengths)
                 dec_str = ""
                 if decisive:
-                    dec_str = f"  decisive: avg={sum(decisive)/len(decisive):.0f} med={_median(decisive)}"
-                print(f"  Game length: avg={avg:.0f} med={med} min={mn} max={mx}{dec_str}")
+                    dec_str = f"  decisive: avg={sum(decisive) / len(decisive):.0f} med={_median(decisive)}"
+                print(
+                    f"  Game length: avg={avg:.0f} med={med} min={mn} max={mx}{dec_str}"
+                )
 
             if playout_cap_p > 0:
                 fs = result.full_search_turns
@@ -187,6 +216,16 @@ class SelfPlayTrainer:
                 f"buffer: {len(dataset)}"
             )
 
+            # --- Sample boards ---
+            samples = result.sample_boards()
+            if samples:
+                import random
+                picks = random.sample(samples, min(3, len(samples)))
+                board_strs = [b for _, b in picks]
+                labels = [lbl for lbl, _ in picks]
+                rendered = _render_boards_horizontally(board_strs, labels=labels)
+                print("\n".join("    " + line for line in rendered.split("\n")))
+
             # --- Training ---
             losses = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
             for epoch in range(epochs_per_iter):
@@ -196,9 +235,9 @@ class SelfPlayTrainer:
                 policy_s = f"{losses['policy_loss']:.4f}"
                 value_s = f"{losses['value_loss']:.4f}"
                 print(
-                    f"  Epoch {epoch + 1}: loss={_cy(total_s)} "
-                    f"(policy={_cc(policy_s)}, "
-                    f"value={_cc(value_s)}, "
+                    f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
+                    f"(policy={_cy(policy_s)}, "
+                    f"value={_cy(value_s)}, "
                     f"lr={lr:.4f})"
                 )
 
@@ -228,3 +267,44 @@ class SelfPlayTrainer:
                 )
 
         print(f"\nTraining complete. Final model: {self.model_path}")
+
+
+def _render_boards_horizontally(
+    board_strings: list, labels: list | None = None, sep: str = "   "
+) -> str:
+    """Render multiple board strings side-by-side, handling ANSI escape codes."""
+    import re
+
+    _ANSI = re.compile(r"\033\[[0-9;]*m")
+
+    def visual_len(s: str) -> int:
+        return len(_ANSI.sub("", s))
+
+    boards_lines = [b.split("\n") for b in board_strings]
+    board_widths = [
+        max((visual_len(line) for line in lines), default=0) for lines in boards_lines
+    ]
+
+    if labels:
+        board_widths = [max(w, len(labels[i])) for i, w in enumerate(board_widths)]
+
+    max_height = max(len(lines) for lines in boards_lines)
+    all_lines = []
+
+    if labels:
+        all_lines.append(
+            sep.join(lbl.ljust(board_widths[i]) for i, lbl in enumerate(labels))
+        )
+
+    for row in range(max_height):
+        parts = []
+        for bi, lines in enumerate(boards_lines):
+            if row < len(lines):
+                line = lines[row]
+                padding = board_widths[bi] - visual_len(line)
+                parts.append(line + " " * padding)
+            else:
+                parts.append(" " * board_widths[bi])
+        all_lines.append(sep.join(parts))
+
+    return "\n".join(all_lines)

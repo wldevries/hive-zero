@@ -36,6 +36,8 @@ pub struct PyZertzSelfPlayResult {
     decisive_lengths: Vec<u32>,
     full_search_turns: u32,
     total_turns: u32,
+    /// Up to 3 sample boards: (label, board_string) pairs for display.
+    sample_board_data: Vec<(String, String)>,
 }
 
 #[pymethods]
@@ -75,6 +77,8 @@ impl PyZertzSelfPlayResult {
     #[getter] fn decisive_lengths(&self) -> Vec<u32> { self.decisive_lengths.clone() }
     #[getter] fn full_search_turns(&self) -> u32 { self.full_search_turns }
     #[getter] fn total_turns(&self) -> u32 { self.total_turns }
+    /// Returns list of (label, board_string) for up to 3 decisive games.
+    fn sample_boards(&self) -> Vec<(String, String)> { self.sample_board_data.clone() }
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +180,7 @@ impl PyZertzSelfPlaySession {
         let mut decisive_lengths: Vec<u32> = Vec::new();
         let mut full_search_turns: u32 = 0;
         let mut total_turns: u32 = 0;
+        let mut sample_board_data: Vec<(String, String)> = Vec::new();
 
         // --- Main game loop ---
         while active.iter().any(|&a| a) {
@@ -338,10 +343,14 @@ impl PyZertzSelfPlaySession {
                         Outcome::WonBy(Player::Player1) => {
                             wins_p1 += 1;
                             decisive_lengths.push(len);
+                            let label = format!("P1 wins ({} moves)", len);
+                            sample_board_data.push((label, format!("{}", boards[gi])));
                         }
                         Outcome::WonBy(Player::Player2) => {
                             wins_p2 += 1;
                             decisive_lengths.push(len);
+                            let label = format!("P2 wins ({} moves)", len);
+                            sample_board_data.push((label, format!("{}", boards[gi])));
                         }
                         _ => { draws += 1; }
                     }
@@ -397,6 +406,7 @@ impl PyZertzSelfPlaySession {
             decisive_lengths,
             full_search_turns,
             total_turns,
+            sample_board_data,
         })
     }
 }

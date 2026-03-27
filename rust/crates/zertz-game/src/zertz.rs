@@ -857,15 +857,14 @@ impl Display for ZertzBoard {
         )?;
         writeln!(
             f,
-            "Player A captures: W={} G={} B={}",
+            "Captures P1: W={} G={} B={}",
             self.captures[0][0], self.captures[0][1], self.captures[0][2]
         )?;
         writeln!(
             f,
-            "Player B captures: W={} G={} B={}",
+            "Captures P2: W={} G={} B={}",
             self.captures[1][0], self.captures[1][1], self.captures[1][2]
         )?;
-        writeln!(f, "Next: {:?}", self.next_player)?;
 
         let radius = hex::RADIUS;
         for ri in 0..7 {
@@ -900,9 +899,6 @@ impl Display for ZertzBoard {
             writeln!(f)?;
         }
 
-        if self.outcome != Outcome::Ongoing {
-            writeln!(f, "Outcome: {:?}", self.outcome)?;
-        }
 
         Ok(())
     }
