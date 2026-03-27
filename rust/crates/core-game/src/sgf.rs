@@ -84,6 +84,49 @@ pub fn is_timeout(content: &str) -> bool {
 /// `player_idx` is 0 for `P0` and 1 for `P1`.
 /// `content` is the trimmed text between the brackets.
 /// Nested brackets within the content are handled correctly.
+/// Iterate over all `.sgf` entries in a zip archive, yielding `(name, text)` for each.
+/// Text is decoded as ISO-8859-1 (safe for all boardspace SGF files).
+pub fn iter_sgf_texts_in_zip<R, F>(reader: R, mut f: F) -> Result<(), String>
+where
+    R: std::io::Read + std::io::Seek,
+    F: FnMut(&str, String),
+{
+    let mut archive =
+        zip::ZipArchive::new(reader).map_err(|e| format!("failed to open zip: {e}"))?;
+    for i in 0..archive.len() {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.name().ends_with(".sgf") {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut entry, &mut buf);
+        let text: String = buf.iter().map(|&b| b as char).collect();
+        f(&name, text);
+    }
+    Ok(())
+}
+
+/// Walk a directory tree, calling `f` for each `.zip` file found.
+/// Entries within each directory are visited in sorted order.
+pub fn visit_zip_dir(dir: &std::path::Path, f: &mut impl FnMut(&std::path::Path)) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            visit_zip_dir(&path, f);
+        } else if path.extension().is_some_and(|e| e == "zip") {
+            f(&path);
+        }
+    }
+}
+
 pub fn scan_player_actions<F: FnMut(u8, &str)>(text: &str, mut f: F) {
     let bytes = text.as_bytes();
     let mut i = 0;

@@ -494,39 +494,14 @@ pub fn parse_game(text: &str) -> Result<GameRecord, ParseError> {
 
 /// Iterate over all .sgf games inside a zip archive, streaming from a reader.
 /// Calls `f` for each successfully parsed game.
-pub fn iter_games_in_zip<R: std::io::Read + std::io::Seek>(
-    reader: R,
-    mut f: impl FnMut(&str, GameRecord),
-) -> Result<usize, String> {
-    let mut archive =
-        zip::ZipArchive::new(reader).map_err(|e| format!("failed to open zip: {e}"))?;
-    let mut count = 0;
-
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| format!("failed to read zip entry {i}: {e}"))?;
-        let name = file.name().to_string();
-
-        if !name.ends_with(".sgf") {
-            continue;
+pub fn iter_games_in_zip<R, F>(reader: R, mut f: F) -> Result<(), String>
+where
+    R: std::io::Read + std::io::Seek,
+    F: FnMut(&str, GameRecord),
+{
+    core_game::sgf::iter_sgf_texts_in_zip(reader, |name, text| {
+        if let Ok(record) = parse_game(&text) {
+            f(name, record);
         }
-
-        let mut contents = String::new();
-        if std::io::Read::read_to_string(&mut file, &mut contents).is_err() {
-            continue;
-        }
-
-        match parse_game(&contents) {
-            Ok(record) => {
-                f(&name, record);
-                count += 1;
-            }
-            Err(_) => {
-                // Skip unparseable games silently.
-            }
-        }
-    }
-
-    Ok(count)
+    })
 }
