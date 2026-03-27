@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from shared.nn.resblock import ResBlock
 
 # From Rust: hive_engine.ZERTZ_NUM_CHANNELS, ZERTZ_GRID_SIZE, ZERTZ_POLICY_SIZE
-NUM_CHANNELS = 14
+NUM_CHANNELS = 13
 GRID_SIZE = 7
 POLICY_SIZE = 5587
 
