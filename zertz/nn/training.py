@@ -1,6 +1,7 @@
 """Training loop for ZertzNet."""
 
 from __future__ import annotations
+import random
 import torch
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
@@ -9,6 +10,29 @@ from typing import Optional
 from tqdm import tqdm
 
 from .model import ZertzNet, create_model, NUM_CHANNELS, GRID_SIZE, POLICY_SIZE, RESERVE_SIZE
+
+_BOARD_SIZE = 37
+_PLACE_ONLY_OFFSET = 3 * _BOARD_SIZE * _BOARD_SIZE  # 4107
+_CAPTURE_OFFSET = _PLACE_ONLY_OFFSET + 3 * _BOARD_SIZE  # 4218
+
+_GRID_PERM_CACHE: list | None = None
+_HEX_PERM_CACHE: list | None = None
+
+
+def _load_grid_perms() -> list:
+    global _GRID_PERM_CACHE
+    if _GRID_PERM_CACHE is None:
+        from hive_engine import zertz_d6_grid_permutations
+        _GRID_PERM_CACHE = [np.array(p) for p in zertz_d6_grid_permutations()]
+    return _GRID_PERM_CACHE
+
+
+def _load_hex_perms() -> list:
+    global _HEX_PERM_CACHE
+    if _HEX_PERM_CACHE is None:
+        from hive_engine import zertz_d6_hex_permutations
+        _HEX_PERM_CACHE = [np.array(p) for p in zertz_d6_hex_permutations()]
+    return _HEX_PERM_CACHE
 
 
 class ZertzDataset(Dataset):
@@ -24,6 +48,7 @@ class ZertzDataset(Dataset):
         self.value_targets = np.zeros(max_size, dtype=np.float32)
         self.weights = np.ones(max_size, dtype=np.float32)
         self.value_only = np.zeros(max_size, dtype=np.bool_)
+        self.augment_symmetry = False
 
     def add_batch(self, board_tensors: np.ndarray, reserve_vectors: np.ndarray,
                   policy_targets: np.ndarray, value_targets: np.ndarray,
@@ -49,10 +74,38 @@ class ZertzDataset(Dataset):
         return self._size
 
     def __getitem__(self, idx):
+        board = self.board_tensors[idx].copy()
+        policy = self.policy_targets[idx].copy()
+
+        if self.augment_symmetry:
+            sym = random.randint(0, 11)
+            if sym != 0:
+                grid_perm = _load_grid_perms()[sym]
+                hex_perm = _load_hex_perms()[sym]
+
+                gc = GRID_SIZE * GRID_SIZE
+                bf = board.reshape(NUM_CHANNELS, gc)
+                padded = np.concatenate([bf, np.zeros((NUM_CHANNELS, 1), dtype=np.float32)], axis=1)
+                board = padded[:, grid_perm].reshape(NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
+
+                place = policy[:_PLACE_ONLY_OFFSET].reshape(3, _BOARD_SIZE, _BOARD_SIZE)
+                place_only = policy[_PLACE_ONLY_OFFSET:_CAPTURE_OFFSET].reshape(3, _BOARD_SIZE)
+                capture = policy[_CAPTURE_OFFSET:].reshape(_BOARD_SIZE, _BOARD_SIZE)
+
+                new_place = place[:, hex_perm, :][:, :, hex_perm]
+                new_place_only = place_only[:, hex_perm]
+                new_capture = capture[hex_perm, :][:, hex_perm]
+
+                policy = np.concatenate([
+                    new_place.reshape(-1),
+                    new_place_only.reshape(-1),
+                    new_capture.reshape(-1),
+                ])
+
         return (
-            torch.from_numpy(self.board_tensors[idx].copy()),
+            torch.from_numpy(board),
             torch.from_numpy(self.reserve_vectors[idx].copy()),
-            torch.from_numpy(self.policy_targets[idx].copy()),
+            torch.from_numpy(policy),
             torch.tensor(self.value_targets[idx], dtype=torch.float32),
             torch.tensor(self.weights[idx], dtype=torch.float32),
             torch.tensor(self.value_only[idx], dtype=torch.bool),

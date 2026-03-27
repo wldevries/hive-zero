@@ -679,6 +679,59 @@ impl PyZertzGame {
 }
 
 // ---------------------------------------------------------------------------
+// D6 symmetry permutation tables
+// ---------------------------------------------------------------------------
+
+/// Compute the 12 D6 symmetry gather-permutation tables for the Zertz 7x7 board grid.
+///
+/// Returns a list of 12 numpy arrays, each of shape (49,) = 7*7.
+/// perm[new_cell] = old_cell, or 49 (sentinel for invalid/out-of-bounds cells → zero).
+#[pyfunction]
+fn zertz_d6_grid_permutations<'py>(py: Python<'py>) -> Vec<Bound<'py, PyArray1<i64>>> {
+    use core_game::symmetry::{D6Symmetry, Symmetry};
+    use zertz_game::hex::{all_hexes, hex_to_grid, GRID_SIZE};
+
+    let num_cells = GRID_SIZE * GRID_SIZE; // 49
+
+    D6Symmetry::all().iter().map(|sym| {
+        let mut perm = vec![num_cells as i64; num_cells];
+        for &h in all_hexes().iter() {
+            let (q, r) = h;
+            let (q2, r2) = sym.transform_hex(q as i32, r as i32);
+            let h2 = (q2 as i8, r2 as i8);
+            let (src_row, src_col) = hex_to_grid(h);
+            let (dst_row, dst_col) = hex_to_grid(h2);
+            let src = src_row * GRID_SIZE + src_col;
+            let dst = dst_row * GRID_SIZE + dst_col;
+            perm[dst] = src as i64;
+        }
+        PyArray1::from_owned_array_bound(py, numpy::ndarray::Array1::from(perm))
+    }).collect()
+}
+
+/// Compute the 12 D6 symmetry gather-permutation tables in hex-index space (0..37).
+///
+/// Returns a list of 12 numpy arrays, each of shape (37,).
+/// perm[new_hex_idx] = old_hex_idx: the new position new_hex_idx gets its value from old_hex_idx.
+#[pyfunction]
+fn zertz_d6_hex_permutations<'py>(py: Python<'py>) -> Vec<Bound<'py, PyArray1<i64>>> {
+    use core_game::symmetry::{D6Symmetry, Symmetry};
+    use zertz_game::hex::{all_hexes, hex_to_index, BOARD_SIZE};
+
+    D6Symmetry::all().iter().map(|sym| {
+        let mut perm = vec![0i64; BOARD_SIZE];
+        for (i, &h) in all_hexes().iter().enumerate() {
+            let (q, r) = h;
+            let (q2, r2) = sym.transform_hex(q as i32, r as i32);
+            let h2 = (q2 as i8, r2 as i8);
+            let dst = hex_to_index(h2);
+            perm[dst] = i as i64;
+        }
+        PyArray1::from_owned_array_bound(py, numpy::ndarray::Array1::from(perm))
+    }).collect()
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -690,5 +743,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ZERTZ_NUM_CHANNELS", NUM_CHANNELS)?;
     m.add("ZERTZ_GRID_SIZE", GRID_SIZE)?;
     m.add("ZERTZ_RESERVE_SIZE", RESERVE_SIZE)?;
+    m.add_function(wrap_pyfunction!(zertz_d6_grid_permutations, m)?)?;
+    m.add_function(wrap_pyfunction!(zertz_d6_hex_permutations, m)?)?;
     Ok(())
 }

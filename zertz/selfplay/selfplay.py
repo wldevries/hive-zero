@@ -102,6 +102,7 @@ class SelfPlayTrainer:
         play_batch_size: int = 2,
         time_limit_minutes: Optional[float] = None,
         comment: str = "",
+        augment_symmetry: bool = False,
     ):
         from hive_engine import ZertzSelfPlaySession
 
@@ -112,6 +113,7 @@ class SelfPlayTrainer:
 
         max_buffer = games_per_iter * max_moves * replay_window
         dataset = ZertzDataset(max_size=max_buffer)
+        dataset.augment_symmetry = augment_symmetry
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
         start_time = time.time()
@@ -265,6 +267,7 @@ class SelfPlayTrainer:
                     f"{losses['value_loss']:.6f},{lr:.6f},{duration:.1f},"
                     f"{csv_comment(comment)}\n"
                 )
+            comment = ""
 
         print(f"\nTraining complete. Final model: {self.model_path}")
 
