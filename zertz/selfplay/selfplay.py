@@ -115,7 +115,7 @@ class SelfPlayTrainer:
 
             # Header
             cap_str = f", fast={fast_cap}, cap={int(playout_cap_p*100)}%" if playout_cap_p > 0 else ""
-            print(f"\n=== Iteration {iteration}  [sims={simulations}{cap_str}] ===")
+            print(f"\n=== {_cc(self.model_name)}  Iteration {iteration}  [sims={simulations}{cap_str}] ===")
 
             # --- Self-play ---
             session = ZertzSelfPlaySession(
@@ -197,9 +197,9 @@ class SelfPlayTrainer:
                 losses = self.trainer.train_epoch(dataset, batch_size=batch_size)
                 lr = self.trainer._current_lr
                 print(
-                    f"  Epoch {epoch + 1}: loss={losses['total_loss']:.4f} "
-                    f"(policy={losses['policy_loss']:.4f}, "
-                    f"value={losses['value_loss']:.4f}, "
+                    f"  Epoch {epoch + 1}: loss={_cy(f\"{losses['total_loss']:.4f}\")} "
+                    f"(policy={_cc(f\"{losses['policy_loss']:.4f}\")}, "
+                    f"value={_cc(f\"{losses['value_loss']:.4f}\")}, "
                     f"lr={lr:.4f})"
                 )
 

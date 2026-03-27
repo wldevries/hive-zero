@@ -150,8 +150,11 @@ impl PyZertzSelfPlaySession {
         let use_playout_cap = self.playout_cap_p > 0.0;
 
         let mut boards: Vec<ZertzBoard> = (0..num_games).map(|_| ZertzBoard::default()).collect();
+        // Size arena to just cover the simulations needed. With lazy child creation
+        // at most ~simulations nodes are ever live per game per turn.
+        let arena_capacity = self.simulations + 64;
         let mut searches: Vec<MctsSearch> = (0..num_games).map(|_| {
-            let mut s = MctsSearch::new(50_000);
+            let mut s = MctsSearch::new(arena_capacity);
             s.c_puct = self.c_puct;
             s
         }).collect();
