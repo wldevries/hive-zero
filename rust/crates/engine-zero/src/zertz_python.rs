@@ -30,6 +30,7 @@ pub struct PyZertzSelfPlayResult {
     value_targets: Vec<f32>,
     weights: Vec<f32>,
     value_only_flags: Vec<bool>,
+    capture_turn_flags: Vec<bool>,
     num_samples: usize,
     wins_p1: u32,
     wins_p2: u32,
@@ -59,6 +60,7 @@ impl PyZertzSelfPlayResult {
         Bound<'py, PyArray1<f32>>,
         Bound<'py, PyArray1<f32>>,
         Vec<bool>,
+        Vec<bool>,
     ) {
         let n = self.num_samples;
         let boards = numpy::ndarray::Array2::from_shape_vec(
@@ -79,6 +81,7 @@ impl PyZertzSelfPlayResult {
             PyArray1::from_owned_array_bound(py, values),
             PyArray1::from_owned_array_bound(py, weights),
             self.value_only_flags.clone(),
+            self.capture_turn_flags.clone(),
         )
     }
 
@@ -110,6 +113,7 @@ struct TurnRecord {
     reserve_offset: usize,
     player: Player,
     is_value_only: bool,
+    is_capture_turn: bool,
     policy_vector: Vec<f32>,
 }
 
@@ -350,11 +354,13 @@ impl PyZertzSelfPlaySession {
                     policy_vec[encode_move(mv)] = *prob;
                 }
 
+                let is_capture_turn = dist.first().map_or(false, |(mv, _)| matches!(mv, ZertzMove::Capture { .. }));
                 histories[gi].push(TurnRecord {
                     board_offset: turn_board_offsets[i],
                     reserve_offset: turn_reserve_offsets[i],
                     player: boards[gi].next_player(),
                     is_value_only: !is_full[i],
+                    is_capture_turn,
                     policy_vector: policy_vec,
                 });
 
@@ -434,6 +440,7 @@ impl PyZertzSelfPlaySession {
         let mut value_targets = Vec::with_capacity(total_samples);
         let mut weights = Vec::with_capacity(total_samples);
         let mut value_only_flags = Vec::with_capacity(total_samples);
+        let mut capture_turn_flags = Vec::with_capacity(total_samples);
 
         for (gi, history) in histories.iter().enumerate() {
             let outcome = boards[gi].outcome();
@@ -454,6 +461,7 @@ impl PyZertzSelfPlaySession {
                 value_targets.push(value);
                 weights.push(1.0f32);
                 value_only_flags.push(record.is_value_only);
+                capture_turn_flags.push(record.is_capture_turn);
             }
         }
 
@@ -464,6 +472,7 @@ impl PyZertzSelfPlaySession {
             value_targets,
             weights,
             value_only_flags,
+            capture_turn_flags,
             num_samples: total_samples,
             wins_p1,
             wins_p2,
