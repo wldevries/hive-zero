@@ -111,19 +111,11 @@ class SelfPlayTrainer:
 
         # Training log (CSV, truncated on fresh start)
         log_path = f"{self.model_name}_log.csv"
-        header = LOG_HEADER
         if self.start_iteration == 0:
             self._log = open(log_path, "w")
-            self._log.write(header)
+            self._log.write(LOG_HEADER)
         else:
-            needs_header = True
-            if os.path.exists(log_path):
-                with open(log_path) as f:
-                    first = f.readline()
-                needs_header = not first.startswith("iter,")
             self._log = open(log_path, "a")
-            if needs_header:
-                self._log.write(header)
         self._log.flush()
 
         # Bootstrap eval: if best_model.pt doesn't exist, run it immediately

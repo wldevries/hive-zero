@@ -40,27 +40,8 @@ def _restore_geometry(fig) -> None:
         pass
 
 
-_TRAILING_COLS = ["avg_game_len", "med_game_len", "max_game_len",
-                  "avg_decisive_len", "med_decisive_len"]
-
-
-def _read_csv_flexible(csv_path: Path) -> pd.DataFrame:
-    """Read a CSV whose data rows may have more columns than the header."""
-    import io
-    with open(csv_path) as f:
-        lines = f.readlines()
-    header_n = len(lines[0].split(","))
-    max_data_n = max((len(l.split(",")) for l in lines[1:] if l.strip()), default=header_n)
-    if max_data_n <= header_n:
-        return pd.read_csv(csv_path, skipinitialspace=True, on_bad_lines="warn")
-    extra = max_data_n - header_n
-    header = lines[0].strip().split(",") + _TRAILING_COLS[:extra]
-    content = ",".join(header) + "\n" + "".join(lines[1:])
-    return pd.read_csv(io.StringIO(content), skipinitialspace=True, on_bad_lines="warn")
-
-
 def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
-    df = _read_csv_flexible(csv_path)
+    df = pd.read_csv(csv_path, skipinitialspace=True, on_bad_lines="warn")
 
     col_w = "wins_w" if "wins_w" in df.columns else "wins_p1"
     col_b = "wins_b" if "wins_b" in df.columns else "wins_p2"
@@ -75,10 +56,12 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
         total_games = df[col_w] + df[col_b] + df["draws"]
         df["avg_game_len"] = df["positions"] / total_games.replace(0, np.nan)
     has_game_len = "avg_game_len" in df.columns and pd.to_numeric(df["avg_game_len"], errors="coerce").notna().any()
-    nrows = 3 if has_game_len else 2
+    has_wincon = "wins_white" in df.columns and pd.to_numeric(df["wins_white"], errors="coerce").notna().any()
+    nrows = 2 + has_game_len + has_wincon
     fig, axes = plt.subplots(nrows, 1, figsize=(12, 4 * nrows), sharex=True)
     ax1, ax2 = axes[0], axes[1]
     ax3 = axes[2] if has_game_len else None
+    ax4 = axes[2 + has_game_len] if has_wincon else None
     fig.suptitle(csv_path.name, fontsize=13)
 
     # --- Win percentages ---
@@ -99,7 +82,7 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
     commented = df[df["comment"].notna() & df["comment"].astype(str).str.strip().ne("")]
     for _, row in commented.iterrows():
         label = str(row["comment"]).strip()
-        for ax in ([ax1, ax2, ax3] if ax3 else [ax1, ax2]):
+        for ax in [a for a in [ax1, ax2, ax3, ax4] if a is not None]:
             ax.axvline(row["iter"], color="green", linestyle=":", alpha=0.6, linewidth=1)
         ax1.text(row["iter"], 98, label, fontsize=7, color="green", va="top", ha="left", rotation=90)
 
@@ -147,6 +130,25 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
         ax3.grid(True, alpha=0.3)
         ax3.set_title("Game length")
 
+    # --- Win conditions ---
+    if ax4 is not None:
+        decisive = pd.to_numeric(df["wins_white"] + df["wins_grey"] + df["wins_black"] + df["wins_combo"], errors="coerce").replace(0, np.nan)
+        for col, label, color in [
+            ("wins_white", "4 white", "cyan"),
+            ("wins_grey",  "5 grey",  "yellow"),
+            ("wins_black", "6 black", "purple"),
+            ("wins_combo", "3 each",  "mediumorchid"),
+        ]:
+            pct = pd.to_numeric(df[col], errors="coerce") / decisive * 100
+            if pct.notna().any():
+                ax4.plot(iters, pct, label=label, color=color, linewidth=1.5)
+        ax4.set_xlabel("Iteration")
+        ax4.set_ylabel("% of decisive games")
+        ax4.set_ylim(0, 100)
+        ax4.legend(loc="lower left", bbox_to_anchor=(0, 1.02, 1, 0.1), ncol=4, mode="expand", borderaxespad=0, fontsize=8)
+        ax4.grid(True, alpha=0.3)
+        ax4.set_title("Win condition (% of decisive games)")
+
     ax1.set_xlim(left=iters.min())
 
     plt.tight_layout()
@@ -162,11 +164,20 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot perf_log.csv")
-    parser.add_argument("csv", nargs="?", default="perf_log.csv", help="Path to CSV file")
+    parser.add_argument("csv", nargs="?", help="Path to CSV file (default: perf_log.csv)")
+    parser.add_argument("--game", help="Game type prefix, e.g. 'zertz' — picks most recent <game>_*_log.csv")
     parser.add_argument("-o", "--output", help="Save plot to file instead of showing it")
     args = parser.parse_args()
 
-    csv_path = Path(args.csv)
+    if args.game:
+        matches = sorted(Path(".").glob(f"{args.game}*_log.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not matches:
+            print(f"No log files found matching '{args.game}*_log.csv'", file=sys.stderr)
+            sys.exit(1)
+        csv_path = matches[0]
+    else:
+        csv_path = Path(args.csv) if args.csv else Path("model_log.csv")
+
     if not csv_path.exists():
         print(f"File not found: {csv_path}", file=sys.stderr)
         sys.exit(1)

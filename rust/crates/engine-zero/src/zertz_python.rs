@@ -12,6 +12,7 @@ use zertz_game::hex::{is_valid, Hex};
 use zertz_game::mcts::arena::NodeId;
 use zertz_game::mcts::search::MctsSearch;
 use zertz_game::move_encoding::{encode_move, POLICY_SIZE};
+use zertz_game::random_play::{classify_win, WinType};
 use zertz_game::zertz::{Marble, ZertzBoard, ZertzMove, MAX_CAPTURE_JUMPS};
 use core_game::game::{Game, Outcome, Player};
 
@@ -33,6 +34,10 @@ pub struct PyZertzSelfPlayResult {
     wins_p1: u32,
     wins_p2: u32,
     draws: u32,
+    wins_white: u32,
+    wins_grey: u32,
+    wins_black: u32,
+    wins_combo: u32,
     total_moves: u32,
     game_lengths: Vec<u32>,
     decisive_lengths: Vec<u32>,
@@ -79,6 +84,10 @@ impl PyZertzSelfPlayResult {
     #[getter] fn wins_p1(&self) -> u32 { self.wins_p1 }
     #[getter] fn wins_p2(&self) -> u32 { self.wins_p2 }
     #[getter] fn draws(&self) -> u32 { self.draws }
+    #[getter] fn wins_white(&self) -> u32 { self.wins_white }
+    #[getter] fn wins_grey(&self) -> u32 { self.wins_grey }
+    #[getter] fn wins_black(&self) -> u32 { self.wins_black }
+    #[getter] fn wins_combo(&self) -> u32 { self.wins_combo }
     #[getter] fn total_moves(&self) -> u32 { self.total_moves }
     #[getter] fn game_lengths(&self) -> Vec<u32> { self.game_lengths.clone() }
     #[getter] fn decisive_lengths(&self) -> Vec<u32> { self.decisive_lengths.clone() }
@@ -184,6 +193,10 @@ impl PyZertzSelfPlaySession {
         let mut wins_p1 = 0u32;
         let mut wins_p2 = 0u32;
         let mut draws = 0u32;
+        let mut wins_white = 0u32;
+        let mut wins_grey = 0u32;
+        let mut wins_black = 0u32;
+        let mut wins_combo = 0u32;
         let mut total_moves = 0u32;
         let mut game_lengths: Vec<u32> = Vec::new();
         let mut decisive_lengths: Vec<u32> = Vec::new();
@@ -361,16 +374,17 @@ impl PyZertzSelfPlaySession {
                     let len = move_counts[gi];
                     game_lengths.push(len);
                     match boards[gi].outcome() {
-                        Outcome::WonBy(Player::Player1) => {
-                            wins_p1 += 1;
+                        Outcome::WonBy(winner) => {
+                            if winner == Player::Player1 { wins_p1 += 1; } else { wins_p2 += 1; }
                             decisive_lengths.push(len);
-                            let label = format!("P1 wins ({} moves)", len);
-                            sample_board_data.push((label, format!("{}", boards[gi])));
-                        }
-                        Outcome::WonBy(Player::Player2) => {
-                            wins_p2 += 1;
-                            decisive_lengths.push(len);
-                            let label = format!("P2 wins ({} moves)", len);
+                            match classify_win(&boards[gi], winner) {
+                                WinType::FourWhite  => wins_white += 1,
+                                WinType::FiveGrey   => wins_grey  += 1,
+                                WinType::SixBlack   => wins_black += 1,
+                                WinType::ThreeEach  => wins_combo += 1,
+                                WinType::Draw       => {}
+                            }
+                            let label = format!("{} wins ({} moves)", if winner == Player::Player1 { "P1" } else { "P2" }, len);
                             sample_board_data.push((label, format!("{}", boards[gi])));
                         }
                         _ => { draws += 1; }
@@ -427,6 +441,10 @@ impl PyZertzSelfPlaySession {
             wins_p1,
             wins_p2,
             draws,
+            wins_white,
+            wins_grey,
+            wins_black,
+            wins_combo,
             total_moves,
             game_lengths,
             decisive_lengths,
