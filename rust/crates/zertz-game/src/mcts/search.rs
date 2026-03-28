@@ -458,6 +458,11 @@ impl MctsSearch {
         result
     }
 
+    /// Return the player to move at a leaf node.
+    pub fn get_leaf_player(&self, leaf: NodeId) -> Player {
+        self.arena.get(leaf).board.next_player()
+    }
+
     /// Encode a leaf node's board state for NN evaluation.
     /// Returns (board_flat, reserve_flat).
     pub fn encode_leaf(&self, leaf: NodeId) -> (Vec<f32>, Vec<f32>) {

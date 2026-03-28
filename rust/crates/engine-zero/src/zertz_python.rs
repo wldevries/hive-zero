@@ -105,6 +105,34 @@ impl PyZertzSelfPlayResult {
 }
 
 // ---------------------------------------------------------------------------
+// Battle result
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "ZertzBattleResult")]
+pub struct PyZertzBattleResult {
+    wins_model1: u32,
+    wins_model2: u32,
+    draws: u32,
+    wins_white: u32,
+    wins_grey: u32,
+    wins_black: u32,
+    wins_combo: u32,
+    game_lengths: Vec<u32>,
+}
+
+#[pymethods]
+impl PyZertzBattleResult {
+    #[getter] fn wins_model1(&self) -> u32 { self.wins_model1 }
+    #[getter] fn wins_model2(&self) -> u32 { self.wins_model2 }
+    #[getter] fn draws(&self) -> u32 { self.draws }
+    #[getter] fn wins_white(&self) -> u32 { self.wins_white }
+    #[getter] fn wins_grey(&self) -> u32 { self.wins_grey }
+    #[getter] fn wins_black(&self) -> u32 { self.wins_black }
+    #[getter] fn wins_combo(&self) -> u32 { self.wins_combo }
+    #[getter] fn game_lengths(&self) -> Vec<u32> { self.game_lengths.clone() }
+}
+
+// ---------------------------------------------------------------------------
 // Per-turn record
 // ---------------------------------------------------------------------------
 
@@ -491,6 +519,199 @@ impl PyZertzSelfPlaySession {
             sample_board_data,
         })
     }
+
+    /// Run a battle between two models. Games 0..N/2 have model1 as P1, model2 as P2.
+    /// Games N/2..N are reversed. Returns win/draw counts from model1's perspective.
+    fn play_battle(
+        &self,
+        py: Python,
+        eval_fn1: PyObject,
+        eval_fn2: PyObject,
+        progress_fn: Option<PyObject>,
+    ) -> PyResult<PyZertzBattleResult> {
+        let num_games = self.num_games;
+        let half = num_games / 2;
+
+        let mut boards: Vec<ZertzBoard> = (0..num_games).map(|_| ZertzBoard::default()).collect();
+        let arena_capacity = self.simulations + 64;
+        let mut searches: Vec<MctsSearch> = (0..num_games).map(|_| {
+            let mut s = MctsSearch::new(arena_capacity);
+            s.c_puct = self.c_puct;
+            s
+        }).collect();
+        let mut active = vec![true; num_games];
+        let mut move_counts = vec![0u32; num_games];
+        let mut finished_count = 0u32;
+
+        let mut total_moves = 0u32;
+        let mut wins_model1 = 0u32;
+        let mut wins_model2 = 0u32;
+        let mut draws = 0u32;
+        let mut wins_white = 0u32;
+        let mut wins_grey = 0u32;
+        let mut wins_black = 0u32;
+        let mut wins_combo = 0u32;
+        let mut game_lengths: Vec<u32> = Vec::new();
+
+        // Helper: is model1 the evaluator for game gi at player p?
+        let use_fn1_for = |gi: usize, player: Player| -> bool {
+            (gi < half) == (player == Player::Player1)
+        };
+
+        // Helper: call both eval_fns on a batch, return merged (policy, value) by fn1_flags
+        let call_evals = |py: Python,
+                          flat_boards: &[f32],
+                          flat_reserves: &[f32],
+                          fn1_flags: &[bool],
+                          n: usize|
+         -> PyResult<(Vec<f32>, Vec<f32>)> {
+            let mk_arrays = |boards: &[f32], reserves: &[f32]| -> PyResult<(_, _)> {
+                let ba = numpy::ndarray::Array2::from_shape_vec((n, BOARD_FLAT), boards.to_vec()).unwrap();
+                let bnp = PyArray2::from_owned_array_bound(py, ba);
+                let b4d = bnp.reshape([n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
+                let ra = numpy::ndarray::Array2::from_shape_vec((n, RESERVE_SIZE), reserves.to_vec()).unwrap();
+                let rnp = PyArray2::from_owned_array_bound(py, ra);
+                Ok((b4d, rnp))
+            };
+            let (b4d1, rnp1) = mk_arrays(flat_boards, flat_reserves)?;
+            let res1 = eval_fn1.call1(py, (b4d1, rnp1))?;
+            let t1 = res1.downcast_bound::<PyTuple>(py).map_err(|_| pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value) tuple"))?;
+            let p1: PyReadonlyArray2<f32> = t1.get_item(0)?.extract()?;
+            let v1: PyReadonlyArray1<f32> = t1.get_item(1)?.extract()?;
+            let pol1 = p1.as_slice()?.to_vec();
+            let val1 = v1.as_slice()?.to_vec();
+
+            let (b4d2, rnp2) = mk_arrays(flat_boards, flat_reserves)?;
+            let res2 = eval_fn2.call1(py, (b4d2, rnp2))?;
+            let t2 = res2.downcast_bound::<PyTuple>(py).map_err(|_| pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value) tuple"))?;
+            let p2: PyReadonlyArray2<f32> = t2.get_item(0)?.extract()?;
+            let v2: PyReadonlyArray1<f32> = t2.get_item(1)?.extract()?;
+            let pol2 = p2.as_slice()?.to_vec();
+            let val2 = v2.as_slice()?.to_vec();
+
+            let mut policy = vec![0.0f32; n * POLICY_SIZE];
+            let mut value = vec![0.0f32; n];
+            for i in 0..n {
+                if fn1_flags[i] {
+                    policy[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].copy_from_slice(&pol1[i * POLICY_SIZE..(i + 1) * POLICY_SIZE]);
+                    value[i] = val1[i];
+                } else {
+                    policy[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].copy_from_slice(&pol2[i * POLICY_SIZE..(i + 1) * POLICY_SIZE]);
+                    value[i] = val2[i];
+                }
+            }
+            Ok((policy, value))
+        };
+
+        while active.iter().any(|&a| a) {
+            let mcts_games: Vec<usize> = (0..num_games).filter(|&gi| active[gi]).collect();
+            if mcts_games.is_empty() { break; }
+            let n = mcts_games.len();
+
+            let mut flat_boards = vec![0f32; n * BOARD_FLAT];
+            let mut flat_reserves = vec![0f32; n * RESERVE_SIZE];
+            let mut fn1_flags: Vec<bool> = Vec::with_capacity(n);
+            for (i, &gi) in mcts_games.iter().enumerate() {
+                encode_board(&boards[gi], &mut flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT], &mut flat_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE]);
+                fn1_flags.push(use_fn1_for(gi, boards[gi].next_player()));
+            }
+
+            let (init_policies, _) = call_evals(py, &flat_boards, &flat_reserves, &fn1_flags, n)?;
+            for (i, &gi) in mcts_games.iter().enumerate() {
+                let policy = &init_policies[i * POLICY_SIZE..(i + 1) * POLICY_SIZE];
+                searches[gi].init(&boards[gi], policy);
+            }
+
+            // --- Simulation rounds ---
+            let mut game_sims = vec![0usize; n];
+            loop {
+                let mut leaf_ids: Vec<NodeId> = Vec::new();
+                let mut leaf_game_idx: Vec<usize> = Vec::new();
+                for _round in 0..self.play_batch_size {
+                    let mut any = false;
+                    for (i, &gi) in mcts_games.iter().enumerate() {
+                        if game_sims[i] >= self.simulations { continue; }
+                        let leaves = searches[gi].select_leaves(1);
+                        let count = leaves.len();
+                        if count > 0 { any = true; }
+                        for leaf in leaves { leaf_ids.push(leaf); leaf_game_idx.push(i); }
+                        game_sims[i] += count;
+                    }
+                    if !any { break; }
+                }
+                if leaf_ids.is_empty() { break; }
+
+                let nl = leaf_ids.len();
+                let mut leaf_boards_flat = vec![0f32; nl * BOARD_FLAT];
+                let mut leaf_reserves_flat = vec![0f32; nl * RESERVE_SIZE];
+                let mut leaf_fn1_flags: Vec<bool> = Vec::with_capacity(nl);
+                for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
+                    let gi = mcts_games[i];
+                    let (board_enc, reserve_enc) = searches[gi].encode_leaf(leaf);
+                    leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
+                    leaf_reserves_flat[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
+                    let leaf_player = searches[gi].get_leaf_player(leaf);
+                    leaf_fn1_flags.push(use_fn1_for(gi, leaf_player));
+                }
+
+                let (leaf_policies, leaf_values) = call_evals(py, &leaf_boards_flat, &leaf_reserves_flat, &leaf_fn1_flags, nl)?;
+
+                let mut per_game_leaves: Vec<Vec<NodeId>> = vec![Vec::new(); n];
+                let mut per_game_policies: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n];
+                let mut per_game_values: Vec<Vec<f32>> = vec![Vec::new(); n];
+                for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
+                    per_game_leaves[i].push(leaf);
+                    per_game_policies[i].push(leaf_policies[k * POLICY_SIZE..(k + 1) * POLICY_SIZE].to_vec());
+                    per_game_values[i].push(leaf_values[k]);
+                }
+                for (i, &gi) in mcts_games.iter().enumerate() {
+                    if per_game_leaves[i].is_empty() { continue; }
+                    searches[gi].expand_and_backprop(&per_game_leaves[i], &per_game_policies[i], &per_game_values[i]);
+                }
+                if game_sims.iter().all(|&s| s >= self.simulations) { break; }
+            }
+
+            // --- Select and apply moves (greedy) ---
+            for (i, &gi) in mcts_games.iter().enumerate() {
+                let dist = searches[gi].get_pruned_visit_distribution();
+                let mv = if dist.is_empty() {
+                    ZertzMove::Pass
+                } else {
+                    dist.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap().0
+                };
+                boards[gi].play(mv).expect("battle selected illegal move");
+                move_counts[gi] += 1;
+                total_moves += 1;
+
+                if boards[gi].outcome() != Outcome::Ongoing || move_counts[gi] >= self.max_moves {
+                    active[gi] = false;
+                    finished_count += 1;
+                    game_lengths.push(move_counts[gi]);
+                    match boards[gi].outcome() {
+                        Outcome::WonBy(winner) => {
+                            let model1_won = (gi < half) == (winner == Player::Player1);
+                            if model1_won { wins_model1 += 1; } else { wins_model2 += 1; }
+                            match classify_win(&boards[gi], winner) {
+                                WinType::FourWhite  => wins_white += 1,
+                                WinType::FiveGrey   => wins_grey  += 1,
+                                WinType::SixBlack   => wins_black += 1,
+                                WinType::ThreeEach  => wins_combo += 1,
+                                WinType::Draw       => {}
+                            }
+                        }
+                        _ => { draws += 1; }
+                    }
+                }
+            }
+
+            if let Some(pfn) = &progress_fn {
+                let active_count = active.iter().filter(|&&a| a).count() as u32;
+                pfn.call1(py, (finished_count, num_games as u32, active_count, total_moves)).ok();
+            }
+        }
+
+        Ok(PyZertzBattleResult { wins_model1, wins_model2, draws, wins_white, wins_grey, wins_black, wins_combo, game_lengths })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -794,6 +1015,7 @@ fn zertz_d6_hex_permutations<'py>(py: Python<'py>) -> Vec<Bound<'py, PyArray1<i6
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyZertzSelfPlaySession>()?;
     m.add_class::<PyZertzSelfPlayResult>()?;
+    m.add_class::<PyZertzBattleResult>()?;
     m.add_class::<PyZertzGame>()?;
     m.add("ZERTZ_POLICY_SIZE", POLICY_SIZE)?;
     m.add("ZERTZ_NUM_CHANNELS", NUM_CHANNELS)?;
