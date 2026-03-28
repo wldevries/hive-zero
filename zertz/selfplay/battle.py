@@ -29,10 +29,13 @@ def _make_eval_fn(model, device):
         reserve = torch.from_numpy(np.array(reserve_np)).to(device, dtype=torch.float32)
         with torch.no_grad():
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                policy_logits, value = model(board, reserve)
-        policy = torch.softmax(policy_logits, dim=1).float().cpu().numpy()
-        value = value.float().cpu().numpy().squeeze(1)
-        return policy, value
+                place, source, dest, value = model(board, reserve)
+        return (
+            place.float().cpu().numpy(),
+            source.float().cpu().numpy(),
+            dest.float().cpu().numpy(),
+            value.float().cpu().numpy().squeeze(1),
+        )
     return eval_fn
 
 

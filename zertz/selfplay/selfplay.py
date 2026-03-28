@@ -78,7 +78,11 @@ class SelfPlayTrainer:
         self.trainer = Trainer(model=self.model, device=device, lr=lr)
 
     def _eval_fn(self, board_tensor_np, reserve_np):
-        """NN inference callback for Rust self-play."""
+        """NN inference callback for Rust self-play.
+
+        Returns 4-tuple: (place_logits, cap_source_logits, cap_dest_logits, value)
+        as numpy arrays. Rust MCTS computes softmax over legal moves internally.
+        """
         board = torch.from_numpy(np.array(board_tensor_np)).to(self.device, dtype=torch.float32)
         reserve = torch.from_numpy(np.array(reserve_np)).to(self.device, dtype=torch.float32)
         with torch.no_grad():
@@ -86,10 +90,13 @@ class SelfPlayTrainer:
                 device_type="cuda" if self.device != "cpu" else "cpu",
                 dtype=torch.bfloat16,
             ):
-                policy_logits, value = self.model(board, reserve)
-        policy = torch.softmax(policy_logits, dim=1).float().cpu().numpy()
-        value = value.float().cpu().numpy().squeeze(1)
-        return policy, value
+                place, source, dest, value = self.model(board, reserve)
+        return (
+            place.float().cpu().numpy(),
+            source.float().cpu().numpy(),
+            dest.float().cpu().numpy(),
+            value.float().cpu().numpy().squeeze(1),
+        )
 
     def run(
         self,
@@ -226,7 +233,7 @@ class SelfPlayTrainer:
                 print(f"  Playout cap: {fs}/{tt} full-search turns ({pct:.0f}%)")
 
             buf_start = time.time()
-            boards, reserves, policies, values, weights, value_only, capture_turn = result.training_data()
+            boards, reserves, policies, values, weights, value_only, capture_turn, mid_capture_turn = result.training_data()
             dataset.add_batch(
                 board_tensors=np.array(boards),
                 reserve_vectors=np.array(reserves),
@@ -235,6 +242,7 @@ class SelfPlayTrainer:
                 weights=np.array(weights),
                 value_only=list(value_only),
                 capture_turn=list(capture_turn),
+                mid_capture_turn=list(mid_capture_turn),
             )
             buf_time = time.time() - buf_start
 

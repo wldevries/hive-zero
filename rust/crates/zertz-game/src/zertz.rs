@@ -260,6 +260,17 @@ impl Display for ZertzMove {
 }
 
 // ---------------------------------------------------------------------------
+// Mid-capture state (sequential capture MCTS)
+// ---------------------------------------------------------------------------
+
+/// Tracks an in-progress capture chain. When set, only continuation hops
+/// from `marble_pos` are legal — the same player keeps moving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MidCaptureState {
+    pub marble_pos: Hex,
+}
+
+// ---------------------------------------------------------------------------
 // ZertzBoard
 // ---------------------------------------------------------------------------
 
@@ -282,6 +293,9 @@ pub struct ZertzBoard {
     pub jump_captures: [[u8; 3]; 2],
     /// Marbles gained via isolation per player.
     pub isolation_captures: [[u8; 3]; 2],
+    /// Mid-capture state: set when a capture chain is in progress.
+    /// The same player continues moving until no more hops are available.
+    mid_capture: Option<MidCaptureState>,
 }
 
 impl ZertzBoard {
@@ -329,6 +343,7 @@ impl Default for ZertzBoard {
             jump_captures: [[0; 3]; 2],
             isolation_captures: [[0; 3]; 2],
             board_full: false,
+            mid_capture: None,
         };
         let key = board.position_key();
         board.history.insert(key, 1);
@@ -344,8 +359,52 @@ impl ZertzBoard {
         }
     }
 
-    /// Generate all capture moves (jumps) from the current position.
-    /// Captures are mandatory if any exist.
+    /// Generate all single-hop capture moves from any occupied position.
+    /// Used when NOT in mid_capture (first hop of a potential chain).
+    fn generate_first_hops(&self) -> Vec<ZertzMove> {
+        let mut hops = Vec::new();
+        for (i, &ring) in self.rings.iter().enumerate() {
+            if !matches!(ring, Ring::Occupied(_)) {
+                continue;
+            }
+            let from = index_to_hex(i);
+            Self::collect_single_hops(&self.rings, from, &mut hops);
+        }
+        hops
+    }
+
+    /// Generate single-hop continuation moves from a specific marble position.
+    /// Used when mid_capture is active.
+    fn generate_continuation_hops(&self, from: Hex) -> Vec<ZertzMove> {
+        let mut hops = Vec::new();
+        Self::collect_single_hops(&self.rings, from, &mut hops);
+        hops
+    }
+
+    /// Collect all valid single-hop captures from `from` into `results`.
+    fn collect_single_hops(rings: &[Ring; BOARD_SIZE], from: Hex, results: &mut Vec<ZertzMove>) {
+        for &dir in &DIRECTIONS {
+            let over = hex_add(from, dir);
+            if !is_valid(over) {
+                continue;
+            }
+            if !matches!(rings[hex_to_index(over)], Ring::Occupied(_)) {
+                continue;
+            }
+            let to = hex_add(over, dir);
+            if !is_valid(to) {
+                continue;
+            }
+            if rings[hex_to_index(to)] != Ring::Empty {
+                continue;
+            }
+            results.push(ZertzMove::capture_single(from, over, to));
+        }
+    }
+
+    /// Generate all capture moves (full chains) from the current position.
+    /// Used for replay/boardspace parsing — NOT used in MCTS (which uses
+    /// sequential single-hop captures instead).
     fn generate_captures(&self) -> Vec<ZertzMove> {
         let mut all_captures = Vec::new();
 
@@ -622,6 +681,7 @@ impl ZertzBoard {
             board_full: false,
             jump_captures: [[0; 3]; 2],
             isolation_captures: [[0; 3]; 2],
+            mid_capture: self.mid_capture,
         }
     }
 
@@ -643,35 +703,81 @@ impl ZertzBoard {
                 self.rings[hex_to_index(place_at)] = Ring::Occupied(color);
                 self.rings[hex_to_index(remove)] = Ring::Removed;
                 self.resolve_isolation();
+                self.check_winner();
+                self.next_player = self.next_player.opposite();
             }
             ZertzMove::PlaceOnly { color, place_at } => {
                 self.take_marble(color)?;
                 self.rings[hex_to_index(place_at)] = Ring::Occupied(color);
                 self.resolve_isolation();
+                self.check_winner();
+                self.next_player = self.next_player.opposite();
             }
             ZertzMove::Capture { jumps, len } => {
-                let pi = Self::player_index(self.next_player);
-                for i in 0..len as usize {
-                    let (from, over, to) = jumps[i];
-                    let marble_from = self.rings[hex_to_index(from)];
-                    let captured = match self.rings[hex_to_index(over)] {
-                        Ring::Occupied(m) => m,
-                        _ => return Err(format!(
-                            "no marble to jump over at position ({},{}) (hop {i})",
-                            over.0, over.1
-                        )),
-                    };
-                    self.rings[hex_to_index(from)] = Ring::Empty;
-                    self.rings[hex_to_index(over)] = Ring::Empty;
-                    self.rings[hex_to_index(to)] = marble_from;
-                    self.captures[pi][captured.index()] += 1;
-                    self.jump_captures[pi][captured.index()] += 1;
+                if len == 1 {
+                    // Single hop — used by MCTS sequential capture.
+                    let (from, over, to) = jumps[0];
+                    self.apply_single_hop(from, over, to)?;
+                } else {
+                    // Multi-hop — used by replay/boardspace parsing.
+                    let pi = Self::player_index(self.next_player);
+                    for i in 0..len as usize {
+                        let (from, over, to) = jumps[i];
+                        let marble_from = self.rings[hex_to_index(from)];
+                        let captured = match self.rings[hex_to_index(over)] {
+                            Ring::Occupied(m) => m,
+                            _ => return Err(format!(
+                                "no marble to jump over at position ({},{}) (hop {i})",
+                                over.0, over.1
+                            )),
+                        };
+                        self.rings[hex_to_index(from)] = Ring::Empty;
+                        self.rings[hex_to_index(over)] = Ring::Empty;
+                        self.rings[hex_to_index(to)] = marble_from;
+                        self.captures[pi][captured.index()] += 1;
+                        self.jump_captures[pi][captured.index()] += 1;
+                    }
+                    self.mid_capture = None;
+                    self.check_winner();
+                    self.next_player = self.next_player.opposite();
                 }
             }
-            ZertzMove::Pass => {}
+            ZertzMove::Pass => {
+                self.check_winner();
+                self.next_player = self.next_player.opposite();
+            }
         }
-        self.check_winner();
-        self.next_player = self.next_player.opposite();
+        Ok(())
+    }
+
+    /// Execute a single capture hop and handle mid-capture state transitions.
+    fn apply_single_hop(&mut self, from: Hex, over: Hex, to: Hex) -> Result<(), String> {
+        let pi = Self::player_index(self.next_player);
+        let marble_from = self.rings[hex_to_index(from)];
+        let captured = match self.rings[hex_to_index(over)] {
+            Ring::Occupied(m) => m,
+            _ => return Err(format!(
+                "no marble to jump over at position ({},{})",
+                over.0, over.1
+            )),
+        };
+        self.rings[hex_to_index(from)] = Ring::Empty;
+        self.rings[hex_to_index(over)] = Ring::Empty;
+        self.rings[hex_to_index(to)] = marble_from;
+        self.captures[pi][captured.index()] += 1;
+        self.jump_captures[pi][captured.index()] += 1;
+
+        // Check if more hops are available from the landing position.
+        let continuations = self.generate_continuation_hops(to);
+        if continuations.is_empty() {
+            // Chain complete — finalize turn.
+            self.mid_capture = None;
+            self.check_winner();
+            self.next_player = self.next_player.opposite();
+        } else {
+            // More hops available — stay in mid-capture, same player's turn.
+            self.mid_capture = Some(MidCaptureState { marble_pos: to });
+        }
         Ok(())
     }
 
@@ -687,40 +793,52 @@ impl ZertzBoard {
                 self.rings[hex_to_index(place_at)] = Ring::Occupied(color);
                 self.rings[hex_to_index(remove)] = Ring::Removed;
                 self.resolve_isolation();
+                self.check_winner();
+                self.next_player = self.next_player.opposite();
             }
             ZertzMove::PlaceOnly { color, place_at } => {
                 self.take_marble(color)?;
                 self.rings[hex_to_index(place_at)] = Ring::Occupied(color);
                 self.resolve_isolation();
+                self.check_winner();
+                self.next_player = self.next_player.opposite();
             }
             ZertzMove::Capture { jumps, len } => {
-                let pi = Self::player_index(self.next_player);
-                for i in 0..len as usize {
-                    let (from, over, to) = jumps[i];
-                    let marble_from = self.rings[hex_to_index(from)];
-                    let captured = match self.rings[hex_to_index(over)] {
-                        Ring::Occupied(m) => m,
-                        _ => {
-                            return Err(format!(
+                if len == 1 {
+                    let (from, over, to) = jumps[0];
+                    self.apply_single_hop(from, over, to)?;
+                } else {
+                    // Multi-hop — used by replay/boardspace parsing.
+                    let pi = Self::player_index(self.next_player);
+                    for i in 0..len as usize {
+                        let (from, over, to) = jumps[i];
+                        let marble_from = self.rings[hex_to_index(from)];
+                        let captured = match self.rings[hex_to_index(over)] {
+                            Ring::Occupied(m) => m,
+                            _ => return Err(format!(
                                 "no marble to jump over at position ({},{}) (hop {i})",
                                 over.0, over.1
-                            ))
-                        }
-                    };
-                    self.rings[hex_to_index(from)] = Ring::Empty;
-                    self.rings[hex_to_index(over)] = Ring::Empty;
-                    self.rings[hex_to_index(to)] = marble_from;
-                    self.captures[pi][captured.index()] += 1;
-                    self.jump_captures[pi][captured.index()] += 1;
+                            )),
+                        };
+                        self.rings[hex_to_index(from)] = Ring::Empty;
+                        self.rings[hex_to_index(over)] = Ring::Empty;
+                        self.rings[hex_to_index(to)] = marble_from;
+                        self.captures[pi][captured.index()] += 1;
+                        self.jump_captures[pi][captured.index()] += 1;
+                    }
+                    self.mid_capture = None;
+                    self.check_winner();
+                    self.next_player = self.next_player.opposite();
                 }
             }
-            ZertzMove::Pass => {}
+            ZertzMove::Pass => {
+                self.check_winner();
+                self.next_player = self.next_player.opposite();
+            }
         }
 
-        self.check_winner();
-        self.next_player = self.next_player.opposite();
-
-        if self.outcome == Outcome::Ongoing {
+        // History tracking: only record after a complete turn (not mid-capture).
+        if self.mid_capture.is_none() && self.outcome == Outcome::Ongoing {
             let key = self.position_key();
             let count = self.history.entry(key).or_insert(0);
             *count += 1;
@@ -731,19 +849,37 @@ impl ZertzBoard {
         Ok(())
     }
 
+    /// Whether the board is in mid-capture state (a chain is in progress).
+    pub fn is_mid_capture(&self) -> bool {
+        self.mid_capture.is_some()
+    }
+
     /// Get all legal moves for the current position.
+    /// During mid-capture, only continuation hops from the active marble.
     pub fn legal_moves(&self) -> Vec<ZertzMove> {
         if self.outcome != Outcome::Ongoing {
             return Vec::new();
         }
 
-        let captures = self.generate_captures();
-        if !captures.is_empty() {
+        if let Some(mc) = self.mid_capture {
+            return self.generate_continuation_hops(mc.marble_pos);
+        }
+
+        let hops = self.generate_first_hops();
+        if !hops.is_empty() {
             // Captures are mandatory.
-            return captures;
+            return hops;
         }
 
         self.generate_placements()
+    }
+
+    /// Generate all full-chain captures. Used for replay/boardspace parsing only.
+    pub fn legal_captures_full_chains(&self) -> Vec<ZertzMove> {
+        if self.outcome != Outcome::Ongoing {
+            return Vec::new();
+        }
+        self.generate_captures()
     }
 }
 
