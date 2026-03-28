@@ -27,7 +27,8 @@ from ..nn.training import Trainer, ZertzDataset
 
 LOG_HEADER = (
     "iter,simulations,wins_p1,wins_p2,draws,positions,buffer,"
-    "loss,policy_loss,value_loss,lr,duration_s,comment,"
+    "loss,policy_loss,value_loss,place_value_loss,capture_value_loss,"
+    "place_policy_loss,capture_policy_loss,lr,duration_s,comment,"
     "avg_game_len,med_game_len,min_game_len,max_game_len,"
     "wins_white,wins_grey,wins_black,wins_combo,"
     "isolation_captures,jump_captures\n"
@@ -211,7 +212,7 @@ class SelfPlayTrainer:
                 print(f"  Playout cap: {fs}/{tt} full-search turns ({pct:.0f}%)")
 
             buf_start = time.time()
-            boards, reserves, policies, values, weights, value_only = result.training_data()
+            boards, reserves, policies, values, weights, value_only, capture_turn = result.training_data()
             dataset.add_batch(
                 board_tensors=np.array(boards),
                 reserve_vectors=np.array(reserves),
@@ -219,6 +220,7 @@ class SelfPlayTrainer:
                 value_targets=np.array(values),
                 weights=np.array(weights),
                 value_only=list(value_only),
+                capture_turn=list(capture_turn),
             )
             buf_time = time.time() - buf_start
 
@@ -281,7 +283,10 @@ class SelfPlayTrainer:
                     f"{result.wins_p1},{result.wins_p2},{result.draws},"
                     f"{result.num_samples},{len(dataset)},"
                     f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
-                    f"{losses['value_loss']:.6f},{lr:.6f},{duration:.1f},"
+                    f"{losses['value_loss']:.6f},"
+                    f"{losses['place_value_loss']:.6f},{losses['capture_value_loss']:.6f},"
+                    f"{losses['place_policy_loss']:.6f},{losses['capture_policy_loss']:.6f},"
+                    f"{lr:.6f},{duration:.1f},"
                     f"{csv_comment(comment)},{avg_gl},{med_gl},{min_gl},{max_gl},"
                     f"{result.wins_white},{result.wins_grey},{result.wins_black},{result.wins_combo},"
                     f"{result.isolation_captures},{result.jump_captures}\n"

@@ -48,11 +48,12 @@ class ZertzDataset(Dataset):
         self.value_targets = np.zeros(max_size, dtype=np.float32)
         self.weights = np.ones(max_size, dtype=np.float32)
         self.value_only = np.zeros(max_size, dtype=np.bool_)
+        self.capture_turn = np.zeros(max_size, dtype=np.bool_)
         self.augment_symmetry = False
 
     def add_batch(self, board_tensors: np.ndarray, reserve_vectors: np.ndarray,
                   policy_targets: np.ndarray, value_targets: np.ndarray,
-                  weights: np.ndarray, value_only: list[bool]):
+                  weights: np.ndarray, value_only: list[bool], capture_turn: list[bool] | None = None):
         n = board_tensors.shape[0]
         boards = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
         for i in range(n):
@@ -63,6 +64,7 @@ class ZertzDataset(Dataset):
             self.value_targets[idx] = value_targets[i]
             self.weights[idx] = weights[i]
             self.value_only[idx] = value_only[i]
+            self.capture_turn[idx] = capture_turn[i] if capture_turn is not None else False
             self._count += 1
             self._size = min(self._size + 1, self.max_size)
 
@@ -109,6 +111,7 @@ class ZertzDataset(Dataset):
             torch.tensor(self.value_targets[idx], dtype=torch.float32),
             torch.tensor(self.weights[idx], dtype=torch.float32),
             torch.tensor(self.value_only[idx], dtype=torch.bool),
+            torch.tensor(self.capture_turn[idx], dtype=torch.bool),
         )
 
 
@@ -138,10 +141,18 @@ class Trainer:
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_loss = 0.0
+        total_place_value_loss = 0.0
+        total_capture_value_loss = 0.0
+        total_place_policy_loss = 0.0
+        total_capture_policy_loss = 0.0
+        place_value_batches = 0
+        capture_value_batches = 0
+        place_policy_batches = 0
+        capture_policy_batches = 0
         num_batches = 0
 
         device_type = self.device.type
-        for board, reserve, policy_target, value_target, weight, vo_mask in tqdm(
+        for board, reserve, policy_target, value_target, weight, vo_mask, cap_mask in tqdm(
                 loader, desc="  Training", leave=False, unit="batch"):
             board = board.to(self.device)
             reserve = reserve.to(self.device)
@@ -149,6 +160,7 @@ class Trainer:
             value_target = value_target.to(self.device).unsqueeze(1)
             weight = weight.to(self.device)
             vo_mask = vo_mask.to(self.device)
+            cap_mask = cap_mask.to(self.device)
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 policy_logits, value = self.model(board, reserve)
@@ -160,6 +172,22 @@ class Trainer:
 
             per_sample_value = (value.squeeze(1) - value_target.squeeze(1)) ** 2
             value_loss = (per_sample_value * weight).mean()
+
+            place_mask = ~cap_mask
+            place_policy_weight = policy_weight * place_mask.float()
+            capture_policy_weight = policy_weight * cap_mask.float()
+            if place_mask.any():
+                total_place_value_loss += (per_sample_value[place_mask] * weight[place_mask]).mean().item()
+                place_value_batches += 1
+                if place_policy_weight.sum() > 0:
+                    total_place_policy_loss += (per_sample_policy * place_policy_weight).sum().item() / place_policy_weight.sum().item()
+                    place_policy_batches += 1
+            if cap_mask.any():
+                total_capture_value_loss += (per_sample_value[cap_mask] * weight[cap_mask]).mean().item()
+                capture_value_batches += 1
+                if capture_policy_weight.sum() > 0:
+                    total_capture_policy_loss += (per_sample_policy * capture_policy_weight).sum().item() / capture_policy_weight.sum().item()
+                    capture_policy_batches += 1
 
             loss = policy_loss + value_loss
 
@@ -173,10 +201,16 @@ class Trainer:
             num_batches += 1
 
         if num_batches == 0:
-            return {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
+            return {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0,
+                    "place_value_loss": 0.0, "capture_value_loss": 0.0,
+                    "place_policy_loss": 0.0, "capture_policy_loss": 0.0}
 
         return {
             "policy_loss": total_policy_loss / num_batches,
             "value_loss": total_value_loss / num_batches,
             "total_loss": total_loss / num_batches,
+            "place_value_loss": total_place_value_loss / place_value_batches if place_value_batches else 0.0,
+            "capture_value_loss": total_capture_value_loss / capture_value_batches if capture_value_batches else 0.0,
+            "place_policy_loss": total_place_policy_loss / place_policy_batches if place_policy_batches else 0.0,
+            "capture_policy_loss": total_capture_policy_loss / capture_policy_batches if capture_policy_batches else 0.0,
         }

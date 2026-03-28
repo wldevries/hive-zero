@@ -107,6 +107,22 @@ def plot_perf_log(csv_path: Path, output: Path | None = None, rolling: int = 1) 
         mob = pd.to_numeric(df["mob_loss"], errors="coerce")
         if mob.notna().any() and (mob > 0).any():
             ax2.plot(iters, mob, label="Mob loss", color="indianred", linewidth=1)
+    if "place_value_loss" in df.columns:
+        pvl = pd.to_numeric(df["place_value_loss"], errors="coerce")
+        if pvl.notna().any() and (pvl > 0).any():
+            ax2.plot(iters, pvl, label="Place val loss", color="darkorange", linewidth=1, linestyle="--")
+    if "capture_value_loss" in df.columns:
+        cvl = pd.to_numeric(df["capture_value_loss"], errors="coerce")
+        if cvl.notna().any() and (cvl > 0).any():
+            ax2.plot(iters, cvl, label="Capture val loss", color="darkorange", linewidth=1, linestyle=":")
+    if "place_policy_loss" in df.columns:
+        ppl = pd.to_numeric(df["place_policy_loss"], errors="coerce")
+        if ppl.notna().any() and (ppl > 0).any():
+            ax2.plot(iters, ppl, label="Place pol loss", color="royalblue", linewidth=1, linestyle="--")
+    if "capture_policy_loss" in df.columns:
+        cpl = pd.to_numeric(df["capture_policy_loss"], errors="coerce")
+        if cpl.notna().any() and (cpl > 0).any():
+            ax2.plot(iters, cpl, label="Capture pol loss", color="royalblue", linewidth=1, linestyle=":")
     if not has_game_len:
         ax2.set_xlabel("Iteration")
     ax2.set_yscale("log")
