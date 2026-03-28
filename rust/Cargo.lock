@@ -114,6 +114,7 @@ version = "0.1.0"
 dependencies = [
  "rand",
  "rand_distr",
+ "zip",
 ]
 
 [[package]]
@@ -249,6 +250,7 @@ dependencies = [
  "rand",
  "rand_distr",
  "rayon",
+ "zertz-game",
 ]
 
 [[package]]

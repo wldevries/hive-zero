@@ -8,7 +8,7 @@ use core_game::game::{Game, Outcome, Player};
 
 use super::arena::{NodeArena, NodeId};
 use super::node::{Edge, MctsNode};
-use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS};
+use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
 use crate::move_encoding::get_legal_move_mask;
 #[cfg(test)]
 use crate::move_encoding::POLICY_SIZE;
@@ -94,7 +94,7 @@ fn select_leaf(
             let mv = arena.get(node_id).edges[best_idx].mv;
             let child_board = {
                 let mut b = arena.get(node_id).board.clone_light();
-                b.play(mv).expect("legal move failed in MCTS selection");
+                b.play_mcts(mv).expect("legal move failed in MCTS selection");
                 b
             };
             let new_node = MctsNode {
@@ -459,11 +459,13 @@ impl MctsSearch {
     }
 
     /// Encode a leaf node's board state for NN evaluation.
-    pub fn encode_leaf(&self, leaf: NodeId) -> Vec<f32> {
+    /// Returns (board_flat, reserve_flat).
+    pub fn encode_leaf(&self, leaf: NodeId) -> (Vec<f32>, Vec<f32>) {
         let board = &self.arena.get(leaf).board;
-        let mut buf = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
-        encode_board(board, &mut buf);
-        buf
+        let mut board_buf = vec![0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
+        let mut reserve_buf = vec![0.0f32; RESERVE_SIZE];
+        encode_board(board, &mut board_buf, &mut reserve_buf);
+        (board_buf, reserve_buf)
     }
 
     /// Root value estimate.

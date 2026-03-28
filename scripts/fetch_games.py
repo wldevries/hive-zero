@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 #!/usr/bin/env python3
-"""Download Hive game zips from boardspace.net into games/boardspace/."""
+"""Download Hive game zips from boardspace.net into games/hive/boardspace/."""
 
 import re
 import urllib.request
 from pathlib import Path
 
 BASE_URL = "https://www.boardspace.net/hive/hivegames"
-DEST = Path(__file__).parent.parent / "games" / "boardspace"
+DEST = Path(__file__).parent.parent / "games" / "hive" / "boardspace"
 
 # Subdirectories to skip — not game archives
 SKIP_DIRS = {"rankings/", "test/", "tutorials/"}

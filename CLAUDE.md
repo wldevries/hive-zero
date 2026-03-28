@@ -59,12 +59,17 @@ rust/
 - **Rayon parallelism**: MCTS tree ops (select, encode, expand, backprop) parallelized across games
 - **RustBatchMCTS.run_simulations**: full simulation loop in Rust with single Python GPU callback per round
 
-### Known issue: self-play draw convergence
-From-scratch self-play converges to draws within a few iterations. The network can't learn to win
+### Known issue: self-play draw convergence (Hive only)
+From-scratch Hive self-play converges to draws within a few iterations. The network can't learn to win
 (surrounding the queen requires coordinated attacks), so games hit the move cap, value targets are ~0,
 and the value head learns to predict 0 everywhere. Tried mitigations: draw penalty, heuristic values
 for unfinished games, opening randomization (helps somewhat), pretraining on boardspace games (delays
 but doesn't prevent). See `docs/IDEAS.md` for analysis.
+
+### Zertz: no draw convergence problem
+Zertz games end naturally before ~40 turns because rings are removed from the board each turn,
+making the game finite by construction. When win rates converge to ~50/50, value loss rises because
+balanced outcomes are harder to predict — fix is higher simulation count.
 
 ## Package Manager
 Use `uv` for all dependency management. Do NOT use pip directly.

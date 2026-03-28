@@ -5,26 +5,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from shared.nn.resblock import ResBlock
 from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
 from ..encoding.move_encoder import NUM_POLICY_CHANNELS, policy_size
-
-
-class ResBlock(nn.Module):
-    """Residual block with two convolutions and batch norm."""
-
-    def __init__(self, channels: int):
-        super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(channels)
-        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(channels)
-
-    def forward(self, x):
-        residual = x
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = self.bn2(self.conv2(x))
-        x = F.relu(x + residual)
-        return x
 
 
 class HiveNet(nn.Module):
@@ -42,6 +25,7 @@ class HiveNet(nn.Module):
     def __init__(self, num_blocks: int = 10, channels: int = 128,
                  grid_size: int = DEFAULT_GRID_SIZE):
         super().__init__()
+        self.game = "hive"
         if grid_size > DEFAULT_GRID_SIZE:
             raise ValueError(f"grid_size {grid_size} exceeds max board size {DEFAULT_GRID_SIZE}")
         if grid_size % 2 == 0:
@@ -129,6 +113,7 @@ def save_checkpoint(model: HiveNet, path: str, iteration: int = 0,
     """Save model with training metadata."""
     checkpoint = {
         "model_state_dict": model.state_dict(),
+        "game": "hive",
         "num_blocks": model.res_blocks.__len__(),
         "channels": model.input_conv.out_channels,
         "grid_size": model.grid_size,

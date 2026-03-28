@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import csv
 
-from ..training_log import LOG_HEADER
+from shared.training_log import LOG_HEADER
 import os
 import random
 import time
@@ -491,7 +491,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Supervised pre-training from human games")
     parser.add_argument("--games-csv", default="games/game_outcomes.csv")
     parser.add_argument("--elo-csv", default="games/player_elo.csv")
-    parser.add_argument("--boardspace-dir", default="games/boardspace")
+    parser.add_argument("--boardspace-dir", default="games/hive/boardspace")
     parser.add_argument("--min-elo", type=float, default=1600.0)
     parser.add_argument("--min-games", type=int, default=20)
     parser.add_argument("--model", default="model.pt")

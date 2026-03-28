@@ -20,3 +20,4 @@ rust/target/
 *.pyd
 *.dll
 mzinga
+scripts/.plot_log_geom.json

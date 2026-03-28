@@ -9,6 +9,10 @@ rand = { workspace = true }
 rand_distr = { workspace = true }
 zip = "2"
 
+[lib]
+name = "zertz_game"
+path = "src/lib.rs"
+
 [[bin]]
 name = "zertz-tools"
 path = "src/main.rs"

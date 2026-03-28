@@ -19,13 +19,13 @@ pub fn is_valid(h: Hex) -> bool {
 
 /// All 37 valid hex positions on the standard board, in a deterministic order.
 /// Ordered by (r, q) ascending — row by row, left to right.
-pub fn all_hexes() -> [Hex; BOARD_SIZE] {
+pub const fn all_hexes() -> [Hex; BOARD_SIZE] {
     let mut hexes = [(0i8, 0i8); BOARD_SIZE];
     let mut i = 0;
     let mut r = -RADIUS;
     while r <= RADIUS {
-        let q_min = (-RADIUS).max(-RADIUS - r);
-        let q_max = RADIUS.min(RADIUS - r);
+        let q_min = if -RADIUS > -RADIUS - r { -RADIUS } else { -RADIUS - r };
+        let q_max = if RADIUS < RADIUS - r { RADIUS } else { RADIUS - r };
         let mut q = q_min;
         while q <= q_max {
             hexes[i] = (q, r);
@@ -36,6 +36,9 @@ pub fn all_hexes() -> [Hex; BOARD_SIZE] {
     }
     hexes
 }
+
+/// Precomputed lookup table: index → hex coordinate. O(1) `index_to_hex`.
+pub const ALL_HEXES: [Hex; BOARD_SIZE] = all_hexes();
 
 /// Neighbors of `h` that are on the Zertz board.
 pub fn valid_neighbors(h: Hex) -> impl Iterator<Item = Hex> {
@@ -71,10 +74,10 @@ pub fn hex_to_index(h: Hex) -> usize {
     idx + (q - q_min) as usize
 }
 
-/// Map a linear index (0..36) back to hex coordinates.
+/// Map a linear index (0..36) back to hex coordinates. O(1) table lookup.
 #[inline]
 pub fn index_to_hex(idx: usize) -> Hex {
-    all_hexes()[idx]
+    ALL_HEXES[idx]
 }
 
 /// Convert a boardspace coordinate (col A=0..G=6, row 0-based within column) to hex.

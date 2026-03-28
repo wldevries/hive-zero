@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+pub use core_game::sgf::{extract_player, extract_prop};
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -137,17 +139,7 @@ enum RawAction {
 // Header parsing
 // ---------------------------------------------------------------------------
 
-fn extract_prop<'a>(text: &'a str, key: &str) -> Option<&'a str> {
-    let pattern = format!("{key}[");
-    let start = text.find(&pattern)?;
-    let value_start = start + pattern.len();
-    let end = text[value_start..].find(']')?;
-    Some(&text[value_start..value_start + end])
-}
-
-fn parse_header(
-    text: &str,
-) -> (Variant, String, String, String, String) {
+fn parse_header(text: &str) -> (Variant, String, String, String, String) {
     let variant = match extract_prop(text, "SU") {
         Some(su) => {
             let su_lower = su.to_lowercase();
@@ -165,16 +157,8 @@ fn parse_header(
         None => Variant::Standard,
     };
 
-    let p0 = extract_prop(text, "P0")
-        .unwrap_or("")
-        .trim_start_matches("id ")
-        .trim_matches('"')
-        .to_string();
-    let p1 = extract_prop(text, "P1")
-        .unwrap_or("")
-        .trim_start_matches("id ")
-        .trim_matches('"')
-        .to_string();
+    let p0 = extract_player(text, 0);
+    let p1 = extract_player(text, 1);
     let result = extract_prop(text, "RE").unwrap_or("").to_string();
     let game_name = extract_prop(text, "GN").unwrap_or("").to_string();
 
@@ -510,39 +494,14 @@ pub fn parse_game(text: &str) -> Result<GameRecord, ParseError> {
 
 /// Iterate over all .sgf games inside a zip archive, streaming from a reader.
 /// Calls `f` for each successfully parsed game.
-pub fn iter_games_in_zip<R: std::io::Read + std::io::Seek>(
-    reader: R,
-    mut f: impl FnMut(&str, GameRecord),
-) -> Result<usize, String> {
-    let mut archive =
-        zip::ZipArchive::new(reader).map_err(|e| format!("failed to open zip: {e}"))?;
-    let mut count = 0;
-
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| format!("failed to read zip entry {i}: {e}"))?;
-        let name = file.name().to_string();
-
-        if !name.ends_with(".sgf") {
-            continue;
+pub fn iter_games_in_zip<R, F>(reader: R, mut f: F) -> Result<(), String>
+where
+    R: std::io::Read + std::io::Seek,
+    F: FnMut(&str, GameRecord),
+{
+    core_game::sgf::iter_sgf_texts_in_zip(reader, |name, text| {
+        if let Ok(record) = parse_game(&text) {
+            f(name, record);
         }
-
-        let mut contents = String::new();
-        if std::io::Read::read_to_string(&mut file, &mut contents).is_err() {
-            continue;
-        }
-
-        match parse_game(&contents) {
-            Ok(record) => {
-                f(&name, record);
-                count += 1;
-            }
-            Err(_) => {
-                // Skip unparseable games silently.
-            }
-        }
-    }
-
-    Ok(count)
+    })
 }
