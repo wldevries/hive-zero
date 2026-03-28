@@ -142,6 +142,74 @@ Follows UHP MoveString format:
 - Stacking: `wB1 wS1` (beetle climbs on top of white Spider 1)
 - Pass: `pass`
 
+## Zertz
+
+A separate AlphaZero-style engine for [Zertz](https://boardgamegeek.com/boardgame/596/zertz) is included under `zertz/`. It uses the same Rust game backend (`hive_engine`) and PyTorch training loop.
+
+### Train Zertz
+
+```bash
+uv run zertz train \
+  --model zertz_b4_c128.pt \
+  --blocks 4 --channels 128 \
+  --games 100 --simulations 400 \
+  --device cuda \
+  --playout-cap-p 0.25 \
+  --play-batch-size 2 \
+  --augment-symmetry \
+  --temp-threshold 30 \
+  --comment "my run"
+```
+
+Key training flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model` | `zertz.pt` | Model file path (also names the log CSV) |
+| `--blocks` | 6 | Residual blocks |
+| `--channels` | 64 | Network channels |
+| `--games` | 20 | Self-play games per iteration |
+| `--simulations` | 100 | MCTS simulations per move |
+| `--playout-cap-p` | 0.0 | Fraction of full-search turns (KataGo-style) |
+| `--fast-cap` | 20 | Simulations for fast-search turns |
+| `--play-batch-size` | 2 | MCTS rounds per GPU inference call |
+| `--temp-threshold` | 30 | Move number after which temperature drops to 0 |
+| `--augment-symmetry` | off | Apply D6 hex symmetry augmentation (12× data) |
+| `--lr` | 0.02 | Learning rate |
+| `--max-moves` | 40 | Max moves per game |
+| `--replay-window` | 8 | Replay buffer size (in iterations) |
+| `--checkpoint-every` | 10 | Save checkpoint every N iterations |
+| `--time-limit` | None | Stop after N minutes |
+| `--comment` | `""` | Comment logged with each iteration |
+
+Training logs are written to `{model_stem}_log.csv` (e.g. `zertz_b4_c128_log.csv`).
+
+### Play Against the AI
+
+```bash
+uv run zertz play --model zertz_b4_c128.pt --simulations 400
+```
+
+Optional flags:
+- `--color p1` or `--color p2` — force a side (default: random)
+- Omit `--model` to play against a random AI
+
+**Move format** (placement turn): `<color> <place> [remove]`
+- Colors: `W` (white), `G` (grey), `B` (black)
+- Coordinates: `A1`–`G7` (board is a hex grid, not all cells are valid)
+- Example: `W D4 D3` — place a white marble on D4 and remove the ring at D3
+- Omit `[remove]` when placing on an isolated ring (no removal required)
+
+Capture turns show a numbered list — pick the number.
+
+### View the Training Log
+
+```bash
+uv run python scripts/plot_log.py zertz_b4_c128_log.csv
+```
+
+Plots win percentages, loss curves, game length, and win conditions (white/grey/black/combo) across iterations. The window geometry is remembered between runs.
+
 ## License
 
 MIT
