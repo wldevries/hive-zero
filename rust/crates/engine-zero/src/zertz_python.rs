@@ -43,6 +43,8 @@ pub struct PyZertzSelfPlayResult {
     decisive_lengths: Vec<u32>,
     full_search_turns: u32,
     total_turns: u32,
+    isolation_captures: u32,
+    jump_captures: u32,
     /// Up to 3 sample boards: (label, board_string) pairs for display.
     sample_board_data: Vec<(String, String)>,
 }
@@ -93,6 +95,8 @@ impl PyZertzSelfPlayResult {
     #[getter] fn decisive_lengths(&self) -> Vec<u32> { self.decisive_lengths.clone() }
     #[getter] fn full_search_turns(&self) -> u32 { self.full_search_turns }
     #[getter] fn total_turns(&self) -> u32 { self.total_turns }
+    #[getter] fn isolation_captures(&self) -> u32 { self.isolation_captures }
+    #[getter] fn jump_captures(&self) -> u32 { self.jump_captures }
     /// Returns list of (label, board_string) for up to 3 decisive games.
     fn sample_boards(&self) -> Vec<(String, String)> { self.sample_board_data.clone() }
 }
@@ -202,6 +206,8 @@ impl PyZertzSelfPlaySession {
         let mut decisive_lengths: Vec<u32> = Vec::new();
         let mut full_search_turns: u32 = 0;
         let mut total_turns: u32 = 0;
+        let mut isolation_captures: u32 = 0;
+        let mut jump_captures: u32 = 0;
         let mut sample_board_data: Vec<(String, String)> = Vec::new();
 
         // --- Main game loop ---
@@ -373,6 +379,14 @@ impl PyZertzSelfPlaySession {
                     finished_count += 1;
                     let len = move_counts[gi];
                     game_lengths.push(len);
+                    isolation_captures += boards[gi].isolation_captures.iter()
+                        .flat_map(|p| p.iter())
+                        .map(|&c| c as u32)
+                        .sum::<u32>();
+                    jump_captures += boards[gi].jump_captures.iter()
+                        .flat_map(|p| p.iter())
+                        .map(|&c| c as u32)
+                        .sum::<u32>();
                     match boards[gi].outcome() {
                         Outcome::WonBy(winner) => {
                             if winner == Player::Player1 { wins_p1 += 1; } else { wins_p2 += 1; }
@@ -463,6 +477,8 @@ impl PyZertzSelfPlaySession {
             decisive_lengths,
             full_search_turns,
             total_turns,
+            isolation_captures,
+            jump_captures,
             sample_board_data,
         })
     }

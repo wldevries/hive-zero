@@ -28,8 +28,9 @@ from ..nn.training import Trainer, ZertzDataset
 LOG_HEADER = (
     "iter,simulations,wins_p1,wins_p2,draws,positions,buffer,"
     "loss,policy_loss,value_loss,lr,duration_s,comment,"
-    "avg_game_len,med_game_len,max_game_len,"
-    "wins_white,wins_grey,wins_black,wins_combo\n"
+    "avg_game_len,med_game_len,min_game_len,max_game_len,"
+    "wins_white,wins_grey,wins_black,wins_combo,"
+    "isolation_captures,jump_captures\n"
 )
 
 
@@ -272,6 +273,7 @@ class SelfPlayTrainer:
             # --- Log ---
             avg_gl = f"{sum(lengths) / len(lengths):.1f}" if lengths else ""
             med_gl = str(_median(lengths)) if lengths else ""
+            min_gl = str(min(lengths)) if lengths else ""
             max_gl = str(max(lengths)) if lengths else ""
             with open(log_path, "a") as f:
                 f.write(
@@ -280,8 +282,9 @@ class SelfPlayTrainer:
                     f"{result.num_samples},{len(dataset)},"
                     f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
                     f"{losses['value_loss']:.6f},{lr:.6f},{duration:.1f},"
-                    f"{csv_comment(comment)},{avg_gl},{med_gl},{max_gl},"
-                    f"{result.wins_white},{result.wins_grey},{result.wins_black},{result.wins_combo}\n"
+                    f"{csv_comment(comment)},{avg_gl},{med_gl},{min_gl},{max_gl},"
+                    f"{result.wins_white},{result.wins_grey},{result.wins_black},{result.wins_combo},"
+                    f"{result.isolation_captures},{result.jump_captures}\n"
                 )
             comment = ""
 
