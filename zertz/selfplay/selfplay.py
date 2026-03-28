@@ -178,7 +178,6 @@ class SelfPlayTrainer:
             p2 = result.wins_p2
             d = result.draws
             lengths = list(result.game_lengths)
-            decisive = list(result.decisive_lengths)
 
             print(
                 f"  Results: P1={_cg(f'{p1}')}  P2={_cr(f'{p2}')}  D/timeout={_cy(f'{d}')}"
@@ -188,11 +187,20 @@ class SelfPlayTrainer:
                 avg = sum(lengths) / len(lengths)
                 med = _median(lengths)
                 mn, mx = min(lengths), max(lengths)
-                dec_str = ""
-                if decisive:
-                    dec_str = f"  decisive: avg={sum(decisive) / len(decisive):.0f} med={_median(decisive)}"
+                print(f"  Game length: avg={avg:.0f} med={med} min={mn} max={mx}")
+
+            decisive_total = result.wins_white + result.wins_grey + result.wins_black + result.wins_combo
+            if decisive_total > 0:
+                _CW = "\x1b[38;2;255;160;50m"   # orange     — white balls
+                _CG = "\x1b[38;2;100;180;255m"  # steel blue — grey balls
+                _CB = "\x1b[38;2;255;60;180m"   # hot pink   — black balls
+                _CC = "\x1b[38;2;80;220;80m"    # green      — combo
+                def _wc(c, n): return f"{c}{n}{_RESET}"
                 print(
-                    f"  Game length: avg={avg:.0f} med={med} min={mn} max={mx}{dec_str}"
+                    f"  Win cons: white={_wc(_CW, result.wins_white)}"
+                    f"  grey={_wc(_CG, result.wins_grey)}"
+                    f"  black={_wc(_CB, result.wins_black)}"
+                    f"  combo={_wc(_CC, result.wins_combo)}"
                 )
 
             if playout_cap_p > 0:
@@ -297,14 +305,14 @@ def _render_boards_horizontally(
     ]
 
     if labels:
-        board_widths = [max(w, len(labels[i])) for i, w in enumerate(board_widths)]
+        board_widths = [max(w, visual_len(labels[i])) for i, w in enumerate(board_widths)]
 
     max_height = max(len(lines) for lines in boards_lines)
     all_lines = []
 
     if labels:
         all_lines.append(
-            sep.join(lbl.ljust(board_widths[i]) for i, lbl in enumerate(labels))
+            sep.join(lbl + " " * (board_widths[i] - visual_len(lbl)) for i, lbl in enumerate(labels))
         )
 
     for row in range(max_height):

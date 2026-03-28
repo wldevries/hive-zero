@@ -851,9 +851,9 @@ impl ZertzBoard {
 impl Display for ZertzBoard {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         // ANSI color codes matching the board display.
-        const CW: &str = "\x1b[96m"; // bright cyan  — White
-        const CG: &str = "\x1b[93m"; // bright yellow — Grey
-        const CB: &str = "\x1b[95m"; // bright magenta — Black
+        const CW: &str = "\x1b[38;2;255;160;50m";   // orange — White
+        const CG: &str = "\x1b[38;2;100;180;255m"; // steel blue — Grey
+        const CB: &str = "\x1b[38;2;255;60;180m";  // hot pink   — Black
         const CR: &str = "\x1b[0m";  // reset
         writeln!(
             f,

@@ -134,10 +134,10 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
     if ax4 is not None:
         decisive = pd.to_numeric(df["wins_white"] + df["wins_grey"] + df["wins_black"] + df["wins_combo"], errors="coerce").replace(0, np.nan)
         for col, label, color in [
-            ("wins_white", "4 white", "cyan"),
-            ("wins_grey",  "5 grey",  "yellow"),
-            ("wins_black", "6 black", "purple"),
-            ("wins_combo", "3 each",  "mediumorchid"),
+            ("wins_white", "white", "#FFA032"),
+            ("wins_grey",  "grey",  "#64B4FF"),
+            ("wins_black", "black", "#FF3CB4"),
+            ("wins_combo", "combo", "#50DC50"),
         ]:
             pct = pd.to_numeric(df[col], errors="coerce") / decisive * 100
             if pct.notna().any():

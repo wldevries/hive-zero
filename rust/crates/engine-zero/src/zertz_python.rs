@@ -377,14 +377,27 @@ impl PyZertzSelfPlaySession {
                         Outcome::WonBy(winner) => {
                             if winner == Player::Player1 { wins_p1 += 1; } else { wins_p2 += 1; }
                             decisive_lengths.push(len);
-                            match classify_win(&boards[gi], winner) {
+                            let win_type = classify_win(&boards[gi], winner);
+                            const CW: &str = "\x1b[38;2;255;160;50m";
+                            const CG: &str = "\x1b[38;2;100;180;255m";
+                            const CB: &str = "\x1b[38;2;255;60;180m";
+                            const CC: &str = "\x1b[38;2;80;220;80m";
+                            const CR: &str = "\x1b[0m";
+                            let win_type_str = match &win_type {
+                                WinType::FourWhite => format!("{CW}white{CR}"),
+                                WinType::FiveGrey  => format!("{CG}grey{CR}"),
+                                WinType::SixBlack  => format!("{CB}black{CR}"),
+                                WinType::ThreeEach => format!("{CC}combo{CR}"),
+                                WinType::Draw      => String::new(),
+                            };
+                            match win_type {
                                 WinType::FourWhite  => wins_white += 1,
                                 WinType::FiveGrey   => wins_grey  += 1,
                                 WinType::SixBlack   => wins_black += 1,
                                 WinType::ThreeEach  => wins_combo += 1,
                                 WinType::Draw       => {}
                             }
-                            let label = format!("{} wins ({} moves)", if winner == Player::Player1 { "P1" } else { "P2" }, len);
+                            let label = format!("{} wins ({} moves, {})", if winner == Player::Player1 { "P1" } else { "P2" }, len, win_type_str);
                             sample_board_data.push((label, format!("{}", boards[gi])));
                         }
                         _ => { draws += 1; }
