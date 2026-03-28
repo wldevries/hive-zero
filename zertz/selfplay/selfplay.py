@@ -121,6 +121,20 @@ class SelfPlayTrainer:
         dataset.augment_symmetry = augment_symmetry
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
+        train_params = {
+            "simulations": simulations,
+            "games_per_iter": games_per_iter,
+            "epochs_per_iter": epochs_per_iter,
+            "batch_size": batch_size,
+            "max_moves": max_moves,
+            "replay_window": replay_window,
+            "playout_cap_p": playout_cap_p,
+            "fast_cap": fast_cap,
+            "temp_threshold": temp_threshold,
+            "play_batch_size": play_batch_size,
+            "augment_symmetry": augment_symmetry,
+        }
+
         start_time = time.time()
         iteration = self.start_iteration
 
@@ -251,9 +265,11 @@ class SelfPlayTrainer:
                 total_s = f"{losses['total_loss']:.4f}"
                 policy_s = f"{losses['policy_loss']:.4f}"
                 value_s = f"{losses['value_loss']:.4f}"
+                place_pol_s = f"{losses['place_policy_loss']:.4f}"
+                cap_pol_s = f"{losses['capture_policy_loss']:.4f}"
                 print(
                     f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
-                    f"(policy={_cy(policy_s)}, "
+                    f"(policy={_cy(policy_s)} place_pol={_cy(place_pol_s)} cap_pol={_cy(cap_pol_s)}, "
                     f"value={_cy(value_s)}, "
                     f"lr={lr:.4f})"
                 )
@@ -261,7 +277,8 @@ class SelfPlayTrainer:
             duration = time.time() - iter_start
 
             # --- Save model ---
-            save_checkpoint(self.model, self.model_path, iteration=iteration)
+            metadata = {**train_params, "lr": lr}
+            save_checkpoint(self.model, self.model_path, iteration=iteration, metadata=metadata)
             print(f"  Model saved: {self.model_path} (iteration {iteration})")
 
             # --- Checkpoint ---
@@ -269,7 +286,7 @@ class SelfPlayTrainer:
                 ckpt_path = os.path.join(
                     self.checkpoint_dir, f"{self.model_name}_iter{iteration:05d}.pt"
                 )
-                save_checkpoint(self.model, ckpt_path, iteration=iteration)
+                save_checkpoint(self.model, ckpt_path, iteration=iteration, metadata=metadata)
                 print(f"  Checkpoint saved to {ckpt_path}")
 
             # --- Log ---
