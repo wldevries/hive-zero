@@ -27,7 +27,8 @@ from ..nn.training import Trainer, ZertzDataset
 
 LOG_HEADER = (
     "iter,simulations,wins_p1,wins_p2,draws,positions,buffer,"
-    "loss,policy_loss,value_loss,lr,duration_s,comment\n"
+    "loss,policy_loss,value_loss,lr,duration_s,comment,"
+    "avg_game_len,med_game_len,max_game_len\n"
 )
 
 
@@ -111,6 +112,14 @@ class SelfPlayTrainer:
         if not os.path.exists(log_path):
             with open(log_path, "w") as f:
                 f.write(LOG_HEADER)
+        else:
+            with open(log_path, "r+") as f:
+                existing = f.readline()
+                if existing.strip() != LOG_HEADER.strip():
+                    rest = f.read()
+                    f.seek(0)
+                    f.write(LOG_HEADER + rest)
+                    f.truncate()
 
         max_buffer = games_per_iter * max_moves * replay_window
         dataset = ZertzDataset(max_size=max_buffer)
@@ -260,6 +269,9 @@ class SelfPlayTrainer:
                 print(f"  Checkpoint saved to {ckpt_path}")
 
             # --- Log ---
+            avg_gl = f"{sum(lengths) / len(lengths):.1f}" if lengths else ""
+            med_gl = str(_median(lengths)) if lengths else ""
+            max_gl = str(max(lengths)) if lengths else ""
             with open(log_path, "a") as f:
                 f.write(
                     f"{iteration},{simulations},"
@@ -267,7 +279,7 @@ class SelfPlayTrainer:
                     f"{result.num_samples},{len(dataset)},"
                     f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
                     f"{losses['value_loss']:.6f},{lr:.6f},{duration:.1f},"
-                    f"{csv_comment(comment)}\n"
+                    f"{csv_comment(comment)},{avg_gl},{med_gl},{max_gl}\n"
                 )
             comment = ""
 

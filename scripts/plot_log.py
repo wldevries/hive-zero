@@ -40,8 +40,27 @@ def _restore_geometry(fig) -> None:
         pass
 
 
+_TRAILING_COLS = ["avg_game_len", "med_game_len", "max_game_len",
+                  "avg_decisive_len", "med_decisive_len"]
+
+
+def _read_csv_flexible(csv_path: Path) -> pd.DataFrame:
+    """Read a CSV whose data rows may have more columns than the header."""
+    import io
+    with open(csv_path) as f:
+        lines = f.readlines()
+    header_n = len(lines[0].split(","))
+    max_data_n = max((len(l.split(",")) for l in lines[1:] if l.strip()), default=header_n)
+    if max_data_n <= header_n:
+        return pd.read_csv(csv_path, skipinitialspace=True, on_bad_lines="warn")
+    extra = max_data_n - header_n
+    header = lines[0].strip().split(",") + _TRAILING_COLS[:extra]
+    content = ",".join(header) + "\n" + "".join(lines[1:])
+    return pd.read_csv(io.StringIO(content), skipinitialspace=True, on_bad_lines="warn")
+
+
 def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
-    df = pd.read_csv(csv_path, skipinitialspace=True, on_bad_lines="warn")
+    df = _read_csv_flexible(csv_path)
 
     col_w = "wins_w" if "wins_w" in df.columns else "wins_p1"
     col_b = "wins_b" if "wins_b" in df.columns else "wins_p2"
@@ -52,6 +71,9 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
 
     iters = df["iter"]
 
+    if "avg_game_len" not in df.columns and "positions" in df.columns:
+        total_games = df[col_w] + df[col_b] + df["draws"]
+        df["avg_game_len"] = df["positions"] / total_games.replace(0, np.nan)
     has_game_len = "avg_game_len" in df.columns and pd.to_numeric(df["avg_game_len"], errors="coerce").notna().any()
     nrows = 3 if has_game_len else 2
     fig, axes = plt.subplots(nrows, 1, figsize=(12, 4 * nrows), sharex=True)
@@ -105,13 +127,16 @@ def plot_perf_log(csv_path: Path, output: Path | None = None) -> None:
     # --- Game length ---
     if ax3 is not None:
         avg_gl = pd.to_numeric(df["avg_game_len"], errors="coerce")
-        med_gl = pd.to_numeric(df["med_game_len"], errors="coerce")
-        avg_dl = pd.to_numeric(df["avg_decisive_len"], errors="coerce")
-        med_dl = pd.to_numeric(df["med_decisive_len"], errors="coerce")
+        med_gl = pd.to_numeric(df.get("med_game_len", pd.Series(dtype=float)), errors="coerce") if "med_game_len" in df.columns else pd.Series(dtype=float)
+        max_gl = pd.to_numeric(df.get("max_game_len", pd.Series(dtype=float)), errors="coerce") if "max_game_len" in df.columns else pd.Series(dtype=float)
+        avg_dl = pd.to_numeric(df.get("avg_decisive_len", pd.Series(dtype=float)), errors="coerce") if "avg_decisive_len" in df.columns else pd.Series(dtype=float)
+        med_dl = pd.to_numeric(df.get("med_decisive_len", pd.Series(dtype=float)), errors="coerce") if "med_decisive_len" in df.columns else pd.Series(dtype=float)
         if avg_gl.notna().any():
             ax3.plot(iters, avg_gl, label="Avg all", color="steelblue", linewidth=1.5)
         if med_gl.notna().any():
             ax3.plot(iters, med_gl, label="Med all", color="steelblue", linewidth=1, linestyle="--")
+        if max_gl.notna().any():
+            ax3.plot(iters, max_gl, label="Max all", color="steelblue", linewidth=1, linestyle=":")
         if avg_dl.notna().any():
             ax3.plot(iters, avg_dl, label="Avg decisive", color="tomato", linewidth=1.5)
         if med_dl.notna().any():

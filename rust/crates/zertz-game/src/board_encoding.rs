@@ -25,8 +25,8 @@ pub const NUM_CHANNELS: usize = 4;
 ///   [0-2]:  supply_W/G/B normalized by initial supply
 ///   [3-5]:  cur_cap_W/G/B normalized by initial supply
 ///   [6-8]:  opp_cap_W/G/B normalized by initial supply
-///   [9-11]: min(cur_cap_W,2)/2, min(cur_cap_G,2)/2, min(cur_cap_B,2)/2  (combo win progress)
-///   [12-14]: min(opp_cap_W,2)/2, min(opp_cap_G,2)/2, min(opp_cap_B,2)/2
+///   [9-11]: min(cur_cap_W,3)/3, min(cur_cap_G,3)/3, min(cur_cap_B,3)/3  (combo win progress)
+///   [12-14]: min(opp_cap_W,3)/3, min(opp_cap_G,3)/3, min(opp_cap_B,3)/3
 pub const RESERVE_SIZE: usize = 15;
 
 /// Initial supply for normalization: [6, 8, 10].
@@ -78,13 +78,13 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut
     reserve_out[6] = captures[opp_pi][0] as f32 / INITIAL_SUPPLY[0];
     reserve_out[7] = captures[opp_pi][1] as f32 / INITIAL_SUPPLY[1];
     reserve_out[8] = captures[opp_pi][2] as f32 / INITIAL_SUPPLY[2];
-    // Combo win progress: min(cap, 2) / 2 per color (win condition: ≥2 of each color)
-    reserve_out[9]  = captures[cur_pi][0].min(2) as f32 / 2.0;
-    reserve_out[10] = captures[cur_pi][1].min(2) as f32 / 2.0;
-    reserve_out[11] = captures[cur_pi][2].min(2) as f32 / 2.0;
-    reserve_out[12] = captures[opp_pi][0].min(2) as f32 / 2.0;
-    reserve_out[13] = captures[opp_pi][1].min(2) as f32 / 2.0;
-    reserve_out[14] = captures[opp_pi][2].min(2) as f32 / 2.0;
+    // Combo win progress: min(cap, 3) / 3 per color (win condition: ≥3 of each color)
+    reserve_out[9]  = captures[cur_pi][0].min(3) as f32 / 3.0;
+    reserve_out[10] = captures[cur_pi][1].min(3) as f32 / 3.0;
+    reserve_out[11] = captures[cur_pi][2].min(3) as f32 / 3.0;
+    reserve_out[12] = captures[opp_pi][0].min(3) as f32 / 3.0;
+    reserve_out[13] = captures[opp_pi][1].min(3) as f32 / 3.0;
+    reserve_out[14] = captures[opp_pi][2].min(3) as f32 / 3.0;
 }
 
 #[cfg(test)]
