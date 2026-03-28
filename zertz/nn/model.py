@@ -41,10 +41,11 @@ class ZertzNet(nn.Module):
 
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
 
-        # Factorized policy heads (conv1x1)
-        self.policy_place = nn.Conv2d(channels, PLACE_HEAD_CHANNELS, 1)
-        self.policy_source = nn.Conv2d(channels, 1, 1)
-        self.policy_dest = nn.Conv2d(channels, 1, 1)
+        # Factorized policy heads (conv1x1, with reserve broadcast as extra channels)
+        policy_in = channels + RESERVE_SIZE
+        self.policy_place = nn.Conv2d(policy_in, PLACE_HEAD_CHANNELS, 1)
+        self.policy_source = nn.Conv2d(policy_in, 1, 1)
+        self.policy_dest = nn.Conv2d(policy_in, 1, 1)
 
         # Value head: 1x1 conv → flatten → concat reserve → FC(256) → tanh
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
@@ -65,10 +66,14 @@ class ZertzNet(nn.Module):
         for block in self.res_blocks:
             x = block(x)
 
+        # Broadcast reserve as spatial channels and concat with trunk
+        r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, GRID_SIZE, GRID_SIZE)
+        xr = torch.cat([x, r], dim=1)  # (B, channels+15, 7, 7)
+
         # Policy heads (conv1x1, then flatten for Rust)
-        place_logits = self.policy_place(x).view(x.size(0), -1)   # (B, 196)
-        source_logits = self.policy_source(x).view(x.size(0), -1) # (B, 49)
-        dest_logits = self.policy_dest(x).view(x.size(0), -1)     # (B, 49)
+        place_logits = self.policy_place(xr).view(x.size(0), -1)   # (B, 196)
+        source_logits = self.policy_source(xr).view(x.size(0), -1) # (B, 49)
+        dest_logits = self.policy_dest(xr).view(x.size(0), -1)     # (B, 49)
 
         # Value head
         v = F.relu(self.value_bn(self.value_conv(x)))
