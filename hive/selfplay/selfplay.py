@@ -6,7 +6,13 @@ import numpy as np
 import os
 from typing import Optional
 
-from shared.training_log import LOG_HEADER, csv_comment
+from shared.training_log import csv_comment
+
+LOG_HEADER = (
+    "iter,mode,simulations,wins_w,wins_b,draws,resignations,positions,buffer,"
+    "loss,policy_loss,value_loss,qd_loss,lr,duration_s,comment,qe_loss,mob_loss,"
+    "avg_game_len,med_game_len,avg_decisive_len,med_decisive_len\n"
+)
 
 import colorama
 colorama.init()
@@ -110,13 +116,11 @@ class SelfPlayTrainer:
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
         # Training log (CSV, truncated on fresh start)
-        log_path = f"{self.model_name}_log.csv"
+        self._log_path = f"{self.model_name}_log.csv"
+        log_path = self._log_path
         if self.start_iteration == 0:
-            self._log = open(log_path, "w")
-            self._log.write(LOG_HEADER)
-        else:
-            self._log = open(log_path, "a")
-        self._log.flush()
+            with open(log_path, "w") as f:
+                f.write(LOG_HEADER)
 
         # Bootstrap eval: if best_model.pt doesn't exist, run it immediately
         # rather than waiting until the next checkpoint iteration.
@@ -310,17 +314,16 @@ class SelfPlayTrainer:
             med_gl = game_lengths[len(game_lengths) // 2] if game_lengths else 0
             avg_dl = sum(decisive_lengths) / len(decisive_lengths) if decisive_lengths else 0
             med_dl = decisive_lengths[len(decisive_lengths) // 2] if decisive_lengths else 0
-            self._log.write(f"{iteration},MCTS,{simulations},"
-                            f"{wins_w},{wins_b},{draws},{resignations},{total_positions},"
-                            f"{len(replay_buffer)},{losses['total_loss']:.6f},"
-                            f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
-                            f"{losses.get('qd_loss', 0):.6f},"
-                            f"{lr:.8f},{play_time + train_time:.1f},{csv_comment(self._comment)},"
-                            f"{losses.get('qe_loss', 0):.6f},{losses.get('mob_loss', 0):.6f},"
-                            f"{avg_gl:.1f},{med_gl},{avg_dl:.1f},{med_dl}\n")
+            with open(log_path, "a") as f:
+                f.write(f"{iteration},MCTS,{simulations},"
+                        f"{wins_w},{wins_b},{draws},{resignations},{total_positions},"
+                        f"{len(replay_buffer)},{losses['total_loss']:.6f},"
+                        f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
+                        f"{losses.get('qd_loss', 0):.6f},"
+                        f"{lr:.8f},{play_time + train_time:.1f},{csv_comment(self._comment)},"
+                        f"{losses.get('qe_loss', 0):.6f},{losses.get('mob_loss', 0):.6f},"
+                        f"{avg_gl:.1f},{med_gl},{avg_dl:.1f},{med_dl}\n")
             self._comment = ""
-            self._log.flush()
-            os.fsync(self._log.fileno())
 
             # Save latest model + periodic checkpoint
             metadata = {
@@ -441,10 +444,9 @@ class SelfPlayTrainer:
                 shutil.copy2(prev_ckpt, best_model_path)
             shutil.copy2(best_model_path, self.model_path)
             print(f"  {_cg(w)}W/{_cy(d)}D/{_cr(l)}L → best model: {winner_label}")
-            self._log.write(f"{iteration},pit-bootstrap,{simulations},{w},{l},{d},0,0,0,"
-                            f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
-            self._log.flush()
-            os.fsync(self._log.fileno())
+            with open(self._log_path, "a") as f:
+                f.write(f"{iteration},pit-bootstrap,{simulations},{w},{l},{d},0,0,0,"
+                        f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
             return
 
         print(f"\n--- Checkpoint eval: challenger (i{iteration}) vs best ({num_games} games) ---")
@@ -480,10 +482,9 @@ class SelfPlayTrainer:
         # model.pt always mirrors best_model.pt so fresh restarts use the best known weights
         shutil.copy2(best_model_path, self.model_path)
 
-        self._log.write(f"{iteration},pit,{simulations},{w},{l},{d},0,0,0,"
-                        f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
-        self._log.flush()
-        os.fsync(self._log.fileno())
+        with open(self._log_path, "a") as f:
+            f.write(f"{iteration},pit,{simulations},{w},{l},{d},0,0,0,"
+                    f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
 
     def _run_eval(self, eval_config: dict, iteration: int, replay_buffer=None):
         """Run evaluation games against Mzinga and feed samples back."""
@@ -530,11 +531,10 @@ class SelfPlayTrainer:
                       f"(score: {_cc(f'{score:.0%}')})")
 
             # Log to CSV
-            self._log.write(f"{iteration},eval,{eval_config['simulations']},{w},{l},{d},0,{len(samples)},"
-                            f"{len(replay_buffer) if replay_buffer else 0},"
-                            f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
-            self._log.flush()
-            os.fsync(self._log.fileno())
+            with open(self._log_path, "a") as f:
+                f.write(f"{iteration},eval,{eval_config['simulations']},{w},{l},{d},0,{len(samples)},"
+                        f"{len(replay_buffer) if replay_buffer else 0},"
+                        f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
         except Exception as e:
             print(f"  Eval failed: {e}")
         finally:

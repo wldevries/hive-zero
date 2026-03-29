@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import csv
 
-from shared.training_log import LOG_HEADER
+from hive.selfplay.selfplay import LOG_HEADER
 import os
 import random
 import time
@@ -353,15 +353,14 @@ class Pretrainer:
 
         model_name = os.path.splitext(os.path.basename(self.model_path))[0]
         log_path = f"{model_name}_log.csv"
-        header = LOG_HEADER
         needs_header = True
         if os.path.exists(log_path):
             with open(log_path) as f:
                 first = f.readline()
             needs_header = not first.startswith("iter,")
-        log = open(log_path, "a", buffering=1)
         if needs_header:
-            log.write(header)
+            with open(log_path, "a") as f:
+                f.write(LOG_HEADER)
 
         total_games = len(games)
         print(f"Dataset: {total_games} games | buffer: {buffer_size} | "
@@ -444,14 +443,15 @@ class Pretrainer:
                             f"loss={_cr(tl)} (policy={_cy(pl)} value={_cy(vl)}) "
                             f"lr={lr} [{chunk_elapsed:.1f}s]"
                         )
-                        log.write(
-                            f"{chunk_idx},pretrain,0,0,0,0,0,{total_positions},{chunk_positions},"
-                            f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
-                            f"{losses['value_loss']:.6f},{losses.get('qd_loss', 0):.6f},"
-                            f"{lr:.8f},{chunk_elapsed:.1f},"
-                            f"epoch={epoch},"
-                            f"{losses.get('qe_loss', 0):.6f},{losses.get('mob_loss', 0):.6f}\n"
-                        )
+                        with open(log_path, "a") as log:
+                            log.write(
+                                f"{chunk_idx},pretrain,0,0,0,0,0,{total_positions},{chunk_positions},"
+                                f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
+                                f"{losses['value_loss']:.6f},{losses.get('qd_loss', 0):.6f},"
+                                f"{lr:.8f},{chunk_elapsed:.1f},"
+                                f"epoch={epoch},"
+                                f"{losses.get('qe_loss', 0):.6f},{losses.get('mob_loss', 0):.6f}\n"
+                            )
 
 
             total_errors += errors_this_epoch
@@ -472,7 +472,6 @@ class Pretrainer:
             self._save_checkpoint(self.model, ckpt_path, epoch, epoch_losses)
             print(f"  Model saved → {self.model_path}  |  Checkpoint → {ckpt_path}")
 
-        log.close()
         print(
             f"\nPre-training complete. "
             f"Total positions: {total_positions}. "
