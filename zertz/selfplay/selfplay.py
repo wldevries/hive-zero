@@ -27,9 +27,11 @@ from ..nn.training import Trainer, ZertzDataset
 
 LOG_HEADER = (
     "iter,simulations,wins_p1,wins_p2,draws,positions,buffer,"
-    "loss,policy_loss,value_loss,lr,duration_s,comment,"
-    "avg_game_len,med_game_len,max_game_len,"
-    "wins_white,wins_grey,wins_black,wins_combo\n"
+    "loss,policy_loss,value_loss,place_value_loss,capture_value_loss,"
+    "place_policy_loss,capture_policy_loss,lr,duration_s,comment,"
+    "avg_game_len,med_game_len,min_game_len,max_game_len,"
+    "wins_white,wins_grey,wins_black,wins_combo,"
+    "isolation_captures,jump_captures\n"
 )
 
 
@@ -76,7 +78,11 @@ class SelfPlayTrainer:
         self.trainer = Trainer(model=self.model, device=device, lr=lr)
 
     def _eval_fn(self, board_tensor_np, reserve_np):
-        """NN inference callback for Rust self-play."""
+        """NN inference callback for Rust self-play.
+
+        Returns 4-tuple: (place_logits, cap_source_logits, cap_dest_logits, value)
+        as numpy arrays. Rust MCTS computes softmax over legal moves internally.
+        """
         board = torch.from_numpy(np.array(board_tensor_np)).to(self.device, dtype=torch.float32)
         reserve = torch.from_numpy(np.array(reserve_np)).to(self.device, dtype=torch.float32)
         with torch.no_grad():
@@ -84,10 +90,13 @@ class SelfPlayTrainer:
                 device_type="cuda" if self.device != "cpu" else "cpu",
                 dtype=torch.bfloat16,
             ):
-                policy_logits, value = self.model(board, reserve)
-        policy = torch.softmax(policy_logits, dim=1).float().cpu().numpy()
-        value = value.float().cpu().numpy().squeeze(1)
-        return policy, value
+                place, source, dest, value = self.model(board, reserve)
+        return (
+            place.float().cpu().numpy(),
+            source.float().cpu().numpy(),
+            dest.float().cpu().numpy(),
+            value.float().cpu().numpy().squeeze(1),
+        )
 
     def run(
         self,
@@ -118,6 +127,20 @@ class SelfPlayTrainer:
         dataset = ZertzDataset(max_size=max_buffer)
         dataset.augment_symmetry = augment_symmetry
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        train_params = {
+            "simulations": simulations,
+            "games_per_iter": games_per_iter,
+            "epochs_per_iter": epochs_per_iter,
+            "batch_size": batch_size,
+            "max_moves": max_moves,
+            "replay_window": replay_window,
+            "playout_cap_p": playout_cap_p,
+            "fast_cap": fast_cap,
+            "temp_threshold": temp_threshold,
+            "play_batch_size": play_batch_size,
+            "augment_symmetry": augment_symmetry,
+        }
 
         start_time = time.time()
         iteration = self.start_iteration
@@ -210,7 +233,7 @@ class SelfPlayTrainer:
                 print(f"  Playout cap: {fs}/{tt} full-search turns ({pct:.0f}%)")
 
             buf_start = time.time()
-            boards, reserves, policies, values, weights, value_only = result.training_data()
+            boards, reserves, policies, values, weights, value_only, capture_turn, mid_capture_turn = result.training_data()
             dataset.add_batch(
                 board_tensors=np.array(boards),
                 reserve_vectors=np.array(reserves),
@@ -218,6 +241,8 @@ class SelfPlayTrainer:
                 value_targets=np.array(values),
                 weights=np.array(weights),
                 value_only=list(value_only),
+                capture_turn=list(capture_turn),
+                mid_capture_turn=list(mid_capture_turn),
             )
             buf_time = time.time() - buf_start
 
@@ -248,9 +273,11 @@ class SelfPlayTrainer:
                 total_s = f"{losses['total_loss']:.4f}"
                 policy_s = f"{losses['policy_loss']:.4f}"
                 value_s = f"{losses['value_loss']:.4f}"
+                place_pol_s = f"{losses['place_policy_loss']:.4f}"
+                cap_pol_s = f"{losses['capture_policy_loss']:.4f}"
                 print(
                     f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
-                    f"(policy={_cy(policy_s)}, "
+                    f"(policy={_cy(policy_s)} place_pol={_cy(place_pol_s)} cap_pol={_cy(cap_pol_s)}, "
                     f"value={_cy(value_s)}, "
                     f"lr={lr:.4f})"
                 )
@@ -258,7 +285,8 @@ class SelfPlayTrainer:
             duration = time.time() - iter_start
 
             # --- Save model ---
-            save_checkpoint(self.model, self.model_path, iteration=iteration)
+            metadata = {**train_params, "lr": lr}
+            save_checkpoint(self.model, self.model_path, iteration=iteration, metadata=metadata)
             print(f"  Model saved: {self.model_path} (iteration {iteration})")
 
             # --- Checkpoint ---
@@ -266,12 +294,13 @@ class SelfPlayTrainer:
                 ckpt_path = os.path.join(
                     self.checkpoint_dir, f"{self.model_name}_iter{iteration:05d}.pt"
                 )
-                save_checkpoint(self.model, ckpt_path, iteration=iteration)
+                save_checkpoint(self.model, ckpt_path, iteration=iteration, metadata=metadata)
                 print(f"  Checkpoint saved to {ckpt_path}")
 
             # --- Log ---
             avg_gl = f"{sum(lengths) / len(lengths):.1f}" if lengths else ""
             med_gl = str(_median(lengths)) if lengths else ""
+            min_gl = str(min(lengths)) if lengths else ""
             max_gl = str(max(lengths)) if lengths else ""
             with open(log_path, "a") as f:
                 f.write(
@@ -279,9 +308,13 @@ class SelfPlayTrainer:
                     f"{result.wins_p1},{result.wins_p2},{result.draws},"
                     f"{result.num_samples},{len(dataset)},"
                     f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
-                    f"{losses['value_loss']:.6f},{lr:.6f},{duration:.1f},"
-                    f"{csv_comment(comment)},{avg_gl},{med_gl},{max_gl},"
-                    f"{result.wins_white},{result.wins_grey},{result.wins_black},{result.wins_combo}\n"
+                    f"{losses['value_loss']:.6f},"
+                    f"{losses['place_value_loss']:.6f},{losses['capture_value_loss']:.6f},"
+                    f"{losses['place_policy_loss']:.6f},{losses['capture_policy_loss']:.6f},"
+                    f"{lr:.6f},{duration:.1f},"
+                    f"{csv_comment(comment)},{avg_gl},{med_gl},{min_gl},{max_gl},"
+                    f"{result.wins_white},{result.wins_grey},{result.wins_black},{result.wins_combo},"
+                    f"{result.isolation_captures},{result.jump_captures}\n"
                 )
             comment = ""
 

@@ -66,6 +66,21 @@ and the value head learns to predict 0 everywhere. Tried mitigations: draw penal
 for unfinished games, opening randomization (helps somewhat), pretraining on boardspace games (delays
 but doesn't prevent). See `docs/IDEAS.md` for analysis.
 
+### Zertz architecture
+- **Board encoding**: 4 channels on 7x7 grid (RADIUS=3 hexagonal board, 37 valid cells). Reserve vector of 15 floats (current-player-relative).
+- **Policy heads**: Three factorized conv1x1 heads off the trunk (no FC layer):
+  - `place` [4, 7, 7]: ch 0-2 = place White/Grey/Black ball, ch 3 = remove ring
+  - `cap_source` [1, 7, 7]: which marble starts a capture hop
+  - `cap_dest` [1, 7, 7]: where the marble lands
+- **Move prior computation** (Rust MCTS): scores are sums of head logits per move type, then softmax over legal moves.
+  - `Place(color, pos, remove)`: `place[color, pos] + place[3, remove]`
+  - `PlaceOnly(color, pos)`: `place[color, pos]`
+  - `Capture(from, to)`: `cap_source[from] + cap_dest[to]`
+  - Mid-capture continuation: `cap_dest[to]` only
+- **Sequential captures**: Multi-hop capture chains are sequential MCTS decisions. Each hop is a separate game state/tree node. `ZertzBoard.mid_capture` tracks in-progress chains; same-player consecutive turns handled in MCTS backprop.
+- **Training data**: Flat POLICY_SIZE=5587 visit distributions stored in Rust, marginalized to per-head targets in Python training loop.
+- **Policy loss**: Independent cross-entropy per head (place color/position, place remove, capture source, capture dest). Mid-capture turns only train cap_dest.
+
 ### Zertz: no draw convergence problem
 Zertz games end naturally before ~40 turns because rings are removed from the board each turn,
 making the game finite by construction. When win rates converge to ~50/50, value loss rises because

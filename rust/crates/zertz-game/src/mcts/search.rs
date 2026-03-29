@@ -9,10 +9,11 @@ use core_game::game::{Game, Outcome, Player};
 use super::arena::{NodeArena, NodeId};
 use super::node::{Edge, MctsNode};
 use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
+use crate::hex::hex_to_grid;
 use crate::move_encoding::get_legal_move_mask;
 #[cfg(test)]
 use crate::move_encoding::POLICY_SIZE;
-use crate::zertz::ZertzBoard;
+use crate::zertz::{ZertzBoard, ZertzMove};
 
 const DEFAULT_C_PUCT: f32 = 1.5;
 
@@ -117,15 +118,24 @@ fn select_leaf(
 // Backpropagation
 // ---------------------------------------------------------------------------
 
-/// Backpropagate a value up the tree (alternating negation).
+/// Backpropagate a value up the tree.
+/// Negates the value when traversing to a parent with a different player
+/// (standard alpha-zero), but keeps it when parent has the same player
+/// (mid-capture continuation).
 fn backpropagate(arena: &mut NodeArena, mut node_id: NodeId, mut value: f32) {
     loop {
         let node = arena.get_mut(node_id);
         node.visit_count += 1;
         node.value_sum += value;
-        value = -value;
         match node.parent {
-            Some(parent) => node_id = parent,
+            Some(parent) => {
+                let child_player = node.board.next_player();
+                let parent_player = arena.get(parent).board.next_player();
+                if child_player != parent_player {
+                    value = -value;
+                }
+                node_id = parent;
+            }
             None => break,
         }
     }
@@ -138,9 +148,15 @@ fn apply_virtual_loss(arena: &mut NodeArena, mut node_id: NodeId) {
         let node = arena.get_mut(node_id);
         node.visit_count += 1;
         node.value_sum += value;
-        value = -value;
         match node.parent {
-            Some(parent) => node_id = parent,
+            Some(parent) => {
+                let child_player = node.board.next_player();
+                let parent_player = arena.get(parent).board.next_player();
+                if child_player != parent_player {
+                    value = -value;
+                }
+                node_id = parent;
+            }
             None => break,
         }
     }
@@ -152,10 +168,16 @@ fn correct_virtual_loss(arena: &mut NodeArena, mut node_id: NodeId, mut real_val
     loop {
         let node = arena.get_mut(node_id);
         node.value_sum += real_value - virtual_value;
-        real_value = -real_value;
-        virtual_value = -virtual_value;
         match node.parent {
-            Some(parent) => node_id = parent,
+            Some(parent) => {
+                let child_player = node.board.next_player();
+                let parent_player = arena.get(parent).board.next_player();
+                if child_player != parent_player {
+                    real_value = -real_value;
+                    virtual_value = -virtual_value;
+                }
+                node_id = parent;
+            }
             None => break,
         }
     }
@@ -176,20 +198,116 @@ fn terminal_value(board: &ZertzBoard, perspective: Player) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Policy heads (factorized conv1x1 outputs)
+// ---------------------------------------------------------------------------
+
+/// Factorized policy head outputs passed from the NN to the MCTS.
+/// All slices are flattened [C, H, W] with H=W=GRID_SIZE=7.
+pub struct PolicyHeads<'a> {
+    /// Placement head: 4 channels × 7×7 (ch 0-2: place W/G/B, ch 3: remove ring).
+    pub place: &'a [f32],      // len = 4 * GRID_SIZE * GRID_SIZE = 196
+    /// Capture source head: 1 channel × 7×7 (which marble starts the hop).
+    pub cap_source: &'a [f32], // len = GRID_SIZE * GRID_SIZE = 49
+    /// Capture destination head: 1 channel × 7×7 (where the marble lands).
+    pub cap_dest: &'a [f32],   // len = GRID_SIZE * GRID_SIZE = 49
+}
+
+pub const PLACE_HEAD_SIZE: usize = 4 * GRID_SIZE * GRID_SIZE;
+pub const CAP_HEAD_SIZE: usize = GRID_SIZE * GRID_SIZE;
+pub const POLICY_HEADS_TOTAL: usize = PLACE_HEAD_SIZE + CAP_HEAD_SIZE + CAP_HEAD_SIZE;
+
+impl PolicyHeads<'_> {
+    /// Grid index for a flattened [C, H, W] tensor.
+    #[inline]
+    fn grid_idx(channel: usize, row: usize, col: usize) -> usize {
+        channel * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col
+    }
+
+    /// Score a move using the factorized policy heads.
+    fn score_move(&self, mv: &ZertzMove, is_mid_capture: bool) -> f32 {
+        match *mv {
+            ZertzMove::Place { color, place_at, remove } => {
+                let (pr, pc) = hex_to_grid(place_at);
+                let (rr, rc) = hex_to_grid(remove);
+                self.place[Self::grid_idx(color.index(), pr, pc)]
+                    + self.place[Self::grid_idx(3, rr, rc)]
+            }
+            ZertzMove::PlaceOnly { color, place_at } => {
+                let (pr, pc) = hex_to_grid(place_at);
+                self.place[Self::grid_idx(color.index(), pr, pc)]
+            }
+            ZertzMove::Capture { jumps, .. } => {
+                let (from, _over, to) = jumps[0];
+                let (tr, tc) = hex_to_grid(to);
+                let dest_score = self.cap_dest[tr * GRID_SIZE + tc];
+                if is_mid_capture {
+                    // Source is fixed during mid-capture — only destination matters.
+                    dest_score
+                } else {
+                    let (fr, fc) = hex_to_grid(from);
+                    let src_score = self.cap_source[fr * GRID_SIZE + fc];
+                    src_score + dest_score
+                }
+            }
+            ZertzMove::Pass => 0.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Expansion (cheap: just stores edges, no board clones)
 // ---------------------------------------------------------------------------
 
-/// Expand a node: populate its edges with legal moves and normalized priors.
+/// Expand a node: populate its edges with legal moves and normalized priors
+/// from factorized policy heads.
 /// No child boards are created here — that happens lazily during selection.
-fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, policy: &[f32]) {
+fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, heads: &PolicyHeads) {
     let board = &arena.get(node_id).board;
     let (_mask, indexed_moves) = get_legal_move_mask(board);
     if indexed_moves.is_empty() {
-        // Terminal or no moves — mark as expanded with empty edges.
-        // This prevents re-selection as an unexpanded leaf.
         arena.get_mut(node_id).edges = Vec::new();
-        // Use a sentinel: push a dummy edge so is_expanded() returns true.
-        // Actually, let's handle this differently — see is_terminal check in select_leaves.
+        return;
+    }
+
+    let is_mid = board.is_mid_capture();
+
+    // Compute raw scores and softmax for priors.
+    let mut scores: Vec<f32> = indexed_moves.iter()
+        .map(|(_, mv)| heads.score_move(mv, is_mid))
+        .collect();
+
+    // Softmax: subtract max for numerical stability, then exp and normalize.
+    let max_score = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mut total = 0.0f32;
+    for s in &mut scores {
+        *s = (*s - max_score).exp();
+        total += *s;
+    }
+    if total > 0.0 {
+        for s in &mut scores {
+            *s /= total;
+        }
+    }
+
+    let mut edges = Vec::with_capacity(indexed_moves.len());
+    for (i, &(_, mv)) in indexed_moves.iter().enumerate() {
+        edges.push(Edge {
+            mv,
+            prior: scores[i],
+            child_id: None,
+        });
+    }
+
+    arena.get_mut(node_id).edges = edges;
+}
+
+/// Legacy flat-policy expansion for test compatibility.
+#[cfg(test)]
+fn expand_with_flat_policy(arena: &mut NodeArena, node_id: NodeId, policy: &[f32]) {
+    let board = &arena.get(node_id).board;
+    let (_mask, indexed_moves) = get_legal_move_mask(board);
+    if indexed_moves.is_empty() {
+        arena.get_mut(node_id).edges = Vec::new();
         return;
     }
 
@@ -205,7 +323,6 @@ fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, policy: &[f32]) {
         });
     }
 
-    // Normalize priors
     if total_prior > 0.0 {
         for edge in &mut edges {
             edge.prior /= total_prior;
@@ -238,7 +355,7 @@ impl MctsSearch {
     }
 
     /// Initialize search for a game position. Only creates edges (fast).
-    pub fn init(&mut self, board: &ZertzBoard, policy: &[f32]) {
+    pub fn init(&mut self, board: &ZertzBoard, heads: &PolicyHeads) {
         self.arena.reset();
         let root_node = MctsNode {
             board: board.clone(),
@@ -251,7 +368,7 @@ impl MctsSearch {
         };
         let root = self.arena.alloc(root_node);
         self.root = root;
-        expand_with_policy(&mut self.arena, root, policy);
+        expand_with_policy(&mut self.arena, root, heads);
     }
 
     /// Select leaves for batch evaluation. Terminal nodes are handled immediately.
@@ -278,16 +395,16 @@ impl MctsSearch {
         leaves
     }
 
-    /// Expand leaf nodes with policies and backpropagate values.
+    /// Expand leaf nodes with factorized policy heads and backpropagate values.
     pub fn expand_and_backprop(
         &mut self,
         leaves: &[NodeId],
-        policies: &[Vec<f32>],
+        heads_list: &[PolicyHeads],
         values: &[f32],
     ) {
         let root_player = self.arena.get(self.root).board.next_player();
         for (i, &leaf) in leaves.iter().enumerate() {
-            expand_with_policy(&mut self.arena, leaf, &policies[i]);
+            expand_with_policy(&mut self.arena, leaf, &heads_list[i]);
             let mut value = values[i];
             if self.arena.get(leaf).board.next_player() != root_player {
                 value = -value;
@@ -458,6 +575,11 @@ impl MctsSearch {
         result
     }
 
+    /// Return the player to move at a leaf node.
+    pub fn get_leaf_player(&self, leaf: NodeId) -> Player {
+        self.arena.get(leaf).board.next_player()
+    }
+
     /// Encode a leaf node's board state for NN evaluation.
     /// Returns (board_flat, reserve_flat).
     pub fn encode_leaf(&self, leaf: NodeId) -> (Vec<f32>, Vec<f32>) {
@@ -478,35 +600,48 @@ impl MctsSearch {
 mod tests {
     use super::*;
 
+    fn uniform_heads() -> Vec<f32> {
+        // Uniform heads: all zeros → softmax gives equal priors.
+        vec![0.0f32; POLICY_HEADS_TOTAL]
+    }
+
+    fn heads_from_buf(buf: &[f32]) -> PolicyHeads {
+        PolicyHeads {
+            place: &buf[..PLACE_HEAD_SIZE],
+            cap_source: &buf[PLACE_HEAD_SIZE..PLACE_HEAD_SIZE + CAP_HEAD_SIZE],
+            cap_dest: &buf[PLACE_HEAD_SIZE + CAP_HEAD_SIZE..],
+        }
+    }
+
     #[test]
     fn test_mcts_init() {
         let board = ZertzBoard::default();
-        let uniform_policy = vec![1.0 / POLICY_SIZE as f32; POLICY_SIZE];
+        let buf = uniform_heads();
+        let heads = heads_from_buf(&buf);
         let mut search = MctsSearch::new(1000);
-        search.init(&board, &uniform_policy);
+        search.init(&board, &heads);
 
         let root = search.arena.get(search.root);
         assert!(root.is_expanded());
         assert!(!root.edges.is_empty());
-        // Should have 1944 edges but only 1 node (the root — no children yet)
         assert_eq!(search.arena.len(), 1);
     }
 
     #[test]
     fn test_mcts_select_and_expand() {
         let board = ZertzBoard::default();
-        let uniform_policy = vec![1.0 / POLICY_SIZE as f32; POLICY_SIZE];
+        let buf = uniform_heads();
+        let heads = heads_from_buf(&buf);
         let mut search = MctsSearch::new(10000);
-        search.init(&board, &uniform_policy);
+        search.init(&board, &heads);
 
         let leaves = search.select_leaves(8);
         assert!(!leaves.is_empty());
-        // Should have created child nodes lazily (root + 8 children)
         assert_eq!(search.arena.len(), 1 + leaves.len());
 
-        let policies: Vec<Vec<f32>> = leaves.iter().map(|_| uniform_policy.clone()).collect();
+        let heads_list: Vec<PolicyHeads> = leaves.iter().map(|_| heads_from_buf(&buf)).collect();
         let values: Vec<f32> = vec![0.0; leaves.len()];
-        search.expand_and_backprop(&leaves, &policies, &values);
+        search.expand_and_backprop(&leaves, &heads_list, &values);
 
         assert!(search.arena.get(search.root).visit_count > 0);
     }
@@ -514,18 +649,19 @@ mod tests {
     #[test]
     fn test_best_move() {
         let board = ZertzBoard::default();
-        let uniform_policy = vec![1.0 / POLICY_SIZE as f32; POLICY_SIZE];
+        let buf = uniform_heads();
+        let heads = heads_from_buf(&buf);
         let mut search = MctsSearch::new(10000);
-        search.init(&board, &uniform_policy);
+        search.init(&board, &heads);
 
         for _ in 0..10 {
             let leaves = search.select_leaves(8);
             if leaves.is_empty() {
                 break;
             }
-            let policies: Vec<Vec<f32>> = leaves.iter().map(|_| uniform_policy.clone()).collect();
+            let heads_list: Vec<PolicyHeads> = leaves.iter().map(|_| heads_from_buf(&buf)).collect();
             let values: Vec<f32> = vec![0.0; leaves.len()];
-            search.expand_and_backprop(&leaves, &policies, &values);
+            search.expand_and_backprop(&leaves, &heads_list, &values);
         }
 
         let best = search.best_move();
@@ -535,18 +671,19 @@ mod tests {
     #[test]
     fn test_visit_distribution() {
         let board = ZertzBoard::default();
-        let uniform_policy = vec![1.0 / POLICY_SIZE as f32; POLICY_SIZE];
+        let buf = uniform_heads();
+        let heads = heads_from_buf(&buf);
         let mut search = MctsSearch::new(10000);
-        search.init(&board, &uniform_policy);
+        search.init(&board, &heads);
 
         for _ in 0..5 {
             let leaves = search.select_leaves(4);
             if leaves.is_empty() {
                 break;
             }
-            let policies: Vec<Vec<f32>> = leaves.iter().map(|_| uniform_policy.clone()).collect();
+            let heads_list: Vec<PolicyHeads> = leaves.iter().map(|_| heads_from_buf(&buf)).collect();
             let values: Vec<f32> = vec![0.0; leaves.len()];
-            search.expand_and_backprop(&leaves, &policies, &values);
+            search.expand_and_backprop(&leaves, &heads_list, &values);
         }
 
         let dist = search.get_visit_distribution();
@@ -558,23 +695,22 @@ mod tests {
 
     #[test]
     fn test_lazy_creation_efficiency() {
-        // With 20 simulations, we should create far fewer than 1944 nodes.
         let board = ZertzBoard::default();
-        let uniform_policy = vec![1.0 / POLICY_SIZE as f32; POLICY_SIZE];
+        let buf = uniform_heads();
+        let heads = heads_from_buf(&buf);
         let mut search = MctsSearch::new(10000);
-        search.init(&board, &uniform_policy);
+        search.init(&board, &heads);
 
         for _ in 0..3 {
             let leaves = search.select_leaves(8);
             if leaves.is_empty() {
                 break;
             }
-            let policies: Vec<Vec<f32>> = leaves.iter().map(|_| uniform_policy.clone()).collect();
+            let heads_list: Vec<PolicyHeads> = leaves.iter().map(|_| heads_from_buf(&buf)).collect();
             let values: Vec<f32> = vec![0.0; leaves.len()];
-            search.expand_and_backprop(&leaves, &policies, &values);
+            search.expand_and_backprop(&leaves, &heads_list, &values);
         }
 
-        // Should be much less than 1944
         assert!(search.arena.len() < 100, "arena has {} nodes", search.arena.len());
     }
 }

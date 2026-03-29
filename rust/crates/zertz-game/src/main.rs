@@ -5,10 +5,17 @@ use zertz_game::{mcts, move_encoding, random_play, replay, zertz};
 // ---------------------------------------------------------------------------
 
 fn run_mcts_demo(simulations: u32) {
+    use mcts::search::{PolicyHeads, POLICY_HEADS_TOTAL, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
+
     let board = zertz::ZertzBoard::default();
-    let uniform_policy = vec![1.0 / move_encoding::POLICY_SIZE as f32; move_encoding::POLICY_SIZE];
+    let uniform_buf = vec![0.0f32; POLICY_HEADS_TOTAL];
+    let heads = PolicyHeads {
+        place: &uniform_buf[..PLACE_HEAD_SIZE],
+        cap_source: &uniform_buf[PLACE_HEAD_SIZE..PLACE_HEAD_SIZE + CAP_HEAD_SIZE],
+        cap_dest: &uniform_buf[PLACE_HEAD_SIZE + CAP_HEAD_SIZE..],
+    };
     let mut search = mcts::search::MctsSearch::new(100_000);
-    search.init(&board, &uniform_policy);
+    search.init(&board, &heads);
 
     let batch_size = 8;
     let rounds = simulations / batch_size as u32;
@@ -19,9 +26,13 @@ fn run_mcts_demo(simulations: u32) {
     for _ in 0..rounds {
         let mut leaves = search.select_leaves(batch_size);
         if leaves.is_empty() { break; }
-        let policies: Vec<Vec<f32>> = leaves.iter().map(|_| uniform_policy.clone()).collect();
+        let heads_list: Vec<PolicyHeads> = leaves.iter().map(|_| PolicyHeads {
+            place: &uniform_buf[..PLACE_HEAD_SIZE],
+            cap_source: &uniform_buf[PLACE_HEAD_SIZE..PLACE_HEAD_SIZE + CAP_HEAD_SIZE],
+            cap_dest: &uniform_buf[PLACE_HEAD_SIZE + CAP_HEAD_SIZE..],
+        }).collect();
         let values: Vec<f32> = vec![0.0; leaves.len()];
-        search.expand_and_backprop(&mut leaves, &policies, &values);
+        search.expand_and_backprop(&mut leaves, &heads_list, &values);
     }
     let elapsed = start.elapsed();
 

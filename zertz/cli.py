@@ -45,8 +45,18 @@ def main():
     play_parser = subparsers.add_parser("play", help="Play against the AI")
     play_parser.add_argument("--model", type=str, default=None, help="Model checkpoint (omit for random AI)")
     play_parser.add_argument("--device", type=str, default="cuda")
-    play_parser.add_argument("--simulations", type=int, default=200)
+    play_parser.add_argument("--simulations", type=int, default=800)
     play_parser.add_argument("--color", type=str, default=None, help="p1 or p2 (default: random)")
+
+    # Battle mode
+    battle_parser = subparsers.add_parser("battle", help="Pit two models against each other")
+    battle_parser.add_argument("model1", type=str, help="Path to first model checkpoint")
+    battle_parser.add_argument("model2", type=str, help="Path to second model checkpoint")
+    battle_parser.add_argument("--games", type=int, default=100, help="Number of games to play (default: 100)")
+    battle_parser.add_argument("--simulations", type=int, default=None, help="Simulations per move (default: from checkpoint metadata or 800)")
+    battle_parser.add_argument("--device", type=str, default="cuda")
+    battle_parser.add_argument("--max-moves", type=int, default=40)
+    battle_parser.add_argument("--play-batch-size", type=int, default=2)
 
     args = parser.parse_args()
 
@@ -85,6 +95,17 @@ def main():
             time_limit_minutes=args.time_limit,
             comment=args.comment,
             augment_symmetry=args.augment_symmetry,
+        )
+    elif args.command == "battle":
+        from zertz.selfplay.battle import run_battle
+        run_battle(
+            model1_path=args.model1,
+            model2_path=args.model2,
+            num_games=args.games,
+            simulations=args.simulations,
+            device=args.device,
+            max_moves=args.max_moves,
+            play_batch_size=args.play_batch_size,
         )
     else:
         parser.print_help()

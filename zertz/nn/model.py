@@ -1,4 +1,4 @@
-"""ZertzNet: AlphaZero-style network for Zertz."""
+"""ZertzNet: AlphaZero-style network for Zertz with factorized conv1x1 policy heads."""
 
 from __future__ import annotations
 import torch
@@ -7,25 +7,29 @@ import torch.nn.functional as F
 
 from shared.nn.resblock import ResBlock
 
-# From Rust: hive_engine.ZERTZ_NUM_CHANNELS, ZERTZ_GRID_SIZE, ZERTZ_POLICY_SIZE
+# From Rust board encoding
 NUM_CHANNELS = 4
 GRID_SIZE = 7
-POLICY_SIZE = 5587
-RESERVE_SIZE = 15  # [supply_W/G/B, cur_cap_W/G/B, opp_cap_W/G/B, cur_combo_W/G/B, opp_combo_W/G/B]
+POLICY_SIZE = 5587  # Legacy flat size, used only for training data storage
+RESERVE_SIZE = 15
+
+# Factorized policy head sizes (must match Rust PLACE_HEAD_SIZE, CAP_HEAD_SIZE)
+PLACE_HEAD_CHANNELS = 4  # ch 0-2: place W/G/B, ch 3: remove ring
+PLACE_HEAD_SIZE = PLACE_HEAD_CHANNELS * GRID_SIZE * GRID_SIZE  # 196
+CAP_HEAD_SIZE = GRID_SIZE * GRID_SIZE  # 49
 
 
 class ZertzNet(nn.Module):
-    """AlphaZero-style network for Zertz.
+    """AlphaZero-style network for Zertz with factorized policy heads.
 
     Input:  (batch, 4, 7, 7) board tensor + (batch, 15) reserve vector
-    Output: policy_logits (batch, 5587), value (batch, 1) in [-1, 1]
+    Output: place_logits (batch, 4, 7, 7),
+            cap_source_logits (batch, 1, 7, 7),
+            cap_dest_logits (batch, 1, 7, 7),
+            value (batch, 1) in [-1, 1]
 
-    Reserve vector: [supply_W/G/B, cur_cap_W/G/B, opp_cap_W/G/B,
-                     cur_combo_W/G/B, opp_combo_W/G/B]
-    where combo = min(cap, 2)/2, progress toward the 2-of-each-color win condition.
-
-    Policy head is a linear layer over the flattened trunk output.
-    Value head concatenates the reserve vector before its FC layers.
+    Policy heads are conv1x1 over the trunk (no flatten/FC).
+    Rust MCTS combines heads to compute per-move priors.
     """
 
     def __init__(self, num_blocks: int = 6, channels: int = 64):
@@ -37,10 +41,11 @@ class ZertzNet(nn.Module):
 
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
 
-        trunk_flat = channels * GRID_SIZE * GRID_SIZE
-
-        # Policy head: flatten trunk → concat reserve → linear → POLICY_SIZE
-        self.policy_fc = nn.Linear(trunk_flat + RESERVE_SIZE, POLICY_SIZE)
+        # Factorized policy heads (conv1x1, with reserve broadcast as extra channels)
+        policy_in = channels + RESERVE_SIZE
+        self.policy_place = nn.Conv2d(policy_in, PLACE_HEAD_CHANNELS, 1)
+        self.policy_source = nn.Conv2d(policy_in, 1, 1)
+        self.policy_dest = nn.Conv2d(policy_in, 1, 1)
 
         # Value head: 1x1 conv → flatten → concat reserve → FC(256) → tanh
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
@@ -51,31 +56,33 @@ class ZertzNet(nn.Module):
     def forward(self, board_tensor: torch.Tensor, reserve_vector: torch.Tensor):
         """Forward pass.
 
-        Args:
-            board_tensor: (batch, 4, 7, 7)
-            reserve_vector: (batch, 9)
-
         Returns:
-            policy_logits: (batch, 5587)
+            place_logits: (batch, 4*7*7) flattened placement head
+            cap_source_logits: (batch, 7*7) flattened capture source head
+            cap_dest_logits: (batch, 7*7) flattened capture dest head
             value: (batch, 1) in [-1, 1]
         """
         x = F.relu(self.input_bn(self.input_conv(board_tensor)))
         for block in self.res_blocks:
             x = block(x)
 
-        # Policy head: concat reserve so move choice can condition on capture progress
-        p = x.view(x.size(0), -1)
-        p = torch.cat([p, reserve_vector], dim=1)
-        policy_logits = self.policy_fc(p)
+        # Broadcast reserve as spatial channels and concat with trunk
+        r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, GRID_SIZE, GRID_SIZE)
+        xr = torch.cat([x, r], dim=1)  # (B, channels+15, 7, 7)
 
-        # Value head: squeeze to 1 channel, flatten, concat reserve
+        # Policy heads (conv1x1, then flatten for Rust)
+        place_logits = self.policy_place(xr).view(x.size(0), -1)   # (B, 196)
+        source_logits = self.policy_source(xr).view(x.size(0), -1) # (B, 49)
+        dest_logits = self.policy_dest(xr).view(x.size(0), -1)     # (B, 49)
+
+        # Value head
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.view(v.size(0), -1)
         v = torch.cat([v, reserve_vector], dim=1)
         v = F.relu(self.value_fc1(v))
         value = torch.tanh(self.value_fc2(v))
 
-        return policy_logits, value
+        return place_logits, source_logits, dest_logits, value
 
 
 def create_model(num_blocks: int = 6, channels: int = 64) -> ZertzNet:
