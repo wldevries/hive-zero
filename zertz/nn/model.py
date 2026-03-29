@@ -28,6 +28,10 @@ class ZertzNet(nn.Module):
             cap_dest_logits (batch, 1, 7, 7),
             value (batch, 1) in [-1, 1]
 
+    Reserve vector is broadcast spatially and concatenated with the board
+    tensor before the trunk, so the trunk sees both board state and global
+    context (supply, captures) through all residual blocks.
+
     Policy heads are conv1x1 over the trunk (no flatten/FC).
     Rust MCTS combines heads to compute per-move priors.
     """
@@ -36,21 +40,21 @@ class ZertzNet(nn.Module):
         super().__init__()
         self.game = "zertz"
 
-        self.input_conv = nn.Conv2d(NUM_CHANNELS, channels, 3, padding=1, bias=False)
+        # Input conv takes board channels + broadcast reserve
+        self.input_conv = nn.Conv2d(NUM_CHANNELS + RESERVE_SIZE, channels, 3, padding=1, bias=False)
         self.input_bn = nn.BatchNorm2d(channels)
 
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
 
-        # Factorized policy heads (conv1x1, with reserve broadcast as extra channels)
-        policy_in = channels + RESERVE_SIZE
-        self.policy_place = nn.Conv2d(policy_in, PLACE_HEAD_CHANNELS, 1)
-        self.policy_source = nn.Conv2d(policy_in, 1, 1)
-        self.policy_dest = nn.Conv2d(policy_in, 1, 1)
+        # Factorized policy heads (conv1x1 over trunk)
+        self.policy_place = nn.Conv2d(channels, PLACE_HEAD_CHANNELS, 1)
+        self.policy_source = nn.Conv2d(channels, 1, 1)
+        self.policy_dest = nn.Conv2d(channels, 1, 1)
 
-        # Value head: 1x1 conv → flatten → concat reserve → FC(256) → tanh
+        # Value head: conv1x1 → flatten → FC(256) → tanh
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(1)
-        self.value_fc1 = nn.Linear(GRID_SIZE * GRID_SIZE + RESERVE_SIZE, 256)
+        self.value_fc1 = nn.Linear(GRID_SIZE * GRID_SIZE, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
     def forward(self, board_tensor: torch.Tensor, reserve_vector: torch.Tensor):
@@ -62,23 +66,23 @@ class ZertzNet(nn.Module):
             cap_dest_logits: (batch, 7*7) flattened capture dest head
             value: (batch, 1) in [-1, 1]
         """
-        x = F.relu(self.input_bn(self.input_conv(board_tensor)))
+        # Broadcast reserve spatially and concat with board tensor
+        r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, GRID_SIZE, GRID_SIZE)
+        x = torch.cat([board_tensor, r], dim=1)  # (B, 4+15, 7, 7)
+
+        # Trunk
+        x = F.relu(self.input_bn(self.input_conv(x)))
         for block in self.res_blocks:
             x = block(x)
 
-        # Broadcast reserve as spatial channels and concat with trunk
-        r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, GRID_SIZE, GRID_SIZE)
-        xr = torch.cat([x, r], dim=1)  # (B, channels+15, 7, 7)
-
-        # Policy heads (conv1x1, then flatten for Rust)
-        place_logits = self.policy_place(xr).view(x.size(0), -1)   # (B, 196)
-        source_logits = self.policy_source(xr).view(x.size(0), -1) # (B, 49)
-        dest_logits = self.policy_dest(xr).view(x.size(0), -1)     # (B, 49)
+        # Policy heads (conv1x1 over trunk, then flatten for Rust)
+        place_logits = self.policy_place(x).view(x.size(0), -1)   # (B, 196)
+        source_logits = self.policy_source(x).view(x.size(0), -1) # (B, 49)
+        dest_logits = self.policy_dest(x).view(x.size(0), -1)     # (B, 49)
 
         # Value head
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.view(v.size(0), -1)
-        v = torch.cat([v, reserve_vector], dim=1)
         v = F.relu(self.value_fc1(v))
         value = torch.tanh(self.value_fc2(v))
 

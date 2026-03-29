@@ -4,19 +4,18 @@
 
 ```mermaid
 graph TD
-    BT["Board Tensor<br/>(B, 4, 7, 7)"]:::input --> IC["Input Conv2d(4 → C, 3x3) + BN + ReLU"]
+    BT["Board Tensor<br/>(B, 4, 7, 7)"]:::input --> CAT["Concat"]
     RV["Reserve Vector<br/>(B, 15)"]:::input --> BC["Broadcast to (B, 15, 7, 7)"]
+    BC --> CAT
+    CAT --> INPUT["(B, 19, 7, 7)"]
 
+    INPUT --> IC["Input Conv2d(19 → C, 3x3) + BN + ReLU"]
     IC --> RB["4 × ResBlock<br/>Conv3x3 + BN + ReLU + Conv3x3 + BN + skip"]
     RB --> TRUNK["Trunk Output<br/>(B, C, 7, 7)"]
 
-    TRUNK --> CAT["Concat"]
-    BC --> CAT
-    CAT --> XR["(B, C+15, 7, 7)"]
-
-    XR --> PH_PLACE["Place Head<br/>Conv1x1(C+15 → 4)"]
-    XR --> PH_SRC["Cap Source Head<br/>Conv1x1(C+15 → 1)"]
-    XR --> PH_DST["Cap Dest Head<br/>Conv1x1(C+15 → 1)"]
+    TRUNK --> PH_PLACE["Place Head<br/>Conv1x1(C → 4)"]
+    TRUNK --> PH_SRC["Cap Source Head<br/>Conv1x1(C → 1)"]
+    TRUNK --> PH_DST["Cap Dest Head<br/>Conv1x1(C → 1)"]
 
     PH_PLACE --> PO_PLACE["Place logits<br/>(B, 196)"]:::output
     PH_SRC --> PO_SRC["Cap source logits<br/>(B, 49)"]:::output
@@ -24,9 +23,7 @@ graph TD
 
     TRUNK --> VC["Conv1x1(C → 1) + BN + ReLU"]
     VC --> VF["Flatten → (B, 49)"]
-    RV --> VCAT["Concat"]
-    VF --> VCAT
-    VCAT --> VFC["Linear(64 → 256) + ReLU<br/>Linear(256 → 1) + tanh"]
+    VF --> VFC["Linear(49 → 256) + ReLU<br/>Linear(256 → 1) + tanh"]
     VFC --> VOUT["Value<br/>(B, 1)"]:::output
 
     classDef input fill:#4a9eda,stroke:#2a6fa0,color:#fff
@@ -61,8 +58,12 @@ All values normalized to [0, 1]. Current-player-relative.
 | 12-14 | Opponent combo win progress (W, G, B) | min(captures, 3) / 3 |
 
 ## Trunk
+
+Reserve vector is broadcast spatially and concatenated with the board tensor before the trunk:
+`(B, 4, 7, 7)` + `(B, 15, 7, 7)` → `(B, 19, 7, 7)`
+
 ```
-Input Conv2d(4 → C, 3x3, pad=1) + BN + ReLU
+Input Conv2d(19 → C, 3x3, pad=1) + BN + ReLU
   ↓
 N × ResBlock:
   Conv2d(C → C, 3x3, pad=1) + BN + ReLU
@@ -75,13 +76,13 @@ Current training config: **C=128, N=4** (4 residual blocks, 128 channels)
 
 ## Policy Heads (3 conv1x1 heads)
 
-Reserve vector is broadcast to spatial dims and concatenated with trunk: `(B, C+15, 7, 7)`
+All heads operate directly on the trunk output.
 
 | Head | Conv2d | Output | Purpose |
 |------|--------|--------|---------|
-| **Place** | `(C+15 → 4, 1x1)` | `(B, 196)` | ch 0-2: place White/Grey/Black ball, ch 3: remove ring |
-| **Cap Source** | `(C+15 → 1, 1x1)` | `(B, 49)` | which marble starts a capture hop |
-| **Cap Dest** | `(C+15 → 1, 1x1)` | `(B, 49)` | where the marble lands |
+| **Place** | `(C → 4, 1x1)` | `(B, 196)` | ch 0-2: place White/Grey/Black ball, ch 3: remove ring |
+| **Cap Source** | `(C → 1, 1x1)` | `(B, 49)` | which marble starts a capture hop |
+| **Cap Dest** | `(C → 1, 1x1)` | `(B, 49)` | where the marble lands |
 
 ### Move prior computation (Rust MCTS)
 Scores are sums of head logits per move type, then softmax over legal moves:
@@ -94,11 +95,13 @@ Scores are sums of head logits per move type, then softmax over legal moves:
 Independent cross-entropy per head. Mid-capture turns only train cap_dest.
 
 ## Value Head
+
+Operates directly on the trunk output (reserve info already in trunk via input).
+
 ```
-Conv2d(C → 1, 1x1) + BN + ReLU            → (B, 1, 7, 7)
+Conv2d(C → 1, 1x1) + BN + ReLU           → (B, 1, 7, 7)
 Flatten                                   → (B, 49)
-Concat reserve                            → (B, 64)
-Linear(64 → 256) + ReLU                   → (B, 256)
+Linear(49 → 256) + ReLU                   → (B, 256)
 Linear(256 → 1) + tanh                    → (B, 1)
 ```
 Output range: `[-1, 1]`
@@ -123,9 +126,9 @@ loss = policy_loss + 5.0 * value_loss
 | Playout cap randomization | Yes (KataGo-style) |
 
 ## Parameter Count (C=128, N=4)
-- Input conv: 4 × 128 × 3 × 3 = 4,608
+- Input conv: 19 × 128 × 3 × 3 = 21,888
 - Per ResBlock: 2 × (128 × 128 × 3 × 3) = 294,912 → 4 blocks = 1,179,648
 - BatchNorm (trunk): (128 × 2) × (4+1) = 1,280
-- Policy heads: 3 × conv1x1 from 143 channels = 143×4 + 143×1 + 143×1 + biases = 858 + 6 = 864
-- Value head: 128×1×1 + 64×256 + 256×1 + BN = 128 + 16,384 + 256 + 2 = 16,770
+- Policy heads: 128×4 + 128×1 + 128×1 + biases = 768 + 6 = 774
+- Value head: 128×1×1 + 49×256 + 256×1 + BN = 128 + 12,544 + 256 + 2 = 12,930
 - **Total: ~1.2M parameters**
