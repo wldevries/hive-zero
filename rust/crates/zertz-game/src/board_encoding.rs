@@ -2,14 +2,13 @@
 ///
 /// Grid: 7x7 (hex board rows 4-5-6-7-6-5-4 embedded left-aligned).
 ///
-/// Channels (13 total):
+/// Board channels (4 spatial):
 ///   0: White marbles
 ///   1: Grey marbles
 ///   2: Black marbles
 ///   3: Empty rings (valid, unoccupied)
-///   4-6: Supply (W, G, B) normalized by initial counts (6, 8, 10)
-///   7-9: Current player captures (W, G, B) normalized by initial supply per color
-///   10-12: Opponent captures (W, G, B) normalized by initial supply per color
+///
+/// Supply and capture counts are in the reserve vector (see RESERVE_SIZE).
 
 use core_game::game::{Game, Player};
 

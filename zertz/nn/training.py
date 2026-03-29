@@ -323,7 +323,7 @@ class Trainer:
                 total_capture_policy_loss += ((cap_first_loss + mid_cap_loss) / n_cap).item()
                 capture_policy_batches += 1
 
-            loss = policy_loss + value_loss
+            loss = policy_loss + 5.0 * value_loss
 
             self.optimizer.zero_grad()
             loss.backward()
