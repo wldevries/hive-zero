@@ -4,9 +4,12 @@
 
 ```mermaid
 graph TD
-    BT["Board Tensor<br/>(B, 39, G, G)"]:::input --> IC["Input Conv2d(39 → C, 3x3) + BN + ReLU"]
-    RV["Reserve Vector<br/>(B, 10)"]:::input
+    BT["Board Tensor<br/>(B, 39, G, G)"]:::input --> CAT["Concat"]
+    RV["Reserve Vector<br/>(B, 10)"]:::input --> BC["Broadcast to (B, 10, G, G)"]
+    BC --> CAT
+    CAT --> INPUT["(B, 49, G, G)"]
 
+    INPUT --> IC["Input Conv2d(49 → C, 3x3) + BN + ReLU"]
     IC --> RB["10 × ResBlock<br/>Conv3x3 + BN + ReLU + Conv3x3 + BN + skip"]
     RB --> TRUNK["Trunk Output<br/>(B, C, G, G)"]
 
@@ -16,16 +19,12 @@ graph TD
 
     TRUNK --> VC["Conv1x1(C → 1) + BN + ReLU"]
     VC --> VF["Flatten → (B, G·G)"]
-    RV --> VCAT["Concat"]
-    VF --> VCAT
-    VCAT --> VFC["Linear(G·G+10 → 256) + ReLU<br/>Linear(256 → 1) + tanh"]
+    VF --> VFC["Linear(G·G → 256) + ReLU<br/>Linear(256 → 1) + tanh"]
     VFC --> VOUT["Value<br/>(B, 1)"]:::output
 
     TRUNK --> AC["Conv1x1(C → 1) + BN + ReLU"]
     AC --> AF["Flatten → (B, G·G)"]
-    RV --> ACAT["Concat"]
-    AF --> ACAT
-    ACAT --> AFC["Linear(G·G+10 → 64) + ReLU<br/>Linear(64 → 6) + sigmoid"]
+    AF --> AFC["Linear(G·G → 64) + ReLU<br/>Linear(64 → 6) + sigmoid"]
     AFC --> AOUT["Auxiliary<br/>(B, 6)"]:::output
 
     classDef input fill:#4a9eda,stroke:#2a6fa0,color:#fff
@@ -55,8 +54,12 @@ Current-player-relative piece counts remaining in hand.
 | 5-9 | Opponent's reserve (same order) |
 
 ## Trunk
+
+Reserve vector is broadcast spatially and concatenated with the board tensor before the trunk:
+`(B, 39, G, G)` + `(B, 10, G, G)` → `(B, 49, G, G)`
+
 ```
-Input Conv2d(39 -> C, 3x3, pad=1) + BN + ReLU
+Input Conv2d(49 -> C, 3x3, pad=1) + BN + ReLU
   |
 N x ResBlock:
   Conv2d(C -> C, 3x3, pad=1) + BN + ReLU
@@ -81,11 +84,13 @@ Default policy size: 11 x 23 x 23 = **5,819**
 Cross-entropy over the full policy vector.
 
 ## Value Head
+
+Operates directly on the trunk output (reserve info already in trunk via input).
+
 ```
 Conv2d(C -> 1, 1x1) + BN + ReLU           -> (B, 1, G, G)
 Flatten                                   -> (B, G*G)
-Concat reserve                            -> (B, G*G + 10)
-Linear(G*G+10 -> 256) + ReLU              -> (B, 256)
+Linear(G*G -> 256) + ReLU                 -> (B, 256)
 Linear(256 -> 1) + tanh                   -> (B, 1)
 ```
 Output range: `[-1, 1]`
@@ -99,8 +104,7 @@ Separate pathway off the trunk (not shared with value head). Predicts per-positi
 ```
 Conv2d(C -> 1, 1x1) + BN + ReLU           -> (B, 1, G, G)
 Flatten                                   -> (B, G*G)
-Concat reserve                            -> (B, G*G + 10)
-Linear(G*G+10 -> 64) + ReLU               -> (B, 64)
+Linear(G*G -> 64) + ReLU                  -> (B, 64)
 Linear(64 -> 6) + sigmoid                 -> (B, 6)
 ```
 Output range: `[0, 1]` per output.
@@ -133,10 +137,10 @@ loss = policy_loss + value_loss + aux_loss
 | Playout cap randomization | Yes (KataGo-style) |
 
 ## Parameter Count (C=128, N=10, G=17)
-- Input conv: 39 x 128 x 3 x 3 = 44,928
+- Input conv: 49 x 128 x 3 x 3 = 56,448
 - Per ResBlock: 2 x (128 x 128 x 3 x 3) = 294,912 -> 10 blocks = 2,949,120
 - BatchNorm (trunk): (128 x 2) x (10+1) = 2,816
 - Policy head: 128x128x1 + 128x11x1 + BN = 16,384 + 1,408 + 256 = 18,048
-- Value head: 128x1x1 + (289+10)x256 + 256x1 + BN = 128 + 76,544 + 256 + 2 = 76,930
-- Aux head: 128x1x1 + (289+10)x64 + 64x6 + BN = 128 + 19,136 + 384 + 2 = 19,650
+- Value head: 128x1x1 + 289x256 + 256x1 + BN = 128 + 73,984 + 256 + 2 = 74,370
+- Aux head: 128x1x1 + 289x64 + 64x6 + BN = 128 + 18,496 + 384 + 2 = 19,010
 - **Total: ~3.1M parameters**

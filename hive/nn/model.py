@@ -13,12 +13,17 @@ from ..encoding.move_encoder import NUM_POLICY_CHANNELS, policy_size
 class HiveNet(nn.Module):
     """AlphaZero-style network with policy, value, and auxiliary heads.
 
+    Reserve vector is broadcast spatially and concatenated with the board
+    tensor before the trunk, so the trunk sees both board state and global
+    context (reserves) through all residual blocks.
+
     Architecture:
+        - Broadcast reserve + concat with board tensor
         - Input convolution
         - Residual tower (num_blocks blocks)
-        - Policy head: conv -> flatten -> linear -> POLICY_SIZE
-        - Value head: conv(1x1) -> flatten -> concat reserve -> FC(256) -> tanh
-        - Auxiliary head: conv(1x1) -> flatten -> concat reserve -> FC(64) -> sigmoid
+        - Policy head: conv -> flatten -> POLICY_SIZE
+        - Value head: conv(1x1) -> flatten -> FC(256) -> tanh
+        - Auxiliary head: conv(1x1) -> flatten -> FC(64) -> sigmoid
           (my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility)
     """
 
@@ -32,8 +37,8 @@ class HiveNet(nn.Module):
             raise ValueError(f"grid_size must be odd, got {grid_size}")
         self.grid_size = grid_size
 
-        # Input convolution
-        self.input_conv = nn.Conv2d(NUM_CHANNELS, channels, 3, padding=1, bias=False)
+        # Input convolution (board channels + broadcast reserve)
+        self.input_conv = nn.Conv2d(NUM_CHANNELS + RESERVE_SIZE, channels, 3, padding=1, bias=False)
         self.input_bn = nn.BatchNorm2d(channels)
 
         # Residual tower
@@ -51,15 +56,14 @@ class HiveNet(nn.Module):
         # Value head
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(1)
-        value_input_size = grid_size * grid_size + RESERVE_SIZE
-        self.value_fc1 = nn.Linear(value_input_size, 256)
+        self.value_fc1 = nn.Linear(grid_size * grid_size, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
         # Auxiliary head (own pathway from trunk)
         # Outputs: [my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility]
         self.qd_conv = nn.Conv2d(channels, 1, 1, bias=False)
         self.qd_bn = nn.BatchNorm2d(1)
-        self.qd_fc1 = nn.Linear(value_input_size, 64)
+        self.qd_fc1 = nn.Linear(grid_size * grid_size, 64)
         self.qd_fc2 = nn.Linear(64, 6)
 
     def forward(self, board_tensor: torch.Tensor, reserve_vector: torch.Tensor):
@@ -74,8 +78,13 @@ class HiveNet(nn.Module):
             value: (batch, 1) in [-1, 1]
             aux: (batch, 6) in [0, 1] — [my_qd, opp_qd, my_qe, opp_qe, my_mob, opp_mob]
         """
+        # Broadcast reserve spatially and concat with board tensor
+        g = board_tensor.size(-1)
+        r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, g, g)
+        x = torch.cat([board_tensor, r], dim=1)  # (B, 39+10, G, G)
+
         # Shared trunk
-        x = F.relu(self.input_bn(self.input_conv(board_tensor)))
+        x = F.relu(self.input_bn(self.input_conv(x)))
         for block in self.res_blocks:
             x = block(x)
 
@@ -88,14 +97,12 @@ class HiveNet(nn.Module):
         # Value head
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.view(v.size(0), -1)
-        v = torch.cat([v, reserve_vector], dim=1)
         v = F.relu(self.value_fc1(v))
         value = torch.tanh(self.value_fc2(v))
 
         # Auxiliary head (own pathway from trunk)
         qd = F.relu(self.qd_bn(self.qd_conv(x)))
         qd = qd.view(qd.size(0), -1)
-        qd = torch.cat([qd, reserve_vector], dim=1)
         qd = F.relu(self.qd_fc1(qd))
         aux = torch.sigmoid(self.qd_fc2(qd))
 
