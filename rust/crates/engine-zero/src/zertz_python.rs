@@ -176,7 +176,7 @@ impl PyZertzSelfPlaySession {
         simulations = 100,
         max_moves = 200,
         temperature = 1.0,
-        temp_threshold = 15,
+        temp_threshold = 10,
         c_puct = 1.5,
         dir_alpha = 0.3,
         dir_epsilon = 0.25,

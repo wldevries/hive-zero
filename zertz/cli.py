@@ -34,8 +34,8 @@ def main():
     train_parser.add_argument("--fast-cap", type=int, default=20)
     train_parser.add_argument("--temperature", type=float, default=1.0,
                               help="MCTS temperature for move selection (default: 1.0)")
-    train_parser.add_argument("--temp-threshold", type=int, default=30,
-                              help="Move number after which temperature drops to 0 (default: 30)")
+    train_parser.add_argument("--temp-threshold", type=int, default=10,
+                              help="Move number after which temperature drops to 0 (default: 10)")
     train_parser.add_argument("--c-puct", type=float, default=1.5,
                               help="PUCT exploration constant (default: 1.5)")
     train_parser.add_argument("--dir-alpha", type=float, default=0.3,

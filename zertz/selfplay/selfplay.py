@@ -136,7 +136,7 @@ class SelfPlayTrainer:
         fast_cap: int = 20,
         play_batch_size: int = 2,
         temperature: float = 1.0,
-        temp_threshold: int = 30,
+        temp_threshold: int = 10,
         c_puct: float = 1.5,
         dir_alpha: float = 0.3,
         dir_epsilon: float = 0.25,
