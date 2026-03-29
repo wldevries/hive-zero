@@ -165,7 +165,11 @@ class SelfPlayTrainer:
             "replay_window": replay_window,
             "playout_cap_p": playout_cap_p,
             "fast_cap": fast_cap,
+            "temperature": temperature,
             "temp_threshold": temp_threshold,
+            "c_puct": c_puct,
+            "dir_alpha": dir_alpha,
+            "dir_epsilon": dir_epsilon,
             "play_batch_size": play_batch_size,
             "augment_symmetry": augment_symmetry,
         }
