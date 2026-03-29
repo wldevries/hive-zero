@@ -222,7 +222,7 @@ class TestDatasetAugmentation:
     def test_augment_preserves_shapes(self):
         ds = _make_dataset()
         ds.augment_symmetry = True
-        board, reserve, policy, value, weight, vo = ds[0]
+        board, reserve, policy, value, weight, vo, *_ = ds[0]
         assert board.shape == (NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
         assert policy.shape == (POLICY_SIZE,)
         assert reserve.shape == (RESERVE_SIZE,)

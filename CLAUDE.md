@@ -67,7 +67,7 @@ for unfinished games, opening randomization (helps somewhat), pretraining on boa
 but doesn't prevent). See `docs/IDEAS.md` for analysis.
 
 ### Zertz architecture
-- **Board encoding**: 4 channels on 7x7 grid (RADIUS=3 hexagonal board, 37 valid cells). Reserve vector of 15 floats (current-player-relative).
+- **Board encoding**: 6 channels on 7x7 grid (RADIUS=3 hexagonal board, 37 valid cells). Channels 0-3: marble colors + empty rings. Channel 4: capture turn flag (1.0 everywhere if capture/mid-capture). Channel 5: mid-capture source position. Reserve vector of 22 floats (current-player-relative: supply, captures, combo win progress, single-color win progress cap/threshold, rings remaining/37), broadcast spatially and concatenated with board tensor before the trunk.
 - **Policy heads**: Three factorized conv1x1 heads off the trunk (no FC layer):
   - `place` [4, 7, 7]: ch 0-2 = place White/Grey/Black ball, ch 3 = remove ring
   - `cap_source` [1, 7, 7]: which marble starts a capture hop

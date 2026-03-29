@@ -8,10 +8,10 @@ import torch.nn.functional as F
 from shared.nn.resblock import ResBlock
 
 # From Rust board encoding
-NUM_CHANNELS = 4
+NUM_CHANNELS = 6
 GRID_SIZE = 7
 POLICY_SIZE = 5587  # Legacy flat size, used only for training data storage
-RESERVE_SIZE = 15
+RESERVE_SIZE = 22
 
 # Factorized policy head sizes (must match Rust PLACE_HEAD_SIZE, CAP_HEAD_SIZE)
 PLACE_HEAD_CHANNELS = 4  # ch 0-2: place W/G/B, ch 3: remove ring
