@@ -116,7 +116,7 @@ MSE: `(predicted - target)^2`, weighted 5x in total loss.
 
 ## Total Loss
 ```
-loss = policy_loss + 5.0 * value_loss
+loss = policy_loss + 1.0 * value_loss
 ```
 
 ## Training Config

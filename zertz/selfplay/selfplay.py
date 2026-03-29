@@ -210,7 +210,7 @@ class SelfPlayTrainer:
                 avg = sum(lengths) / len(lengths)
                 med = _median(lengths)
                 mn, mx = min(lengths), max(lengths)
-                print(f"  Game length: avg={avg:.0f} med={med} min={mn} max={mx}")
+                print(f"  Game length: min=\033[1;37m{mn}\033[0m avg=\033[1;37m{avg:.0f}\033[0m med=\033[1;37m{med}\033[0m max=\033[1;37m{mx}\033[0m")
 
             decisive_total = result.wins_white + result.wins_grey + result.wins_black + result.wins_combo
             if decisive_total > 0:
