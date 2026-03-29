@@ -77,14 +77,10 @@ def plot_perf_log(csv_path: Path, output: Path | None = None, rolling: int = 1) 
 
     # For per-epoch loss plotting, use all rows
     if has_gen:
-        # Create a fractional x-axis: gen + (epoch-1)/max_epoch
-        max_epoch = df["epoch"].max()
-        if max_epoch > 1:
-            df = df.copy()
-            df["x_loss"] = df["gen"] + (df["epoch"] - 1) / max_epoch
-        else:
-            df = df.copy()
-            df["x_loss"] = df["gen"].astype(float)
+        # Create fractional x-axis: gen + (epoch-1)/epochs_in_that_gen
+        df = df.copy()
+        epochs_per_gen = df.groupby("gen")["epoch"].transform("max")
+        df["x_loss"] = df["gen"] + (df["epoch"] - 1) / epochs_per_gen
         loss_x = df["x_loss"]
         loss_df = df
     else:
