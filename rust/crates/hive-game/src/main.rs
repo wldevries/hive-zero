@@ -402,8 +402,9 @@ fn run_stats(games_path: &str) {
 
     // Killer piece: piece type of the last move in decisive games
     let mut killer_piece: HashMap<String, u64> = HashMap::new();
-    // Surrounding pieces: what piece types sit around the losing queen
-    let mut surround_piece: HashMap<String, u64> = HashMap::new();
+    // Surrounding pieces: what piece types sit around the losing queen, split by side
+    let mut surround_attacker: HashMap<String, u64> = HashMap::new();
+    let mut surround_defender: HashMap<String, u64> = HashMap::new();
 
     // Piece movement frequency: how many times each piece type is moved (not placed)
     let mut move_freq: HashMap<String, u64> = HashMap::new();
@@ -562,12 +563,13 @@ fn run_stats(games_path: &str) {
             let bq = hive_game::piece::Piece::new(PieceColor::Black, PieceType::Queen, 1);
 
             // Analyze decisive games: killer piece, surrounding pieces, beetle on queen
-            let losing_queen_pos = match game.state.as_str() {
-                "WhiteWins" => game.board.piece_position(bq),
-                "BlackWins" => game.board.piece_position(wq),
-                _ => None,
+            let (losing_queen_pos, winner_color) = match game.state.as_str() {
+                "WhiteWins" => (game.board.piece_position(bq), Some(PieceColor::White)),
+                "BlackWins" => (game.board.piece_position(wq), Some(PieceColor::Black)),
+                _ => (None, None),
             };
             if let Some(pos) = losing_queen_pos {
+                let winner_color = winner_color.unwrap();
                 let n = hex_neighbors(pos).iter()
                     .filter(|&&h| game.board.is_occupied(h))
                     .count() as u32;
@@ -579,11 +581,15 @@ fn run_stats(games_path: &str) {
                     beetle_on_queen_wins += 1;
                 }
 
-                // Surrounding piece types
+                // Surrounding piece types, split by attacker/defender
                 for &nh in &hex_neighbors(pos) {
                     if let Some(top) = game.board.top_piece(nh) {
                         let key = format!("{}", top.piece_type().as_char());
-                        *surround_piece.entry(key).or_default() += 1;
+                        if top.color() == winner_color {
+                            *surround_attacker.entry(key).or_default() += 1;
+                        } else {
+                            *surround_defender.entry(key).or_default() += 1;
+                        }
                     }
                 }
 
@@ -857,16 +863,28 @@ fn run_stats(games_path: &str) {
     println!();
 
     // Surrounding pieces
-    println!("--- Pieces Surrounding Losing Queen ---");
-    let total_surround = surround_piece.values().sum::<u64>();
-    let mut sp: Vec<_> = surround_piece.iter().collect();
-    sp.sort_by(|a, b| b.1.cmp(a.1));
-    for (bug, count) in &sp {
-        let name = match bug.as_str() {
+    fn bug_name(b: &str) -> &'static str {
+        match b {
             "Q" => "Queen", "S" => "Spider", "B" => "Beetle",
-            "G" => "Grasshopper", "A" => "Ant", x => x,
-        };
-        println!("  {:12} {:7}  ({:.1}%)", name, count, pct(**count, total_surround));
+            "G" => "Grasshopper", "A" => "Ant", _ => "?",
+        }
+    }
+    let total_atk = surround_attacker.values().sum::<u64>();
+    let total_def = surround_defender.values().sum::<u64>();
+    let total_surround = total_atk + total_def;
+    println!("--- Pieces Surrounding Losing Queen ({} total, {:.1} avg per game) ---",
+        total_surround, total_surround as f64 / decisive.max(1) as f64);
+    println!("  Attacker's pieces ({}, {:.1}%):", total_atk, pct(total_atk, total_surround));
+    let mut sa: Vec<_> = surround_attacker.iter().collect();
+    sa.sort_by(|a, b| b.1.cmp(a.1));
+    for (bug, count) in &sa {
+        println!("    {:12} {:7}  ({:.1}% of attacker)", bug_name(bug), count, pct(**count, total_atk));
+    }
+    println!("  Defender's own pieces ({}, {:.1}%):", total_def, pct(total_def, total_surround));
+    let mut sd: Vec<_> = surround_defender.iter().collect();
+    sd.sort_by(|a, b| b.1.cmp(a.1));
+    for (bug, count) in &sd {
+        println!("    {:12} {:7}  ({:.1}% of defender)", bug_name(bug), count, pct(**count, total_def));
     }
     println!();
 
