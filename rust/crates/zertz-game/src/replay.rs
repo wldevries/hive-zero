@@ -6,11 +6,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use core_game::game::Game;
+use core_game::game::{Game, Outcome};
 use crate::hex::boardspace_to_hex;
+use crate::random_play::{classify_win, WinType};
 use crate::sgf::{self, Color, Coord, GameRecord, Turn, Variant};
 use crate::zertz::{
-    find_capture_path, find_intermediate, Marble, ZertzBoard, ZertzMove, MAX_CAPTURE_JUMPS,
+    find_capture_path, find_intermediate, Marble, Ring, ZertzBoard, ZertzMove, MAX_CAPTURE_JUMPS,
 };
 
 // ---------------------------------------------------------------------------
@@ -476,6 +477,347 @@ pub fn run_process(games_path: &str, skip_timeout: bool) {
         }
         println!("Wrote {}", elo_path.display());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stats: aggregate game statistics from boardspace games
+// ---------------------------------------------------------------------------
+
+pub fn run_stats(games_path: &str) {
+    let path = Path::new(games_path);
+    if !path.exists() {
+        eprintln!("Path not found: {games_path}");
+        return;
+    }
+
+    let mut total_games: u64 = 0;
+    let mut replayed_ok: u64 = 0;
+    let mut skipped: u64 = 0;
+    let mut errors: u64 = 0;
+
+    // Result tracking (from metadata)
+    let mut p0_wins: u64 = 0;
+    let mut p1_wins: u64 = 0;
+    let mut draws: u64 = 0;
+    let mut unknown_result: u64 = 0;
+
+    // First player advantage
+    let mut first_player_wins: u64 = 0;
+    let mut second_player_wins: u64 = 0;
+
+    // Win condition breakdown (from engine replay)
+    let mut win_4w: u64 = 0;
+    let mut win_5g: u64 = 0;
+    let mut win_6b: u64 = 0;
+    let mut win_3each: u64 = 0;
+
+    // Game length
+    let mut lengths: Vec<u32> = Vec::new();
+
+    // Rings remaining at end
+    let mut rings_remaining: Vec<u32> = Vec::new();
+
+    // First move: color placed, ball position, and ring removed position
+    let mut first_color: HashMap<String, u64> = HashMap::new();
+    let mut first_ball_position: HashMap<String, u64> = HashMap::new();
+    let mut first_ring_removed: HashMap<String, u64> = HashMap::new();
+
+    let mut process_zip = |zip_path: &Path| {
+        let zip_name = zip_path.display().to_string();
+        let file = match std::fs::File::open(zip_path) {
+            Ok(f) => f,
+            Err(e) => { eprintln!("  failed to open {zip_name}: {e}"); return; }
+        };
+
+        let _ = core_game::sgf::iter_sgf_texts_in_zip(file, |_sgf_name, text| {
+            total_games += 1;
+            if total_games % 5000 == 0 {
+                eprint!("\r  {} games processed...   ", total_games);
+            }
+
+            let record = match sgf::parse_game(&text) {
+                Ok(r) => r,
+                Err(_) => { errors += 1; return; }
+            };
+
+            if matches!(record.variant, Variant::Tournament { .. }) {
+                skipped += 1;
+                return;
+            }
+
+            let p0 = &record.player0;
+            let p1 = &record.player1;
+            let result_str = core_game::sgf::result_from_metadata(&text, p0, p1);
+
+            match result_str {
+                "p0_wins" => p0_wins += 1,
+                "p1_wins" => p1_wins += 1,
+                "draw" => draws += 1,
+                _ => unknown_result += 1,
+            }
+
+            // First move analysis
+            if let Some((_player, first_turn)) = record.turns.first() {
+                match first_turn {
+                    Turn::Place { color, at, remove } => {
+                        let color_name = match color {
+                            Color::White => "White",
+                            Color::Grey => "Grey",
+                            Color::Black => "Black",
+                        };
+                        *first_color.entry(color_name.to_string()).or_default() += 1;
+                        *first_ball_position.entry(format!("{at}")).or_default() += 1;
+                        *first_ring_removed.entry(format!("{remove}")).or_default() += 1;
+                    }
+                    Turn::PlaceOnly { color, at } => {
+                        let color_name = match color {
+                            Color::White => "White",
+                            Color::Grey => "Grey",
+                            Color::Black => "Black",
+                        };
+                        *first_color.entry(color_name.to_string()).or_default() += 1;
+                        *first_ball_position.entry(format!("{at}")).or_default() += 1;
+                    }
+                    Turn::Capture { .. } => {
+                        *first_color.entry("Capture".to_string()).or_default() += 1;
+                    }
+                }
+            }
+
+            // Replay the game for engine-derived stats
+            let replay_result = replay_game(&record);
+            if replay_result.error.is_some() {
+                errors += 1;
+                return;
+            }
+            replayed_ok += 1;
+
+            let board = &replay_result.final_board;
+            lengths.push(replay_result.turns_played as u32);
+
+            // Count rings remaining (Empty or Occupied, not Removed)
+            let remaining = board.rings().iter()
+                .filter(|r| matches!(r, Ring::Empty | Ring::Occupied(_)))
+                .count() as u32;
+            rings_remaining.push(remaining);
+
+            // Win condition and first/second player advantage from engine
+            match board.outcome() {
+                Outcome::WonBy(p) => {
+                    match classify_win(board, p) {
+                        WinType::FourWhite => win_4w += 1,
+                        WinType::FiveGrey => win_5g += 1,
+                        WinType::SixBlack => win_6b += 1,
+                        WinType::ThreeEach => win_3each += 1,
+                        WinType::Draw => {}
+                    }
+                    // Player1 = P0, Player2 = P1 in the engine
+                    let winner_idx: u8 = match p {
+                        core_game::game::Player::Player1 => 0,
+                        core_game::game::Player::Player2 => 1,
+                    };
+                    if winner_idx == record.first_player {
+                        first_player_wins += 1;
+                    } else {
+                        second_player_wins += 1;
+                    }
+                }
+                _ => {}
+            }
+        });
+    };
+
+    println!("Computing stats from {games_path}...");
+    if path.is_file() && path.extension().is_some_and(|e| e == "zip") {
+        process_zip(path);
+    } else if path.is_dir() {
+        core_game::sgf::visit_zip_dir(path, &mut process_zip);
+    } else {
+        eprintln!("Not a zip file or directory: {games_path}");
+        return;
+    }
+    eprintln!();
+
+    // --- Print report ---
+    println!();
+    println!("=== Boardspace Zertz Game Statistics ===");
+    println!();
+    println!("Games:   {} total, {} replayed OK, {} skipped (tournament), {} errors",
+        total_games, replayed_ok, skipped, errors);
+    println!();
+
+    // Results
+    let determined = p0_wins + p1_wins + draws;
+    println!("--- Results (from metadata) ---");
+    println!("  P0 wins:   {:5}  ({:.1}%)", p0_wins, pct(p0_wins, determined));
+    println!("  P1 wins:   {:5}  ({:.1}%)", p1_wins, pct(p1_wins, determined));
+    println!("  Draws:     {:5}  ({:.1}%)", draws, pct(draws, determined));
+    println!("  Unknown:   {:5}", unknown_result);
+    println!();
+
+    // First player advantage
+    let decided = first_player_wins + second_player_wins;
+    println!("--- First/Second Player Advantage (engine-verified) ---");
+    println!("  First player wins:  {:5}  ({:.1}%)", first_player_wins, pct(first_player_wins, decided));
+    println!("  Second player wins: {:5}  ({:.1}%)", second_player_wins, pct(second_player_wins, decided));
+    println!();
+
+    // Win conditions
+    let total_wins = win_4w + win_5g + win_6b + win_3each;
+    println!("--- Win Conditions (engine-verified) ---");
+    println!("  4 White:   {:5}  ({:.1}%)", win_4w, pct(win_4w, total_wins));
+    println!("  5 Grey:    {:5}  ({:.1}%)", win_5g, pct(win_5g, total_wins));
+    println!("  6 Black:   {:5}  ({:.1}%)", win_6b, pct(win_6b, total_wins));
+    println!("  3 Each:    {:5}  ({:.1}%)", win_3each, pct(win_3each, total_wins));
+    println!();
+
+    // Game length
+    if !lengths.is_empty() {
+        lengths.sort();
+        let n = lengths.len();
+        let sum: u64 = lengths.iter().map(|&x| x as u64).sum();
+        let avg = sum as f64 / n as f64;
+        let median = if n % 2 == 0 {
+            (lengths[n / 2 - 1] + lengths[n / 2]) as f64 / 2.0
+        } else {
+            lengths[n / 2] as f64
+        };
+        println!("--- Game Length (turns) ---");
+        println!("  Min:    {:5}", lengths[0]);
+        println!("  Max:    {:5}", lengths[n - 1]);
+        println!("  Mean:   {:8.1}", avg);
+        println!("  Median: {:8.1}", median);
+        println!("  P10:    {:5}", lengths[n / 10]);
+        println!("  P90:    {:5}", lengths[n * 9 / 10]);
+        println!();
+    }
+
+    // Rings remaining
+    if !rings_remaining.is_empty() {
+        rings_remaining.sort();
+        let n = rings_remaining.len();
+        let sum: u64 = rings_remaining.iter().map(|&x| x as u64).sum();
+        let avg = sum as f64 / n as f64;
+        let median = if n % 2 == 0 {
+            (rings_remaining[n / 2 - 1] + rings_remaining[n / 2]) as f64 / 2.0
+        } else {
+            rings_remaining[n / 2] as f64
+        };
+        // Distribution
+        let mut ring_counts: HashMap<u32, u64> = HashMap::new();
+        for &r in &rings_remaining {
+            *ring_counts.entry(r).or_default() += 1;
+        }
+        println!("--- Rings Remaining at Game End (of 37) ---");
+        println!("  Min:    {:5}", rings_remaining[0]);
+        println!("  Max:    {:5}", rings_remaining[n - 1]);
+        println!("  Mean:   {:8.1}", avg);
+        println!("  Median: {:8.1}", median);
+        let mut sorted_rings: Vec<_> = ring_counts.iter().collect();
+        sorted_rings.sort_by_key(|(k, _)| *k);
+        println!("  Distribution:");
+        for (count, freq) in sorted_rings {
+            println!("    {:2} rings: {:5}  ({:.1}%)", count, freq, pct(*freq, n as u64));
+        }
+        println!();
+    }
+
+    // First move
+    println!("--- First Move: Color Placed ---");
+    let total_first = first_color.values().sum::<u64>();
+    let mut fc: Vec<_> = first_color.iter().collect();
+    fc.sort_by(|a, b| b.1.cmp(a.1));
+    for (color, count) in &fc {
+        println!("  {:8} {:5}  ({:.1}%)", color, count, pct(**count, total_first));
+    }
+    println!();
+
+    println!("--- First Move: Ball Position (top 15) ---");
+    let total_ball = first_ball_position.values().sum::<u64>();
+    let mut fb: Vec<_> = first_ball_position.iter().collect();
+    fb.sort_by(|a, b| b.1.cmp(a.1));
+    for (pos, count) in fb.iter().take(15) {
+        println!("  {:8} {:5}  ({:.1}%)", pos, count, pct(**count, total_ball));
+    }
+    println!();
+
+    println!("--- First Move: Ring Removed (top 15) ---");
+    let total_ring = first_ring_removed.values().sum::<u64>();
+    let mut fr: Vec<_> = first_ring_removed.iter().collect();
+    fr.sort_by(|a, b| b.1.cmp(a.1));
+    for (pos, count) in fr.iter().take(15) {
+        println!("  {:8} {:5}  ({:.1}%)", pos, count, pct(**count, total_ring));
+    }
+    println!();
+
+    // Write stats to file
+    let stats_path = path.join("game_stats.txt");
+    if let Ok(mut f) = std::fs::File::create(&stats_path) {
+        use std::io::Write;
+        writeln!(f, "Boardspace Zertz Game Statistics").ok();
+        writeln!(f, "================================").ok();
+        writeln!(f).ok();
+        writeln!(f, "Games: {} total, {} replayed OK, {} skipped, {} errors",
+            total_games, replayed_ok, skipped, errors).ok();
+        writeln!(f).ok();
+        writeln!(f, "Results (metadata):").ok();
+        writeln!(f, "  P0 wins: {} ({:.1}%)", p0_wins, pct(p0_wins, determined)).ok();
+        writeln!(f, "  P1 wins: {} ({:.1}%)", p1_wins, pct(p1_wins, determined)).ok();
+        writeln!(f, "  Draws: {} ({:.1}%)", draws, pct(draws, determined)).ok();
+        writeln!(f, "  Unknown: {}", unknown_result).ok();
+        writeln!(f).ok();
+        writeln!(f, "First/Second Player Advantage (engine-verified):").ok();
+        writeln!(f, "  First player wins: {} ({:.1}%)", first_player_wins, pct(first_player_wins, decided)).ok();
+        writeln!(f, "  Second player wins: {} ({:.1}%)", second_player_wins, pct(second_player_wins, decided)).ok();
+        writeln!(f).ok();
+        writeln!(f, "Win Conditions (engine-verified):").ok();
+        writeln!(f, "  4 White: {} ({:.1}%)", win_4w, pct(win_4w, total_wins)).ok();
+        writeln!(f, "  5 Grey: {} ({:.1}%)", win_5g, pct(win_5g, total_wins)).ok();
+        writeln!(f, "  6 Black: {} ({:.1}%)", win_6b, pct(win_6b, total_wins)).ok();
+        writeln!(f, "  3 Each: {} ({:.1}%)", win_3each, pct(win_3each, total_wins)).ok();
+        writeln!(f).ok();
+        if !lengths.is_empty() {
+            let n = lengths.len();
+            let sum: u64 = lengths.iter().map(|&x| x as u64).sum();
+            writeln!(f, "Game Length (turns):").ok();
+            writeln!(f, "  Min: {}, Max: {}, Mean: {:.1}, Median: {:.1}",
+                lengths[0], lengths[n-1],
+                sum as f64 / n as f64,
+                if n % 2 == 0 { (lengths[n/2-1]+lengths[n/2]) as f64 / 2.0 } else { lengths[n/2] as f64 }
+            ).ok();
+            writeln!(f).ok();
+        }
+        if !rings_remaining.is_empty() {
+            let n = rings_remaining.len();
+            let sum: u64 = rings_remaining.iter().map(|&x| x as u64).sum();
+            writeln!(f, "Rings Remaining (of 37):").ok();
+            writeln!(f, "  Min: {}, Max: {}, Mean: {:.1}, Median: {:.1}",
+                rings_remaining[0], rings_remaining[n-1],
+                sum as f64 / n as f64,
+                if n % 2 == 0 { (rings_remaining[n/2-1]+rings_remaining[n/2]) as f64 / 2.0 } else { rings_remaining[n/2] as f64 }
+            ).ok();
+            writeln!(f).ok();
+        }
+        writeln!(f, "First Move Color:").ok();
+        for (color, count) in &fc {
+            writeln!(f, "  {}: {} ({:.1}%)", color, count, pct(**count, total_first)).ok();
+        }
+        writeln!(f).ok();
+        writeln!(f, "First Move Ball Position (top 15):").ok();
+        for (pos, count) in fb.iter().take(15) {
+            writeln!(f, "  {}: {} ({:.1}%)", pos, count, pct(**count, total_ball)).ok();
+        }
+        writeln!(f).ok();
+        writeln!(f, "First Move Ring Removed (top 15):").ok();
+        for (pos, count) in fr.iter().take(15) {
+            writeln!(f, "  {}: {} ({:.1}%)", pos, count, pct(**count, total_ring)).ok();
+        }
+        println!("Wrote {}", stats_path.display());
+    }
+}
+
+fn pct(n: u64, total: u64) -> f64 {
+    if total == 0 { 0.0 } else { n as f64 / total as f64 * 100.0 }
 }
 
 // ---------------------------------------------------------------------------
