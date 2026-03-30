@@ -2,6 +2,7 @@ mod replay;
 
 use hive_game::sgf;
 use hive_game::game::Game;
+use hive_game::piece::{PieceColor, PieceType, player_pieces};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -342,6 +343,531 @@ fn run_random(n: u32) {
 }
 
 // ---------------------------------------------------------------------------
+// Stats: aggregate game statistics from boardspace games
+// ---------------------------------------------------------------------------
+
+fn pct(n: u64, total: u64) -> f64 {
+    if total == 0 { 0.0 } else { n as f64 / total as f64 * 100.0 }
+}
+
+fn run_stats(games_path: &str) {
+    use hive_game::hex::hex_neighbors;
+
+    let path = Path::new(games_path);
+    if !path.exists() {
+        eprintln!("Path not found: {games_path}");
+        return;
+    }
+
+    let mut total_games: u64 = 0;
+    let mut replayed_ok: u64 = 0;
+    let mut skipped_expansion: u64 = 0;
+    let mut errors: u64 = 0;
+
+    // Results
+    let mut white_wins: u64 = 0;
+    let mut black_wins: u64 = 0;
+    let mut draws: u64 = 0;
+    let mut in_progress: u64 = 0; // games that didn't finish
+
+    // Game length
+    let mut lengths: Vec<u32> = Vec::new();
+
+    // First/second player advantage (White always moves first in Hive)
+    // white_wins already covers first-player wins
+
+    // First bug played
+    let mut first_bug: HashMap<String, u64> = HashMap::new();
+    let mut second_bug: HashMap<String, u64> = HashMap::new();
+
+    // Pieces on board at end
+    let mut total_pieces_end: Vec<u32> = Vec::new();
+    let mut white_pieces_end: Vec<u32> = Vec::new();
+    let mut black_pieces_end: Vec<u32> = Vec::new();
+
+    // Per-piece-type count on board at end (summed over both colors)
+    let mut piece_type_counts: HashMap<String, Vec<u32>> = HashMap::new();
+
+    // Board dimensions at end
+    let mut diameters: Vec<u32> = Vec::new();
+    let mut q_spans: Vec<u32> = Vec::new();
+    let mut r_spans: Vec<u32> = Vec::new();
+    let mut s_spans: Vec<u32> = Vec::new();
+
+    // Queen neighbor count at game end (for the loser)
+    let mut queen_neighbors_at_end: Vec<u32> = Vec::new();
+
+    // Beetle-on-queen at game end
+    let mut beetle_on_queen_wins: u64 = 0;
+
+    // Turn queen was played
+    let mut white_queen_turn: Vec<u32> = Vec::new();
+    let mut black_queen_turn: Vec<u32> = Vec::new();
+
+    println!("Computing stats from {games_path}...");
+
+    let mut zip_paths: Vec<_> = Vec::new();
+    collect_zips(path, &mut zip_paths);
+    zip_paths.sort();
+
+    for zip_path in &zip_paths {
+        let zip_name = zip_path.display().to_string();
+        let file = match std::fs::File::open(zip_path) {
+            Ok(f) => f,
+            Err(e) => { eprintln!("  failed to open {zip_name}: {e}"); continue; }
+        };
+        let _ = core_game::sgf::iter_sgf_texts_in_zip(file, |_sgf_name, text| {
+            total_games += 1;
+            if total_games % 10000 == 0 {
+                eprint!("\r  {} games processed...   ", total_games);
+            }
+
+            let gtype = sgf::game_type(&text);
+            if gtype == "expansion" {
+                skipped_expansion += 1;
+                return;
+            }
+
+            let mut game = Game::new();
+            if sgf::replay_into_game(&text, &mut game).is_err() {
+                errors += 1;
+                return;
+            }
+            replayed_ok += 1;
+
+            // Result
+            match game.state.as_str() {
+                "WhiteWins" => white_wins += 1,
+                "BlackWins" => black_wins += 1,
+                "Draw" => draws += 1,
+                _ => { in_progress += 1; }
+            }
+
+            // Game length
+            lengths.push(game.move_count as u32);
+
+            // First and second bug played
+            let history = game.move_history();
+            if let Some(mv) = history.first() {
+                if let Some(piece) = mv.piece {
+                    let name = format!("{}", piece.piece_type().as_char());
+                    *first_bug.entry(name).or_default() += 1;
+                }
+            }
+            if history.len() >= 2 {
+                if let Some(piece) = history[1].piece {
+                    let name = format!("{}", piece.piece_type().as_char());
+                    *second_bug.entry(name).or_default() += 1;
+                }
+            }
+
+            // Pieces on board at end
+            let w_pieces: u32 = player_pieces(PieceColor::White).iter()
+                .filter(|p| game.board.piece_position(**p).is_some())
+                .count() as u32;
+            let b_pieces: u32 = player_pieces(PieceColor::Black).iter()
+                .filter(|p| game.board.piece_position(**p).is_some())
+                .count() as u32;
+            white_pieces_end.push(w_pieces);
+            black_pieces_end.push(b_pieces);
+            total_pieces_end.push(w_pieces + b_pieces);
+
+            // Per piece type on board
+            for pt in &[PieceType::Queen, PieceType::Spider, PieceType::Beetle,
+                        PieceType::Grasshopper, PieceType::Ant] {
+                let mut count = 0u32;
+                for color in &[PieceColor::White, PieceColor::Black] {
+                    for p in player_pieces(*color) {
+                        if p.piece_type() == *pt && game.board.piece_position(p).is_some() {
+                            count += 1;
+                        }
+                    }
+                }
+                let key = format!("{}", pt.as_char());
+                piece_type_counts.entry(key).or_insert_with(Vec::new).push(count);
+            }
+
+            // Board dimensions
+            {
+                let mut positions = Vec::new();
+                for color in [PieceColor::White, PieceColor::Black] {
+                    for piece in player_pieces(color) {
+                        if let Some(pos) = game.board.piece_position(piece) {
+                            positions.push(pos);
+                        }
+                    }
+                }
+                if positions.len() >= 2 {
+                    let mut max_d: i8 = 0;
+                    for i in 0..positions.len() {
+                        for j in i+1..positions.len() {
+                            let (q1, r1) = positions[i];
+                            let (q2, r2) = positions[j];
+                            let s1 = -q1 - r1;
+                            let s2 = -q2 - r2;
+                            let d = (q1-q2).abs().max((r1-r2).abs()).max((s1-s2).abs());
+                            max_d = max_d.max(d);
+                        }
+                    }
+                    diameters.push(max_d as u32);
+                    let min_q = positions.iter().map(|(q,_)| *q).min().unwrap();
+                    let max_q = positions.iter().map(|(q,_)| *q).max().unwrap();
+                    let min_r = positions.iter().map(|(_,r)| *r).min().unwrap();
+                    let max_r = positions.iter().map(|(_,r)| *r).max().unwrap();
+                    let ss: Vec<i8> = positions.iter().map(|(q,r)| -q - r).collect();
+                    let min_s = ss.iter().copied().min().unwrap();
+                    let max_s = ss.iter().copied().max().unwrap();
+                    q_spans.push((max_q - min_q + 1) as u32);
+                    r_spans.push((max_r - min_r + 1) as u32);
+                    s_spans.push((max_s - min_s + 1) as u32);
+                }
+            }
+
+            // Queen turn placement
+            for (i, mv) in history.iter().enumerate() {
+                if let Some(piece) = mv.piece {
+                    if piece.piece_type() == PieceType::Queen && mv.from.is_none() {
+                        let turn = (i as u32) + 1;
+                        match piece.color() {
+                            PieceColor::White => white_queen_turn.push(turn),
+                            PieceColor::Black => black_queen_turn.push(turn),
+                        }
+                    }
+                }
+            }
+
+            // Queen neighbor analysis for decisive games
+            let wq = hive_game::piece::Piece::new(PieceColor::White, PieceType::Queen, 1);
+            let bq = hive_game::piece::Piece::new(PieceColor::Black, PieceType::Queen, 1);
+
+            match game.state.as_str() {
+                "WhiteWins" => {
+                    // Black queen was surrounded
+                    if let Some(pos) = game.board.piece_position(bq) {
+                        let n = hex_neighbors(pos).iter()
+                            .filter(|&&h| game.board.is_occupied(h))
+                            .count() as u32;
+                        queen_neighbors_at_end.push(n);
+                        // Check beetle on queen
+                        let stack = game.board.stack_at(pos);
+                        if stack.height() > 1 {
+                            beetle_on_queen_wins += 1;
+                        }
+                    }
+                }
+                "BlackWins" => {
+                    if let Some(pos) = game.board.piece_position(wq) {
+                        let n = hex_neighbors(pos).iter()
+                            .filter(|&&h| game.board.is_occupied(h))
+                            .count() as u32;
+                        queen_neighbors_at_end.push(n);
+                        let stack = game.board.stack_at(pos);
+                        if stack.height() > 1 {
+                            beetle_on_queen_wins += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        });
+    }
+
+    // Also process loose .sgf files
+    let mut sgf_paths: Vec<_> = Vec::new();
+    collect_sgfs(path, &mut sgf_paths);
+    sgf_paths.sort();
+
+    for sgf_path in &sgf_paths {
+        let buf = match std::fs::read(sgf_path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let text: String = buf.iter().map(|&b| b as char).collect();
+        total_games += 1;
+
+        let gtype = sgf::game_type(&text);
+        if gtype == "expansion" {
+            skipped_expansion += 1;
+            continue;
+        }
+
+        let mut game = Game::new();
+        if sgf::replay_into_game(&text, &mut game).is_err() {
+            errors += 1;
+            continue;
+        }
+        replayed_ok += 1;
+
+        match game.state.as_str() {
+            "WhiteWins" => white_wins += 1,
+            "BlackWins" => black_wins += 1,
+            "Draw" => draws += 1,
+            _ => { in_progress += 1; }
+        }
+        lengths.push(game.move_count as u32);
+
+        let history = game.move_history();
+        if let Some(mv) = history.first() {
+            if let Some(piece) = mv.piece {
+                *first_bug.entry(format!("{}", piece.piece_type().as_char())).or_default() += 1;
+            }
+        }
+        if history.len() >= 2 {
+            if let Some(piece) = history[1].piece {
+                *second_bug.entry(format!("{}", piece.piece_type().as_char())).or_default() += 1;
+            }
+        }
+
+        let w_pieces: u32 = player_pieces(PieceColor::White).iter()
+            .filter(|p| game.board.piece_position(**p).is_some()).count() as u32;
+        let b_pieces: u32 = player_pieces(PieceColor::Black).iter()
+            .filter(|p| game.board.piece_position(**p).is_some()).count() as u32;
+        white_pieces_end.push(w_pieces);
+        black_pieces_end.push(b_pieces);
+        total_pieces_end.push(w_pieces + b_pieces);
+
+        for pt in &[PieceType::Queen, PieceType::Spider, PieceType::Beetle,
+                    PieceType::Grasshopper, PieceType::Ant] {
+            let mut count = 0u32;
+            for color in &[PieceColor::White, PieceColor::Black] {
+                for p in player_pieces(*color) {
+                    if p.piece_type() == *pt && game.board.piece_position(p).is_some() {
+                        count += 1;
+                    }
+                }
+            }
+            piece_type_counts.entry(format!("{}", pt.as_char())).or_insert_with(Vec::new).push(count);
+        }
+
+        for (i, mv) in history.iter().enumerate() {
+            if let Some(piece) = mv.piece {
+                if piece.piece_type() == PieceType::Queen && mv.from.is_none() {
+                    let turn = (i as u32) + 1;
+                    match piece.color() {
+                        PieceColor::White => white_queen_turn.push(turn),
+                        PieceColor::Black => black_queen_turn.push(turn),
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!();
+
+    // --- Print report ---
+    println!();
+    println!("=== Boardspace Hive Game Statistics ===");
+    println!();
+    println!("Games:   {} total, {} replayed OK, {} skipped (expansion), {} errors",
+        total_games, replayed_ok, skipped_expansion, errors);
+    println!();
+
+    let decided = white_wins + black_wins + draws;
+    println!("--- Results ---");
+    println!("  White wins: {:5}  ({:.1}%)", white_wins, pct(white_wins, decided));
+    println!("  Black wins: {:5}  ({:.1}%)", black_wins, pct(black_wins, decided));
+    println!("  Draws:      {:5}  ({:.1}%)", draws, pct(draws, decided));
+    println!("  In progress:{:5}", in_progress);
+    println!();
+
+    // White = first player in Hive
+    let decisive = white_wins + black_wins;
+    println!("--- First Player (White) Advantage ---");
+    println!("  White (1st) wins: {:5}  ({:.1}%)", white_wins, pct(white_wins, decisive));
+    println!("  Black (2nd) wins: {:5}  ({:.1}%)", black_wins, pct(black_wins, decisive));
+    println!();
+
+    // Game length
+    if !lengths.is_empty() {
+        lengths.sort();
+        let n = lengths.len();
+        let sum: u64 = lengths.iter().map(|&x| x as u64).sum();
+        let avg = sum as f64 / n as f64;
+        let median = if n % 2 == 0 {
+            (lengths[n/2-1] + lengths[n/2]) as f64 / 2.0
+        } else { lengths[n/2] as f64 };
+        println!("--- Game Length (moves) ---");
+        println!("  Min:    {:5}", lengths[0]);
+        println!("  Max:    {:5}", lengths[n-1]);
+        println!("  Mean:   {:8.1}", avg);
+        println!("  Median: {:8.1}", median);
+        println!("  P10:    {:5}", lengths[n/10]);
+        println!("  P90:    {:5}", lengths[n*9/10]);
+        println!();
+    }
+
+    // First and second bug
+    println!("--- First Bug Played (White's opening) ---");
+    let total_first = first_bug.values().sum::<u64>();
+    let mut fb: Vec<_> = first_bug.iter().collect();
+    fb.sort_by(|a, b| b.1.cmp(a.1));
+    for (bug, count) in &fb {
+        let name = match bug.as_str() {
+            "Q" => "Queen", "S" => "Spider", "B" => "Beetle",
+            "G" => "Grasshopper", "A" => "Ant", x => x,
+        };
+        println!("  {:12} {:5}  ({:.1}%)", name, count, pct(**count, total_first));
+    }
+    println!();
+
+    println!("--- Second Bug Played (Black's opening) ---");
+    let total_second = second_bug.values().sum::<u64>();
+    let mut sb: Vec<_> = second_bug.iter().collect();
+    sb.sort_by(|a, b| b.1.cmp(a.1));
+    for (bug, count) in &sb {
+        let name = match bug.as_str() {
+            "Q" => "Queen", "S" => "Spider", "B" => "Beetle",
+            "G" => "Grasshopper", "A" => "Ant", x => x,
+        };
+        println!("  {:12} {:5}  ({:.1}%)", name, count, pct(**count, total_second));
+    }
+    println!();
+
+    // Pieces on board
+    if !total_pieces_end.is_empty() {
+        total_pieces_end.sort();
+        white_pieces_end.sort();
+        black_pieces_end.sort();
+        let n = total_pieces_end.len();
+        let avg_t = total_pieces_end.iter().map(|&x| x as f64).sum::<f64>() / n as f64;
+        let avg_w = white_pieces_end.iter().map(|&x| x as f64).sum::<f64>() / n as f64;
+        let avg_b = black_pieces_end.iter().map(|&x| x as f64).sum::<f64>() / n as f64;
+        let med = |v: &[u32]| if v.len() % 2 == 0 {
+            (v[v.len()/2-1] + v[v.len()/2]) as f64 / 2.0
+        } else { v[v.len()/2] as f64 };
+        println!("--- Pieces on Board at Game End (max 11 per side, 22 total) ---");
+        println!("  Total:  min={}, max={}, mean={:.1}, median={:.1}",
+            total_pieces_end[0], total_pieces_end[n-1], avg_t, med(&total_pieces_end));
+        println!("  White:  min={}, max={}, mean={:.1}, median={:.1}",
+            white_pieces_end[0], white_pieces_end[n-1], avg_w, med(&white_pieces_end));
+        println!("  Black:  min={}, max={}, mean={:.1}, median={:.1}",
+            black_pieces_end[0], black_pieces_end[n-1], avg_b, med(&black_pieces_end));
+        println!();
+
+        // Per piece type average on board
+        println!("  By type (avg on board / max possible):");
+        for (label, key, max) in &[
+            ("Queen", "Q", 2), ("Spider", "S", 4), ("Beetle", "B", 4),
+            ("Grasshopper", "G", 6), ("Ant", "A", 6),
+        ] {
+            if let Some(counts) = piece_type_counts.get(*key) {
+                let avg = counts.iter().map(|&x| x as f64).sum::<f64>() / counts.len() as f64;
+                println!("    {:12} {:.2} / {}", label, avg, max);
+            }
+        }
+        println!();
+    }
+
+    // Board dimensions
+    if !diameters.is_empty() {
+        diameters.sort();
+        q_spans.sort();
+        r_spans.sort();
+        s_spans.sort();
+        let n = diameters.len();
+        let pavg = |v: &[u32]| v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+        let pp = |v: &[u32], p: f64| -> u32 {
+            let idx = ((v.len() as f64 - 1.0) * p / 100.0).round() as usize;
+            v[idx.min(v.len() - 1)]
+        };
+        println!("--- Board Size at Game End ---");
+        println!("  {:>12}  {:>5}  {:>5}  {:>5}  {:>5}  {:>5}  {:>5}  {:>5}",
+            "", "min", "p10", "p25", "med", "p75", "p90", "max");
+        for (label, v) in [("diameter", &diameters), ("q span", &q_spans),
+                           ("r span", &r_spans), ("s span", &s_spans)] {
+            println!("  {:>12}  {:>5}  {:>5}  {:>5}  {:>5}  {:>5}  {:>5}  {:>5}",
+                label, v[0], pp(v, 10.0), pp(v, 25.0),
+                pp(v, 50.0), pp(v, 75.0), pp(v, 90.0), v[n-1]);
+        }
+        println!("  Avg diameter: {:.1}", pavg(&diameters));
+        println!();
+    }
+
+    // Queen placement turn
+    if !white_queen_turn.is_empty() {
+        white_queen_turn.sort();
+        black_queen_turn.sort();
+        let n_w = white_queen_turn.len();
+        let n_b = black_queen_turn.len();
+        let avg_w = white_queen_turn.iter().map(|&x| x as f64).sum::<f64>() / n_w as f64;
+        let avg_b = black_queen_turn.iter().map(|&x| x as f64).sum::<f64>() / n_b as f64;
+        let med = |v: &[u32]| if v.len() % 2 == 0 {
+            (v[v.len()/2-1] + v[v.len()/2]) as f64 / 2.0
+        } else { v[v.len()/2] as f64 };
+        println!("--- Queen Placement Move Number ---");
+        println!("  White: mean={:.1}, median={:.1}, min={}, max={}",
+            avg_w, med(&white_queen_turn), white_queen_turn[0], white_queen_turn[n_w-1]);
+        println!("  Black: mean={:.1}, median={:.1}, min={}, max={}",
+            avg_b, med(&black_queen_turn), black_queen_turn[0], black_queen_turn[n_b-1]);
+        println!();
+    }
+
+    // Beetle on queen
+    println!("--- Winning Position Details ---");
+    println!("  Beetle on losing queen: {:5}  ({:.1}% of decisive games)",
+        beetle_on_queen_wins, pct(beetle_on_queen_wins, decisive));
+    if !queen_neighbors_at_end.is_empty() {
+        // Should all be 6, but let's verify
+        let mut qn_counts: HashMap<u32, u64> = HashMap::new();
+        for &n in &queen_neighbors_at_end {
+            *qn_counts.entry(n).or_default() += 1;
+        }
+        println!("  Losing queen neighbor count distribution:");
+        let mut sorted_qn: Vec<_> = qn_counts.iter().collect();
+        sorted_qn.sort_by_key(|(k, _)| *k);
+        for (n, count) in sorted_qn {
+            println!("    {} neighbors: {:5}  ({:.1}%)", n, count,
+                pct(*count, queen_neighbors_at_end.len() as u64));
+        }
+    }
+    println!();
+
+    // Write stats to file
+    let stats_path = path.join("game_stats.txt");
+    if let Ok(mut f) = std::fs::File::create(&stats_path) {
+        use std::io::Write;
+        writeln!(f, "Boardspace Hive Game Statistics").ok();
+        writeln!(f, "===============================").ok();
+        writeln!(f).ok();
+        writeln!(f, "Games: {} total, {} replayed OK, {} skipped (expansion), {} errors",
+            total_games, replayed_ok, skipped_expansion, errors).ok();
+        writeln!(f).ok();
+        writeln!(f, "Results:").ok();
+        writeln!(f, "  White wins: {} ({:.1}%)", white_wins, pct(white_wins, decided)).ok();
+        writeln!(f, "  Black wins: {} ({:.1}%)", black_wins, pct(black_wins, decided)).ok();
+        writeln!(f, "  Draws: {} ({:.1}%)", draws, pct(draws, decided)).ok();
+        writeln!(f, "  In progress: {}", in_progress).ok();
+        writeln!(f).ok();
+        writeln!(f, "First Player (White) Advantage:").ok();
+        writeln!(f, "  White (1st) wins: {} ({:.1}%)", white_wins, pct(white_wins, decisive)).ok();
+        writeln!(f, "  Black (2nd) wins: {} ({:.1}%)", black_wins, pct(black_wins, decisive)).ok();
+        writeln!(f).ok();
+        if !lengths.is_empty() {
+            let n = lengths.len();
+            let sum: u64 = lengths.iter().map(|&x| x as u64).sum();
+            writeln!(f, "Game Length (moves): min={}, max={}, mean={:.1}, median={:.1}",
+                lengths[0], lengths[n-1], sum as f64/n as f64,
+                if n%2==0 { (lengths[n/2-1]+lengths[n/2]) as f64/2.0 } else { lengths[n/2] as f64 }
+            ).ok();
+            writeln!(f).ok();
+        }
+        writeln!(f, "First Bug (White): {:?}", fb.iter().map(|(b,c)| format!("{}={}", b, c)).collect::<Vec<_>>()).ok();
+        writeln!(f, "Second Bug (Black): {:?}", sb.iter().map(|(b,c)| format!("{}={}", b, c)).collect::<Vec<_>>()).ok();
+        writeln!(f).ok();
+        if !total_pieces_end.is_empty() {
+            let n = total_pieces_end.len();
+            writeln!(f, "Pieces on Board at End: min={}, max={}, mean={:.1}",
+                total_pieces_end[0], total_pieces_end[n-1],
+                total_pieces_end.iter().map(|&x| x as f64).sum::<f64>() / n as f64).ok();
+        }
+        writeln!(f).ok();
+        writeln!(f, "Beetle on losing queen: {} ({:.1}% of decisive)",
+            beetle_on_queen_wins, pct(beetle_on_queen_wins, decisive)).ok();
+        println!("Wrote {}", stats_path.display());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -370,6 +896,10 @@ fn main() {
             let skip_timeout = args.iter().any(|a| a == "--skip-timeout-games");
             run_process(path, skip_timeout);
         }
+        "stats" => {
+            let path = args.get(2).map(|s| s.as_str()).unwrap_or("games/hive/boardspace");
+            run_stats(path);
+        }
         "mcts" => {
             let sims: u32  = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(800);
             let batch: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
@@ -383,6 +913,7 @@ fn main() {
             eprintln!("  replay [path]            replay boardspace games");
             eprintln!("  debug <sgf|zip> [name]   verbose replay of one game");
             eprintln!("  process [path]           replay all games, compute ELO, write CSVs");
+            eprintln!("  stats [path]             aggregate game statistics, write game_stats.txt");
             eprintln!("  mcts [sims] [batch]      MCTS benchmark");
             std::process::exit(1);
         }

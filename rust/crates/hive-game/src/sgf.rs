@@ -152,9 +152,18 @@ fn replay_into_game_inner(
     let mut actions: Vec<(u8, String)> = Vec::new();
     scan_player_actions(content, |p, a| actions.push((p, a.to_string())));
 
-    for (player_idx, action) in &actions {
+    for (player_idx, raw_action) in &actions {
         let player_color = if *player_idx == 0 { PieceColor::White } else { PieceColor::Black };
-        let action = action.as_str();
+        // Strip leading sequence number (e.g., "57 done" → "done").
+        let action = {
+            let s = raw_action.as_str();
+            let bytes = s.as_bytes();
+            if !bytes.is_empty() && bytes[0].is_ascii_digit() {
+                s.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start()
+            } else {
+                s
+            }
+        };
 
         // done / start → finalize pending move
         if starts_with_ci(action, b"done") || starts_with_ci(action, b"start") {
