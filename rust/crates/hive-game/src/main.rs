@@ -400,6 +400,15 @@ fn run_stats(games_path: &str) {
     // Beetle-on-queen at game end
     let mut beetle_on_queen_wins: u64 = 0;
 
+    // Killer piece: piece type of the last move in decisive games
+    let mut killer_piece: HashMap<String, u64> = HashMap::new();
+    // Surrounding pieces: what piece types sit around the losing queen
+    let mut surround_piece: HashMap<String, u64> = HashMap::new();
+
+    // Piece movement frequency: how many times each piece type is moved (not placed)
+    let mut move_freq: HashMap<String, u64> = HashMap::new();
+    let mut total_movements: u64 = 0;
+
     // Turn queen was played
     let mut white_queen_turn: Vec<u32> = Vec::new();
     let mut black_queen_turn: Vec<u32> = Vec::new();
@@ -458,6 +467,18 @@ fn run_stats(games_path: &str) {
                 if let Some(piece) = history[1].piece {
                     let name = format!("{}", piece.piece_type().as_char());
                     *second_bug.entry(name).or_default() += 1;
+                }
+            }
+
+            // Piece movement frequency (moves, not placements)
+            for mv in history {
+                if let Some(piece) = mv.piece {
+                    if mv.from.is_some() {
+                        // This is a movement, not a placement
+                        let key = format!("{}", piece.piece_type().as_char());
+                        *move_freq.entry(key).or_default() += 1;
+                        total_movements += 1;
+                    }
                 }
             }
 
@@ -540,34 +561,39 @@ fn run_stats(games_path: &str) {
             let wq = hive_game::piece::Piece::new(PieceColor::White, PieceType::Queen, 1);
             let bq = hive_game::piece::Piece::new(PieceColor::Black, PieceType::Queen, 1);
 
-            match game.state.as_str() {
-                "WhiteWins" => {
-                    // Black queen was surrounded
-                    if let Some(pos) = game.board.piece_position(bq) {
-                        let n = hex_neighbors(pos).iter()
-                            .filter(|&&h| game.board.is_occupied(h))
-                            .count() as u32;
-                        queen_neighbors_at_end.push(n);
-                        // Check beetle on queen
-                        let stack = game.board.stack_at(pos);
-                        if stack.height() > 1 {
-                            beetle_on_queen_wins += 1;
-                        }
+            // Analyze decisive games: killer piece, surrounding pieces, beetle on queen
+            let losing_queen_pos = match game.state.as_str() {
+                "WhiteWins" => game.board.piece_position(bq),
+                "BlackWins" => game.board.piece_position(wq),
+                _ => None,
+            };
+            if let Some(pos) = losing_queen_pos {
+                let n = hex_neighbors(pos).iter()
+                    .filter(|&&h| game.board.is_occupied(h))
+                    .count() as u32;
+                queen_neighbors_at_end.push(n);
+
+                // Beetle on queen
+                let stack = game.board.stack_at(pos);
+                if stack.height() > 1 {
+                    beetle_on_queen_wins += 1;
+                }
+
+                // Surrounding piece types
+                for &nh in &hex_neighbors(pos) {
+                    if let Some(top) = game.board.top_piece(nh) {
+                        let key = format!("{}", top.piece_type().as_char());
+                        *surround_piece.entry(key).or_default() += 1;
                     }
                 }
-                "BlackWins" => {
-                    if let Some(pos) = game.board.piece_position(wq) {
-                        let n = hex_neighbors(pos).iter()
-                            .filter(|&&h| game.board.is_occupied(h))
-                            .count() as u32;
-                        queen_neighbors_at_end.push(n);
-                        let stack = game.board.stack_at(pos);
-                        if stack.height() > 1 {
-                            beetle_on_queen_wins += 1;
-                        }
+
+                // Killer piece: the last move's piece type
+                if let Some(last_mv) = history.last() {
+                    if let Some(piece) = last_mv.piece {
+                        let key = format!("{}", piece.piece_type().as_char());
+                        *killer_piece.entry(key).or_default() += 1;
                     }
                 }
-                _ => {}
             }
         });
     }
@@ -801,6 +827,48 @@ fn run_stats(games_path: &str) {
             avg_b, med(&black_queen_turn), black_queen_turn[0], black_queen_turn[n_b-1]);
         println!();
     }
+
+    // Piece movement frequency
+    println!("--- Piece Movement Frequency (moves after placement) ---");
+    let mut mf: Vec<_> = move_freq.iter().collect();
+    mf.sort_by(|a, b| b.1.cmp(a.1));
+    for (bug, count) in &mf {
+        let name = match bug.as_str() {
+            "Q" => "Queen", "S" => "Spider", "B" => "Beetle",
+            "G" => "Grasshopper", "A" => "Ant", x => x,
+        };
+        println!("  {:12} {:7}  ({:.1}%)", name, count, pct(**count, total_movements));
+    }
+    println!("  Total movements: {}", total_movements);
+    println!();
+
+    // Killer piece
+    println!("--- Killer Piece (last move in decisive games) ---");
+    let total_kills = killer_piece.values().sum::<u64>();
+    let mut kp: Vec<_> = killer_piece.iter().collect();
+    kp.sort_by(|a, b| b.1.cmp(a.1));
+    for (bug, count) in &kp {
+        let name = match bug.as_str() {
+            "Q" => "Queen", "S" => "Spider", "B" => "Beetle",
+            "G" => "Grasshopper", "A" => "Ant", x => x,
+        };
+        println!("  {:12} {:5}  ({:.1}%)", name, count, pct(**count, total_kills));
+    }
+    println!();
+
+    // Surrounding pieces
+    println!("--- Pieces Surrounding Losing Queen ---");
+    let total_surround = surround_piece.values().sum::<u64>();
+    let mut sp: Vec<_> = surround_piece.iter().collect();
+    sp.sort_by(|a, b| b.1.cmp(a.1));
+    for (bug, count) in &sp {
+        let name = match bug.as_str() {
+            "Q" => "Queen", "S" => "Spider", "B" => "Beetle",
+            "G" => "Grasshopper", "A" => "Ant", x => x,
+        };
+        println!("  {:12} {:7}  ({:.1}%)", name, count, pct(**count, total_surround));
+    }
+    println!();
 
     // Beetle on queen
     println!("--- Winning Position Details ---");
