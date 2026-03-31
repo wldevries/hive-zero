@@ -26,12 +26,16 @@ from ..nn.model import ZertzNet, create_model, load_checkpoint, save_checkpoint
 from ..nn.training import Trainer, ZertzDataset
 
 LOG_HEADER = (
-    "iter,simulations,wins_p1,wins_p2,draws,positions,buffer,"
-    "loss,policy_loss,value_loss,place_value_loss,capture_value_loss,"
-    "place_policy_loss,capture_policy_loss,lr,duration_s,comment,"
-    "avg_game_len,med_game_len,min_game_len,max_game_len,"
+    "gen,epoch,"
+    "simulations,games,positions,buffer,"
+    "wins_p1,wins_p2,draws,"
     "wins_white,wins_grey,wins_black,wins_combo,"
-    "isolation_captures,jump_captures\n"
+    "avg_game_len,med_game_len,min_game_len,max_game_len,"
+    "isolation_captures,jump_captures,"
+    "loss,policy_loss,value_loss,"
+    "place_policy_loss,capture_policy_loss,"
+    "place_value_loss,capture_value_loss,"
+    "lr,duration_s,comment\n"
 )
 
 
@@ -49,6 +53,7 @@ class SelfPlayTrainer:
         num_blocks: int = 6,
         channels: int = 64,
         lr: float = 0.02,
+        lr_schedule: Optional[list[tuple[int, float]]] = None,
         checkpoint_dir: str = "checkpoints/zertz",
     ):
         self.model_path = model_path
@@ -64,7 +69,7 @@ class SelfPlayTrainer:
             ch = self.model.input_conv.out_channels
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"Resumed from {model_path} (iteration {self.start_iteration}, "
+                f"Resumed from {model_path} (gen {self.start_iteration}, "
                 f"{blocks} blocks, {ch} channels, {params / 1e6:.2f}M params)"
             )
         else:
@@ -75,7 +80,26 @@ class SelfPlayTrainer:
             )
 
         self.model.to(device)
+        self.lr_schedule = lr_schedule
         self.trainer = Trainer(model=self.model, device=device, lr=lr)
+
+    def _get_scheduled_lr(self, iteration: int) -> Optional[float]:
+        """Return the LR for this iteration by linearly interpolating between waypoints."""
+        if not self.lr_schedule:
+            return None
+        # Before first waypoint or at/after last: clamp
+        if iteration <= self.lr_schedule[0][0]:
+            return self.lr_schedule[0][1]
+        if iteration >= self.lr_schedule[-1][0]:
+            return self.lr_schedule[-1][1]
+        # Find surrounding waypoints and interpolate
+        for i in range(len(self.lr_schedule) - 1):
+            it0, lr0 = self.lr_schedule[i]
+            it1, lr1 = self.lr_schedule[i + 1]
+            if it0 <= iteration <= it1:
+                t = (iteration - it0) / (it1 - it0)
+                return lr0 + t * (lr1 - lr0)
+        return self.lr_schedule[-1][1]
 
     def _eval_fn(self, board_tensor_np, reserve_np):
         """NN inference callback for Rust self-play.
@@ -100,10 +124,10 @@ class SelfPlayTrainer:
 
     def run(
         self,
-        num_iterations: Optional[int] = None,
-        games_per_iter: int = 20,
+        num_generations: Optional[int] = None,
+        games_per_gen: int = 20,
         simulations: int = 100,
-        epochs_per_iter: int = 1,
+        epochs_per_gen: int = 1,
         batch_size: int = 256,
         max_moves: int = 200,
         replay_window: int = 8,
@@ -111,7 +135,11 @@ class SelfPlayTrainer:
         playout_cap_p: float = 0.0,
         fast_cap: int = 20,
         play_batch_size: int = 2,
-        temp_threshold: int = 30,
+        temperature: float = 1.0,
+        temp_threshold: int = 10,
+        c_puct: float = 1.5,
+        dir_alpha: float = 0.3,
+        dir_epsilon: float = 0.25,
         time_limit_minutes: Optional[float] = None,
         comment: str = "",
         augment_symmetry: bool = False,
@@ -123,40 +151,50 @@ class SelfPlayTrainer:
             with open(log_path, "w") as f:
                 f.write(LOG_HEADER)
 
-        max_buffer = games_per_iter * max_moves * replay_window
+        max_buffer = games_per_gen * max_moves * replay_window
         dataset = ZertzDataset(max_size=max_buffer)
         dataset.augment_symmetry = augment_symmetry
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
         train_params = {
             "simulations": simulations,
-            "games_per_iter": games_per_iter,
-            "epochs_per_iter": epochs_per_iter,
+            "games_per_gen": games_per_gen,
+            "epochs_per_gen": epochs_per_gen,
             "batch_size": batch_size,
             "max_moves": max_moves,
             "replay_window": replay_window,
             "playout_cap_p": playout_cap_p,
             "fast_cap": fast_cap,
+            "temperature": temperature,
             "temp_threshold": temp_threshold,
+            "c_puct": c_puct,
+            "dir_alpha": dir_alpha,
+            "dir_epsilon": dir_epsilon,
             "play_batch_size": play_batch_size,
             "augment_symmetry": augment_symmetry,
         }
 
         start_time = time.time()
-        iteration = self.start_iteration
+        generation = self.start_iteration
 
         while True:
             if (
-                num_iterations is not None
-                and (iteration - self.start_iteration) >= num_iterations
+                num_generations is not None
+                and (generation - self.start_iteration) >= num_generations
             ):
                 break
             if time_limit_minutes is not None:
                 if (time.time() - start_time) / 60 >= time_limit_minutes:
                     break
 
-            iteration += 1
+            generation += 1
             iter_start = time.time()
+
+            # Apply LR schedule
+            scheduled_lr = self._get_scheduled_lr(generation)
+            if scheduled_lr is not None:
+                for pg in self.trainer.optimizer.param_groups:
+                    pg['lr'] = scheduled_lr
 
             # Header
             cap_str = (
@@ -165,15 +203,19 @@ class SelfPlayTrainer:
                 else ""
             )
             print(
-                f"\n=== {_cc(self.model_name)}  Iteration {iteration}  [sims={simulations}{cap_str}] ==="
+                f"\n=== {_cc(self.model_name)}  Gen {generation}  [sims={simulations}{cap_str}] ==="
             )
 
             # --- Self-play ---
             session = ZertzSelfPlaySession(
-                num_games=games_per_iter,
+                num_games=games_per_gen,
                 simulations=simulations,
                 max_moves=max_moves,
+                temperature=temperature,
                 temp_threshold=temp_threshold,
+                c_puct=c_puct,
+                dir_alpha=dir_alpha,
+                dir_epsilon=dir_epsilon,
                 playout_cap_p=playout_cap_p,
                 fast_cap=fast_cap,
                 play_batch_size=play_batch_size,
@@ -210,7 +252,7 @@ class SelfPlayTrainer:
                 avg = sum(lengths) / len(lengths)
                 med = _median(lengths)
                 mn, mx = min(lengths), max(lengths)
-                print(f"  Game length: avg={avg:.0f} med={med} min={mn} max={mx}")
+                print(f"  Game length:  min=\033[1;37m{mn}\033[0m  avg=\033[1;37m{avg:.1f}\033[0m  med=\033[1;37m{med}\033[0m  max=\033[1;37m{mx}\033[0m")
 
             decisive_total = result.wins_white + result.wins_grey + result.wins_black + result.wins_combo
             if decisive_total > 0:
@@ -249,7 +291,7 @@ class SelfPlayTrainer:
             n_vo = sum(1 for v in value_only if v)
             pos_per_s = result.num_samples / play_time if play_time > 0 else 0
             print(
-                f"  {games_per_iter} games: {result.num_samples} new positions "
+                f"  {games_per_gen} games: {result.num_samples} new positions "
                 f"({n_vo} value-only) "
                 f"(play={play_time:.1f}s, buf={buf_time:.2f}s, {pos_per_s:.0f} pos/s), "
                 f"buffer: {len(dataset)}"
@@ -266,8 +308,13 @@ class SelfPlayTrainer:
                 print("\n".join("    " + line for line in rendered.split("\n")))
 
             # --- Training ---
+            avg_gl = f"{sum(lengths) / len(lengths):.1f}" if lengths else ""
+            med_gl = str(_median(lengths)) if lengths else ""
+            min_gl = str(min(lengths)) if lengths else ""
+            max_gl = str(max(lengths)) if lengths else ""
+
             losses = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
-            for epoch in range(epochs_per_iter):
+            for epoch in range(epochs_per_gen):
                 losses = self.trainer.train_epoch(dataset, batch_size=batch_size)
                 lr = self.trainer._current_lr
                 total_s = f"{losses['total_loss']:.4f}"
@@ -282,43 +329,40 @@ class SelfPlayTrainer:
                     f"lr={lr:.4f})"
                 )
 
-            duration = time.time() - iter_start
+                duration = time.time() - iter_start
+
+                # --- Log each epoch ---
+                with open(log_path, "a") as f:
+                    f.write(
+                        f"{generation},{epoch + 1},"
+                        f"{simulations},{games_per_gen},{result.num_samples},{len(dataset)},"
+                        f"{result.wins_p1},{result.wins_p2},{result.draws},"
+                        f"{result.wins_white},{result.wins_grey},{result.wins_black},{result.wins_combo},"
+                        f"{avg_gl},{med_gl},{min_gl},{max_gl},"
+                        f"{result.isolation_captures},{result.jump_captures},"
+                        f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
+                        f"{losses['value_loss']:.6f},"
+                        f"{losses['place_policy_loss']:.6f},{losses['capture_policy_loss']:.6f},"
+                        f"{losses['place_value_loss']:.6f},{losses['capture_value_loss']:.6f},"
+                        f"{lr:.6f},{duration:.1f},"
+                        f"{csv_comment(comment)}\n"
+                    )
+                comment = ""
 
             # --- Save model ---
             metadata = {**train_params, "lr": lr}
-            save_checkpoint(self.model, self.model_path, iteration=iteration, metadata=metadata)
-            print(f"  Model saved: {self.model_path} (iteration {iteration})")
+            save_checkpoint(self.model, self.model_path, iteration=generation, metadata=metadata)
+            print(f"  Model saved: {self.model_path} (gen {generation})")
 
             # --- Checkpoint ---
-            if iteration % checkpoint_every == 0:
+            if generation % checkpoint_every == 0:
                 ckpt_path = os.path.join(
-                    self.checkpoint_dir, f"{self.model_name}_iter{iteration:05d}.pt"
+                    self.checkpoint_dir, f"{self.model_name}_gen{generation:05d}.pt"
                 )
-                save_checkpoint(self.model, ckpt_path, iteration=iteration, metadata=metadata)
+                save_checkpoint(self.model, ckpt_path, iteration=generation, metadata=metadata)
                 print(f"  Checkpoint saved to {ckpt_path}")
 
-            # --- Log ---
-            avg_gl = f"{sum(lengths) / len(lengths):.1f}" if lengths else ""
-            med_gl = str(_median(lengths)) if lengths else ""
-            min_gl = str(min(lengths)) if lengths else ""
-            max_gl = str(max(lengths)) if lengths else ""
-            with open(log_path, "a") as f:
-                f.write(
-                    f"{iteration},{simulations},"
-                    f"{result.wins_p1},{result.wins_p2},{result.draws},"
-                    f"{result.num_samples},{len(dataset)},"
-                    f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
-                    f"{losses['value_loss']:.6f},"
-                    f"{losses['place_value_loss']:.6f},{losses['capture_value_loss']:.6f},"
-                    f"{losses['place_policy_loss']:.6f},{losses['capture_policy_loss']:.6f},"
-                    f"{lr:.6f},{duration:.1f},"
-                    f"{csv_comment(comment)},{avg_gl},{med_gl},{min_gl},{max_gl},"
-                    f"{result.wins_white},{result.wins_grey},{result.wins_black},{result.wins_combo},"
-                    f"{result.isolation_captures},{result.jump_captures}\n"
-                )
-            comment = ""
-
-        print(f"\nTraining complete. Final model: {self.model_path}")
+        print(f"\nTraining complete after gen {generation}. Final model: {self.model_path}")
 
 
 def _render_boards_horizontally(

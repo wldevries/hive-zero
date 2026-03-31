@@ -161,6 +161,8 @@ pub struct PyZertzSelfPlaySession {
     temperature: f32,
     temp_threshold: u32,
     c_puct: f32,
+    dir_alpha: f32,
+    dir_epsilon: f32,
     play_batch_size: usize,
     playout_cap_p: f32,
     fast_cap: usize,
@@ -174,8 +176,10 @@ impl PyZertzSelfPlaySession {
         simulations = 100,
         max_moves = 200,
         temperature = 1.0,
-        temp_threshold = 15,
+        temp_threshold = 10,
         c_puct = 1.5,
+        dir_alpha = 0.3,
+        dir_epsilon = 0.25,
         play_batch_size = 2,
         playout_cap_p = 0.0,
         fast_cap = 20,
@@ -187,13 +191,15 @@ impl PyZertzSelfPlaySession {
         temperature: f32,
         temp_threshold: u32,
         c_puct: f32,
+        dir_alpha: f32,
+        dir_epsilon: f32,
         play_batch_size: usize,
         playout_cap_p: f32,
         fast_cap: usize,
     ) -> Self {
         PyZertzSelfPlaySession {
             num_games, simulations, max_moves, temperature, temp_threshold,
-            c_puct, play_batch_size, playout_cap_p, fast_cap,
+            c_puct, dir_alpha, dir_epsilon, play_batch_size, playout_cap_p, fast_cap,
         }
     }
 
@@ -309,7 +315,7 @@ impl PyZertzSelfPlaySession {
                 };
                 searches[gi].init(&boards[gi], &heads);
                 if is_full[i] {
-                    searches[gi].apply_root_dirichlet(0.3, 0.25);
+                    searches[gi].apply_root_dirichlet(self.dir_alpha, self.dir_epsilon);
                 }
             }
 

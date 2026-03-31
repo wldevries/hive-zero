@@ -2,11 +2,13 @@
 ///
 /// Grid: 7x7 (hex board rows 4-5-6-7-6-5-4 embedded left-aligned).
 ///
-/// Board channels (4 spatial):
+/// Board channels (6 spatial):
 ///   0: White marbles
 ///   1: Grey marbles
 ///   2: Black marbles
 ///   3: Empty rings (valid, unoccupied)
+///   4: Capture turn flag (1.0 on all cells if first-hop capture or mid-capture)
+///   5: Mid-capture source (1.0 at the active marble's position during mid-capture)
 ///
 /// Supply and capture counts are in the reserve vector (see RESERVE_SIZE).
 
@@ -18,15 +20,18 @@ use crate::zertz::{Marble, Ring, ZertzBoard};
 const BOARD_SIZE: usize = crate::hex::BOARD_SIZE;
 
 pub const GRID_SIZE: usize = 7;
-pub const NUM_CHANNELS: usize = 4;
+pub const NUM_CHANNELS: usize = 6;
 
-/// Reserve vector (15 elements):
-///   [0-2]:  supply_W/G/B normalized by initial supply
-///   [3-5]:  cur_cap_W/G/B normalized by initial supply
-///   [6-8]:  opp_cap_W/G/B normalized by initial supply
-///   [9-11]: min(cur_cap_W,3)/3, min(cur_cap_G,3)/3, min(cur_cap_B,3)/3  (combo win progress)
-///   [12-14]: min(opp_cap_W,3)/3, min(opp_cap_G,3)/3, min(opp_cap_B,3)/3
-pub const RESERVE_SIZE: usize = 15;
+/// Reserve vector (22 elements):
+///   [0-2]:   supply_W/G/B normalized by initial supply (6, 8, 10)
+///   [3-5]:   cur_cap_W/G/B normalized by initial supply
+///   [6-8]:   opp_cap_W/G/B normalized by initial supply
+///   [9-11]:  cur combo win progress: min(cap, 3) / 3 per color
+///   [12-14]: opp combo win progress: min(cap, 3) / 3 per color
+///   [15-17]: cur single-color win progress: cap_W/4, cap_G/5, cap_B/6
+///   [18-20]: opp single-color win progress: cap_W/4, cap_G/5, cap_B/6
+///   [21]:    rings remaining / 37
+pub const RESERVE_SIZE: usize = 22;
 
 /// Initial supply for normalization: [6, 8, 10].
 const INITIAL_SUPPLY: [f32; 3] = [6.0, 8.0, 10.0];
@@ -67,6 +72,20 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut
         }
     }
 
+    // Channel 4: capture turn flag (1.0 everywhere if capture turn)
+    if board.is_capture_turn() {
+        let ch4_start = 4 * GRID_SIZE * GRID_SIZE;
+        for i in 0..(GRID_SIZE * GRID_SIZE) {
+            board_out[ch4_start + i] = 1.0;
+        }
+    }
+
+    // Channel 5: mid-capture source position
+    if let Some(pos) = board.mid_capture_pos() {
+        let (row, col) = hex_to_grid(pos);
+        board_out[5 * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col] = 1.0;
+    }
+
     // Reserve vector: supply and captures normalized by initial supply per color
     reserve_out[0] = supply[0] as f32 / INITIAL_SUPPLY[0];
     reserve_out[1] = supply[1] as f32 / INITIAL_SUPPLY[1];
@@ -84,6 +103,19 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut
     reserve_out[12] = captures[opp_pi][0].min(3) as f32 / 3.0;
     reserve_out[13] = captures[opp_pi][1].min(3) as f32 / 3.0;
     reserve_out[14] = captures[opp_pi][2].min(3) as f32 / 3.0;
+    // Single-color win progress: cap / threshold (4W, 5G, 6B)
+    const WIN_SINGLE: [f32; 3] = [4.0, 5.0, 6.0];
+    reserve_out[15] = captures[cur_pi][0] as f32 / WIN_SINGLE[0];
+    reserve_out[16] = captures[cur_pi][1] as f32 / WIN_SINGLE[1];
+    reserve_out[17] = captures[cur_pi][2] as f32 / WIN_SINGLE[2];
+    reserve_out[18] = captures[opp_pi][0] as f32 / WIN_SINGLE[0];
+    reserve_out[19] = captures[opp_pi][1] as f32 / WIN_SINGLE[1];
+    reserve_out[20] = captures[opp_pi][2] as f32 / WIN_SINGLE[2];
+    // Rings remaining on board (occupied + empty) / 37
+    let rings_remaining = board.rings().iter()
+        .filter(|r| !matches!(r, Ring::Removed))
+        .count();
+    reserve_out[21] = rings_remaining as f32 / BOARD_SIZE as f32;
 }
 
 #[cfg(test)]

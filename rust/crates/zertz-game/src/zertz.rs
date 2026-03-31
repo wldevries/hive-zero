@@ -854,6 +854,17 @@ impl ZertzBoard {
         self.mid_capture.is_some()
     }
 
+    /// Whether this is a capture turn (first-hop or mid-capture).
+    /// Captures are mandatory in Zertz, so if any hop exists, it's a capture turn.
+    pub fn is_capture_turn(&self) -> bool {
+        self.mid_capture.is_some() || !self.generate_first_hops().is_empty()
+    }
+
+    /// Position of the active marble during mid-capture, if any.
+    pub fn mid_capture_pos(&self) -> Option<Hex> {
+        self.mid_capture.map(|mc| mc.marble_pos)
+    }
+
     /// Get all legal moves for the current position.
     /// During mid-capture, only continuation hops from the active marble.
     pub fn legal_moves(&self) -> Vec<ZertzMove> {

@@ -74,6 +74,10 @@ fn main() {
             let sims: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(800);
             run_mcts_demo(sims);
         }
+        "stats" => {
+            let path = args.get(2).map(|s| s.as_str()).unwrap_or("../games/zertz");
+            replay::run_stats(path);
+        }
         "playback" => {
             // playback [path] [--auto <ms>]
             // Randomly picks a game from the boardspace library and plays through it.
@@ -85,10 +89,11 @@ fn main() {
             replay::run_playback(path, auto_ms);
         }
         _ => {
-            eprintln!("Usage: zertz-zero <random [N]|replay [path]|process [path]|debug <zip> <sgf>|mcts [sims]|playback [path] [--auto <ms>]>");
+            eprintln!("Usage: zertz-zero <random [N]|replay [path]|process [path]|stats [path]|debug <zip> <sgf>|mcts [sims]|playback [path] [--auto <ms>]>");
             eprintln!("  random [N]              - play N random games (default 100)");
             eprintln!("  replay [path]           - replay boardspace games from zip dir/file");
             eprintln!("  process [path]          - compute ELO rankings, write CSVs");
+            eprintln!("  stats [path]            - aggregate game statistics, write game_stats.txt");
             eprintln!("  debug <zip> <sgf>       - verbose replay of a single game from zip");
             eprintln!("  mcts [sims]             - run MCTS demo with uniform policy (default 800)");
             eprintln!("  playback [path]         - interactively step through a random boardspace game");

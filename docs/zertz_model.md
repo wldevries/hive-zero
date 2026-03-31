@@ -4,12 +4,12 @@
 
 ```mermaid
 graph TD
-    BT["Board Tensor<br/>(B, 4, 7, 7)"]:::input --> CAT["Concat"]
-    RV["Reserve Vector<br/>(B, 15)"]:::input --> BC["Broadcast to (B, 15, 7, 7)"]
+    BT["Board Tensor<br/>(B, 6, 7, 7)"]:::input --> CAT["Concat"]
+    RV["Reserve Vector<br/>(B, 22)"]:::input --> BC["Broadcast to (B, 22, 7, 7)"]
     BC --> CAT
-    CAT --> INPUT["(B, 19, 7, 7)"]
+    CAT --> INPUT["(B, 28, 7, 7)"]
 
-    INPUT --> IC["Input Conv2d(19 → C, 3x3) + BN + ReLU"]
+    INPUT --> IC["Input Conv2d(28 → C, 3x3) + BN + ReLU"]
     IC --> RB["4 × ResBlock<br/>Conv3x3 + BN + ReLU + Conv3x3 + BN + skip"]
     RB --> TRUNK["Trunk Output<br/>(B, C, 7, 7)"]
 
@@ -34,8 +34,8 @@ graph TD
 
 Tensor dimensions use `(B, ...)` notation where B = batch size.
 
-### Board tensor: `(B, 4, 7, 7)`
-4 spatial channels on a 7x7 grid (radius-3 hex board, 37 valid cells out of 49; rows 4-5-6-7-6-5-4 left-aligned).
+### Board tensor: `(B, 6, 7, 7)`
+6 spatial channels on a 7x7 grid (radius-3 hex board, 37 valid cells out of 49; rows 4-5-6-7-6-5-4 left-aligned).
 
 | Channel | Content |
 |---------|---------|
@@ -43,10 +43,12 @@ Tensor dimensions use `(B, ...)` notation where B = batch size.
 | 1 | Grey marbles |
 | 2 | Black marbles |
 | 3 | Empty rings (valid cell, no marble) |
+| 4 | Capture turn flag (1.0 on all cells if first-hop capture or mid-capture) |
+| 5 | Mid-capture source (1.0 at the active marble's position during mid-capture) |
 
-Removed rings and off-board cells are all zeros.
+Removed rings and off-board cells are all zeros. Channels 4-5 are zero during placement turns.
 
-### Reserve vector: `(B, 15)`
+### Reserve vector: `(B, 22)`
 All values normalized to [0, 1]. Current-player-relative.
 
 | Index | Content | Normalization |
@@ -56,14 +58,17 @@ All values normalized to [0, 1]. Current-player-relative.
 | 6-8 | Opponent captures (W, G, B) | / initial supply |
 | 9-11 | Current player combo win progress (W, G, B) | min(captures, 3) / 3 |
 | 12-14 | Opponent combo win progress (W, G, B) | min(captures, 3) / 3 |
+| 15-17 | Current player single-color win progress (W, G, B) | cap / threshold (4, 5, 6) |
+| 18-20 | Opponent single-color win progress (W, G, B) | cap / threshold (4, 5, 6) |
+| 21 | Rings remaining on board | / 37 |
 
 ## Trunk
 
 Reserve vector is broadcast spatially and concatenated with the board tensor before the trunk:
-`(B, 4, 7, 7)` + `(B, 15, 7, 7)` → `(B, 19, 7, 7)`
+`(B, 6, 7, 7)` + `(B, 22, 7, 7)` → `(B, 28, 7, 7)`
 
 ```
-Input Conv2d(19 → C, 3x3, pad=1) + BN + ReLU
+Input Conv2d(28 → C, 3x3, pad=1) + BN + ReLU
   ↓
 N × ResBlock:
   Conv2d(C → C, 3x3, pad=1) + BN + ReLU
@@ -100,9 +105,9 @@ Operates directly on the trunk output (reserve info already in trunk via input).
 
 ```
 Conv2d(C → 1, 1x1) + BN + ReLU           → (B, 1, 7, 7)
-Flatten                                   → (B, 49)
-Linear(49 → 256) + ReLU                   → (B, 256)
-Linear(256 → 1) + tanh                    → (B, 1)
+Flatten                                  → (B, 49)
+Linear(49 → 256) + ReLU                  → (B, 256)
+Linear(256 → 1) + tanh                   → (B, 1)
 ```
 Output range: `[-1, 1]`
 
@@ -111,7 +116,7 @@ MSE: `(predicted - target)^2`, weighted 5x in total loss.
 
 ## Total Loss
 ```
-loss = policy_loss + 5.0 * value_loss
+loss = policy_loss + 1.0 * value_loss
 ```
 
 ## Training Config
@@ -126,7 +131,7 @@ loss = policy_loss + 5.0 * value_loss
 | Playout cap randomization | Yes (KataGo-style) |
 
 ## Parameter Count (C=128, N=4)
-- Input conv: 19 × 128 × 3 × 3 = 21,888
+- Input conv: 28 × 128 × 3 × 3 = 32,256
 - Per ResBlock: 2 × (128 × 128 × 3 × 3) = 294,912 → 4 blocks = 1,179,648
 - BatchNorm (trunk): (128 × 2) × (4+1) = 1,280
 - Policy heads: 128×4 + 128×1 + 128×1 + biases = 768 + 6 = 774
