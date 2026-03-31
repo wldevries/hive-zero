@@ -55,8 +55,8 @@ def run_battle(
 
     meta1 = ckpt1.get("metadata", {})
     meta2 = ckpt2.get("metadata", {})
-    iter1 = ckpt1.get("iteration", "?")
-    iter2 = ckpt2.get("iteration", "?")
+    iter1 = ckpt1.get("generation", "?")
+    iter2 = ckpt2.get("generation", "?")
 
     sims1 = meta1.get("simulations", simulations or 800)
     sims2 = meta2.get("simulations", simulations or 800)

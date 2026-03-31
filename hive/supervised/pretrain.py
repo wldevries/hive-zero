@@ -295,7 +295,7 @@ class Pretrainer:
         lr: float = 0.005,
         grid_size: int = 23,
     ):
-        from ..nn.model import create_model, load_checkpoint, save_checkpoint
+        from ..nn.model import create_model, load_checkpoint, save_checkpoint, export_onnx
         from ..nn.training import Trainer
 
         self.model_path = model_path
@@ -304,7 +304,7 @@ class Pretrainer:
 
         if os.path.exists(model_path):
             self.model, ckpt = load_checkpoint(model_path)
-            it = ckpt.get("iteration", 0)
+            it = ckpt.get("generation", 0)
             blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
             gs = self.model.grid_size
@@ -468,6 +468,8 @@ class Pretrainer:
                 "value_loss": losses.get("value_loss", 0),
             }
             self._save_checkpoint(self.model, self.model_path, epoch, epoch_losses)
+            onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
+            export_onnx(self.model, onnx_path)
             ckpt_path = os.path.join(checkpoint_dir, f"{model_name}_epoch{epoch}.pt")
             self._save_checkpoint(self.model, ckpt_path, epoch, epoch_losses)
             print(f"  Model saved → {self.model_path}  |  Checkpoint → {ckpt_path}")

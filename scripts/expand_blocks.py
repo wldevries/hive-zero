@@ -23,9 +23,9 @@ def expand_hive(src_path, dst_path, add_blocks):
     old_blocks = len(model.res_blocks)
     channels = model.input_conv.out_channels
     grid_size = model.grid_size
-    iteration = ckpt.get("iteration", 0)
+    iteration = ckpt.get("generation", 0)
 
-    print(f"Loaded: {old_blocks} blocks, {channels} channels, grid={grid_size}, iteration {iteration}")
+    print(f"Loaded: {old_blocks} blocks, {channels} channels, grid={grid_size}, generation {iteration}")
 
     new_model = HiveNet(num_blocks=old_blocks + add_blocks, channels=channels, grid_size=grid_size)
 
@@ -61,9 +61,9 @@ def expand_zertz(src_path, dst_path, add_blocks):
     model, ckpt = load_checkpoint(src_path)
     old_blocks = len(model.res_blocks)
     channels = model.input_conv.out_channels
-    iteration = ckpt.get("iteration", 0)
+    iteration = ckpt.get("generation", 0)
 
-    print(f"Loaded: {old_blocks} blocks, {channels} channels, iteration {iteration}")
+    print(f"Loaded: {old_blocks} blocks, {channels} channels, generation {iteration}")
 
     new_model = ZertzNet(num_blocks=old_blocks + add_blocks, channels=channels)
 

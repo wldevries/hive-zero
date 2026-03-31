@@ -22,7 +22,7 @@ _cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
 
 from shared.training_log import csv_comment
 
-from ..nn.model import ZertzNet, create_model, load_checkpoint, save_checkpoint
+from ..nn.model import ZertzNet, create_model, load_checkpoint, save_checkpoint, export_onnx
 from ..nn.training import Trainer, ZertzDataset
 
 LOG_HEADER = (
@@ -60,16 +60,16 @@ class SelfPlayTrainer:
         self.model_name = os.path.splitext(os.path.basename(model_path))[0]
         self.checkpoint_dir = checkpoint_dir
         self.device = device
-        self.start_iteration = 0
+        self.start_generation = 0
 
         if os.path.exists(model_path):
             self.model, ckpt = load_checkpoint(model_path)
-            self.start_iteration = ckpt.get("iteration", 0)
+            self.start_generation = ckpt.get("generation", 0)
             blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"Resumed from {model_path} (gen {self.start_iteration}, "
+                f"Resumed from {model_path} (gen {self.start_generation}, "
                 f"{blocks} blocks, {ch} channels, {params / 1e6:.2f}M params)"
             )
         else:
@@ -175,12 +175,12 @@ class SelfPlayTrainer:
         }
 
         start_time = time.time()
-        generation = self.start_iteration
+        generation = self.start_generation
 
         while True:
             if (
                 num_generations is not None
-                and (generation - self.start_iteration) >= num_generations
+                and (generation - self.start_generation) >= num_generations
             ):
                 break
             if time_limit_minutes is not None:
@@ -352,6 +352,8 @@ class SelfPlayTrainer:
             # --- Save model ---
             metadata = {**train_params, "lr": lr}
             save_checkpoint(self.model, self.model_path, iteration=generation, metadata=metadata)
+            onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
+            export_onnx(self.model, onnx_path)
             print(f"  Model saved: {self.model_path} (gen {generation})")
 
             # --- Checkpoint ---

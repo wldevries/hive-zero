@@ -64,13 +64,13 @@ def widen_hive(src_path, dst_path, new_channels):
     old_channels = model.input_conv.out_channels
     num_blocks = len(model.res_blocks)
     grid_size = model.grid_size
-    iteration = ckpt.get("iteration", 0)
+    iteration = ckpt.get("generation", 0)
 
     if new_channels <= old_channels:
         print(f"Error: new channels ({new_channels}) must be > old channels ({old_channels})")
         sys.exit(1)
 
-    print(f"Loaded: {num_blocks} blocks, {old_channels} channels, grid={grid_size}, iteration {iteration}")
+    print(f"Loaded: {num_blocks} blocks, {old_channels} channels, grid={grid_size}, generation {iteration}")
 
     new_model = HiveNet(num_blocks=num_blocks, channels=new_channels, grid_size=grid_size)
 
@@ -125,13 +125,13 @@ def widen_zertz(src_path, dst_path, new_channels):
     model, ckpt = load_checkpoint(src_path)
     old_channels = model.input_conv.out_channels
     num_blocks = len(model.res_blocks)
-    iteration = ckpt.get("iteration", 0)
+    iteration = ckpt.get("generation", 0)
 
     if new_channels <= old_channels:
         print(f"Error: new channels ({new_channels}) must be > old channels ({old_channels})")
         sys.exit(1)
 
-    print(f"Loaded: {num_blocks} blocks, {old_channels} channels, iteration {iteration}")
+    print(f"Loaded: {num_blocks} blocks, {old_channels} channels, generation {iteration}")
 
     new_model = ZertzNet(num_blocks=num_blocks, channels=new_channels)
 

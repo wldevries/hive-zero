@@ -32,7 +32,7 @@ _cc = lambda v: _c(v, colorama.Fore.CYAN)     # scores / percentages
 from ..encoding.move_encoder import policy_size as compute_policy_size
 
 
-from ..nn.model import HiveNet, create_model, save_checkpoint, load_checkpoint
+from ..nn.model import HiveNet, create_model, save_checkpoint, load_checkpoint, export_onnx
 from ..nn.training import HiveDataset, Trainer
 
 
@@ -50,16 +50,16 @@ class SelfPlayTrainer:
         self.num_blocks = num_blocks
         self.channels = channels
         self.grid_size = grid_size
-        self.start_iteration = 0
+        self.start_generation = 0
 
         if os.path.exists(model_path):
             self.model, ckpt = load_checkpoint(model_path)
-            self.start_iteration = ckpt.get("iteration", 0)
+            self.start_generation = ckpt.get("generation", 0)
             blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
             gs = self.model.grid_size
             params = sum(p.numel() for p in self.model.parameters())
-            print(f"Resumed from {model_path} (iteration {self.start_iteration}, "
+            print(f"Resumed from {model_path} (generation {self.start_generation}, "
                   f"{blocks} blocks, {ch} channels, grid {gs}x{gs}, {params/1e6:.2f}M params)")
             if blocks != num_blocks or ch != channels:
                 print(f"  WARNING: --blocks {num_blocks} --channels {channels} ignored "
@@ -72,8 +72,8 @@ class SelfPlayTrainer:
         self.model.to(device)
         self.trainer = Trainer(self.model, device=device, lr=lr)
 
-    def run(self, num_iterations: int | None = None, games_per_iter: int = 10,
-            simulations: int = 100, epochs_per_iter: int = 1,
+    def run(self, num_generations: int | None = None, games_per_gen: int = 10,
+            simulations: int = 100, epochs_per_gen: int = 1,
             batch_size: int = 64, max_moves: int = 200,
             time_limit_minutes: float | None = None,
             eval_config: dict | None = None,
@@ -102,7 +102,7 @@ class SelfPlayTrainer:
         Args:
             eval_config: If set, run evaluation vs Mzinga periodically.
                 Keys: every, games, simulations, mzinga_path, mzinga_time.
-            checkpoint_eval_games: Games per checkpoint self-eval (default 2x games_per_iter).
+            checkpoint_eval_games: Games per checkpoint self-eval (default 2x games_per_gen).
             checkpoint_eval_simulations: Simulations for checkpoint eval.
                 Defaults to same as `simulations`.
             playout_cap_p: Probability of full search per turn (0=disabled,
@@ -118,21 +118,21 @@ class SelfPlayTrainer:
         # Training log (CSV, truncated on fresh start)
         self._log_path = f"{self.model_name}_log.csv"
         log_path = self._log_path
-        if self.start_iteration == 0:
+        if self.start_generation == 0:
             with open(log_path, "w") as f:
                 f.write(LOG_HEADER)
 
         # Bootstrap eval: if best_model.pt doesn't exist, run it immediately
-        # rather than waiting until the next checkpoint iteration.
+        # rather than waiting until the next checkpoint generation.
         if checkpoint_eval:
             best_model_path = os.path.join(os.path.dirname(self.model_path) or ".", "best_model.pt")
             if not os.path.exists(best_model_path):
                 eval_sims = checkpoint_eval_simulations if checkpoint_eval_simulations is not None else simulations
-                eval_games = checkpoint_eval_games if checkpoint_eval_games is not None else 2 * games_per_iter
-                self._run_checkpoint_eval(self.start_iteration, eval_sims, eval_games)
+                eval_games = checkpoint_eval_games if checkpoint_eval_games is not None else 2 * games_per_gen
+                self._run_checkpoint_eval(self.start_generation, eval_sims, eval_games)
 
-        # Replay buffer: keep last `replay_window` iterations of data (worst case: all games hit max_moves)
-        replay_buffer = HiveDataset(max_size=replay_window * games_per_iter * max_moves,
+        # Replay buffer: keep last `replay_window` generations of data (worst case: all games hit max_moves)
+        replay_buffer = HiveDataset(max_size=replay_window * games_per_gen * max_moves,
                                      grid_size=self.grid_size)
         replay_buffer.augment_symmetry = augment_symmetry
 
@@ -151,10 +151,10 @@ class SelfPlayTrainer:
 
         import itertools
         interrupted = False
-        for i in (range(num_iterations) if num_iterations is not None else itertools.count()):
+        for i in (range(num_generations) if num_generations is not None else itertools.count()):
             if interrupted:
                 break
-            iteration = self.start_iteration + i + 1
+            generation = self.start_generation + i + 1
 
             if time_limit_minutes is not None:
                 elapsed = (time.time() - start_time) / 60.0
@@ -174,7 +174,7 @@ class SelfPlayTrainer:
             elif random_opening_moves:
                 rand_str = f"{random_opening_moves[0]}-{random_opening_moves[1]}" if isinstance(random_opening_moves, tuple) else random_opening_moves
                 opening_label = f" [rand={rand_str}]"
-            print(f"\n=== Iteration {iteration} [{mode_label}]{cap_label}{opening_label}{elapsed_str} ===")
+            print(f"\n=== Generation {generation} [{mode_label}]{cap_label}{opening_label}{elapsed_str} ===")
 
             # Generate self-play games
             iter_start = time.time()
@@ -183,7 +183,7 @@ class SelfPlayTrainer:
 
             _book_opening_moves = random_opening_moves[1] if isinstance(random_opening_moves, tuple) else random_opening_moves
             opening_sequences = _make_opening_sequences(
-                games_per_iter, opening_book, boardspace_frac, _book_opening_moves,
+                games_per_gen, opening_book, boardspace_frac, _book_opening_moves,
             ) if opening_book else None
 
             sp = RustParallelSelfPlay(
@@ -203,7 +203,7 @@ class SelfPlayTrainer:
             self.model.eval()
             self.model.bfloat16()
             try:
-                result = sp.play_games(games_per_iter, opening_sequences=opening_sequences)
+                result = sp.play_games(games_per_gen, opening_sequences=opening_sequences)
             except BaseException as e:
                 if not isinstance(e, KeyboardInterrupt) and "KeyboardInterrupt" not in str(e):
                     raise
@@ -264,7 +264,7 @@ class SelfPlayTrainer:
             if result.calibration_would_resign > 0:
                 print(f"  Calibration: {result.calibration_would_resign}/{result.calibration_total} "
                       f"would resign, {result.calibration_false_positives} false positives")
-            print(f"  {games_per_iter} games: {total_positions} new positions{fast_str} "
+            print(f"  {games_per_gen} games: {total_positions} new positions{fast_str} "
                   f"(play={play_time:.1f}s, buf={buf_time:.1f}s, "
                   f"{total_positions / max(game_time, 0.1):.0f} pos/s), "
                   f"buffer: {len(replay_buffer)}")
@@ -291,7 +291,7 @@ class SelfPlayTrainer:
             # Train on replay buffer
             train_start = time.time()
             try:
-                for epoch in range(epochs_per_iter):
+                for epoch in range(epochs_per_gen):
                     losses = self.trainer.train_epoch(replay_buffer, batch_size=batch_size)
                     lr = self.trainer._current_lr
                     total_s = f"{losses['total_loss']:.4f}"
@@ -315,7 +315,7 @@ class SelfPlayTrainer:
             avg_dl = sum(decisive_lengths) / len(decisive_lengths) if decisive_lengths else 0
             med_dl = decisive_lengths[len(decisive_lengths) // 2] if decisive_lengths else 0
             with open(log_path, "a") as f:
-                f.write(f"{iteration},MCTS,{simulations},"
+                f.write(f"{generation},MCTS,{simulations},"
                         f"{wins_w},{wins_b},{draws},{resignations},{total_positions},"
                         f"{len(replay_buffer)},{losses['total_loss']:.6f},"
                         f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
@@ -332,22 +332,24 @@ class SelfPlayTrainer:
                 "value_loss": losses["value_loss"],
                 "samples": len(replay_buffer),
             }
-            save_checkpoint(self.model, self.model_path, iteration, metadata)
+            save_checkpoint(self.model, self.model_path, generation, metadata)
+            onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
+            export_onnx(self.model, onnx_path)
 
-            if iteration % checkpoint_every == 0:
-                ckpt_path = os.path.join(self.checkpoint_dir, f"{self.model_name}_iter{iteration}.pt")
-                save_checkpoint(self.model, ckpt_path, iteration, metadata)
+            if generation % checkpoint_every == 0:
+                ckpt_path = os.path.join(self.checkpoint_dir, f"{self.model_name}_gen{generation:05d}.pt")
+                save_checkpoint(self.model, ckpt_path, generation, metadata)
                 print(f"  Checkpoint saved to {ckpt_path}")
                 if checkpoint_eval:
                     eval_sims = checkpoint_eval_simulations if checkpoint_eval_simulations is not None else simulations
-                    eval_games = checkpoint_eval_games if checkpoint_eval_games is not None else 2 * games_per_iter
-                    self._run_checkpoint_eval(iteration, eval_sims, eval_games)
+                    eval_games = checkpoint_eval_games if checkpoint_eval_games is not None else 2 * games_per_gen
+                    self._run_checkpoint_eval(generation, eval_sims, eval_games)
 
-            print(f"  Model saved to {self.model_path} (iteration {iteration})")
+            print(f"  Model saved to {self.model_path} (generation {generation})")
 
             # Periodic evaluation vs Mzinga
-            if eval_config and iteration % eval_config["every"] == 0:
-                self._run_eval(eval_config, iteration, replay_buffer)
+            if eval_config and generation % eval_config["every"] == 0:
+                self._run_eval(eval_config, generation, replay_buffer)
 
 
     def _load_opening_book(
@@ -386,25 +388,25 @@ class SelfPlayTrainer:
         print(f"  Opening book: {len(sequences)} games loaded ({errors} errors)")
         return sequences
 
-    def _find_prev_checkpoint(self, current_iteration: int) -> str | None:
-        """Return path of the latest checkpoint strictly before current_iteration, or None."""
+    def _find_prev_checkpoint(self, current_generation: int) -> str | None:
+        """Return path of the latest checkpoint strictly before current_generation, or None."""
         import glob as _glob
-        prefix = f"{self.model_name}_iter"
-        pattern = os.path.join(self.checkpoint_dir, f"{prefix}*.pt")
+        import re
+        pattern = os.path.join(self.checkpoint_dir, f"{self.model_name}_*.pt")
         candidates = []
+        # Match both old _iter{N} and new _gen{N} formats
+        pat = re.compile(rf"^{re.escape(self.model_name)}_(?:iter|gen)(\d+)\.pt$")
         for path in _glob.glob(pattern):
-            name = os.path.basename(path)
-            try:
-                iter_num = int(name[len(prefix):-len(".pt")])
-                if iter_num < current_iteration:
-                    candidates.append((iter_num, path))
-            except ValueError:
-                pass
+            m = pat.match(os.path.basename(path))
+            if m:
+                num = int(m.group(1))
+                if num < current_generation:
+                    candidates.append((num, path))
         if not candidates:
             return None
         return max(candidates, key=lambda x: x[0])[1]
 
-    def _run_checkpoint_eval(self, iteration: int, simulations: int, num_games: int):
+    def _run_checkpoint_eval(self, generation: int, simulations: int, num_games: int):
         """Pit current model against best_model.pt. Winner becomes new best and model.pt."""
         import shutil
         from ..eval.engine_match import ModelEngine, run_parallel_match
@@ -414,22 +416,22 @@ class SelfPlayTrainer:
 
         if not os.path.exists(best_model_path):
             # Bootstrap: pit model.pt against the previous checkpoint to find the best.
-            prev_ckpt = self._find_prev_checkpoint(iteration)
+            prev_ckpt = self._find_prev_checkpoint(generation)
             if prev_ckpt is None:
                 print(f"  No best_model.pt and no prior checkpoint — current model is now best")
-                save_checkpoint(self.model, best_model_path, iteration)
+                save_checkpoint(self.model, best_model_path, generation)
                 shutil.copy2(best_model_path, self.model_path)
                 return
             print(f"\n--- Bootstrap eval: model.pt vs {os.path.basename(prev_ckpt)} ({num_games} games) ---")
             self.model.eval()
             engine1 = ModelEngine(model=self.model, device=self.device,
-                                  simulations=simulations, name=f"current-i{iteration}")
+                                  simulations=simulations, name=f"current-g{generation}")
             prev_model, prev_ckpt_data = load_checkpoint(prev_ckpt)
-            prev_iter = prev_ckpt_data.get("iteration", 0)
+            prev_gen = prev_ckpt_data.get("generation", 0)
             prev_model.to(self.device)
             prev_model.eval()
             engine2 = ModelEngine(model=prev_model, device=self.device,
-                                  simulations=simulations, name=f"prev-i{prev_iter}")
+                                  simulations=simulations, name=f"prev-g{prev_gen}")
             try:
                 summary = run_parallel_match(engine1, engine2, num_games=num_games, max_moves=200, verbose=False, show_progress=True)
             finally:
@@ -438,23 +440,23 @@ class SelfPlayTrainer:
             w, d, l = summary["engine1_wins"], summary["draws"], summary["engine2_wins"]
             if score >= 0.5:
                 winner_label = engine1.name
-                save_checkpoint(self.model, best_model_path, iteration)
+                save_checkpoint(self.model, best_model_path, generation)
             else:
                 winner_label = engine2.name
                 shutil.copy2(prev_ckpt, best_model_path)
             shutil.copy2(best_model_path, self.model_path)
             print(f"  {_cg(w)}W/{_cy(d)}D/{_cr(l)}L → best model: {winner_label}")
             with open(self._log_path, "a") as f:
-                f.write(f"{iteration},pit-bootstrap,{simulations},{w},{l},{d},0,0,0,"
+                f.write(f"{generation},pit-bootstrap,{simulations},{w},{l},{d},0,0,0,"
                         f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
             return
 
-        print(f"\n--- Checkpoint eval: challenger (i{iteration}) vs best ({num_games} games) ---")
+        print(f"\n--- Checkpoint eval: challenger (g{generation}) vs best ({num_games} games) ---")
         self.model.eval()
 
         challenger = ModelEngine(
             model=self.model, device=self.device,
-            simulations=simulations, name=f"challenger-i{iteration}",
+            simulations=simulations, name=f"challenger-g{generation}",
         )
         best_model, _ = load_checkpoint(best_model_path)
         best_model.to(self.device)
@@ -474,8 +476,8 @@ class SelfPlayTrainer:
         print(f"  {_cg(w)}W/{_cy(d)}D/{_cr(l)}L (score: {_cc(f'{score:.0%}')})", end="")
 
         if score >= WIN_THRESHOLD:
-            save_checkpoint(self.model, best_model_path, iteration)
-            print(f" → NEW BEST (iter {iteration})")
+            save_checkpoint(self.model, best_model_path, generation)
+            print(f" → NEW BEST (gen {generation})")
         else:
             print(f" → no improvement (defender holds)")
 
@@ -483,20 +485,20 @@ class SelfPlayTrainer:
         shutil.copy2(best_model_path, self.model_path)
 
         with open(self._log_path, "a") as f:
-            f.write(f"{iteration},pit,{simulations},{w},{l},{d},0,0,0,"
+            f.write(f"{generation},pit,{simulations},{w},{l},{d},0,0,0,"
                     f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
 
-    def _run_eval(self, eval_config: dict, iteration: int, replay_buffer=None):
+    def _run_eval(self, eval_config: dict, generation: int, replay_buffer=None):
         """Run evaluation games against Mzinga and feed samples back."""
         from ..eval.engine_match import EngineConfig, UHPProcess, ModelEngine, run_match
 
-        print(f"\n--- Eval vs Mzinga (iter {iteration}) ---")
+        print(f"\n--- Eval vs Mzinga (gen {generation}) ---")
         self.model.eval()
 
         our_engine = ModelEngine(
             model=self.model, device=self.device,
             simulations=eval_config["simulations"],
-            name=f"HiveZero-i{iteration}",
+            name=f"HiveZero-g{generation}",
         )
 
         t = eval_config["mzinga_time"]
@@ -532,7 +534,7 @@ class SelfPlayTrainer:
 
             # Log to CSV
             with open(self._log_path, "a") as f:
-                f.write(f"{iteration},eval,{eval_config['simulations']},{w},{l},{d},0,{len(samples)},"
+                f.write(f"{generation},eval,{eval_config['simulations']},{w},{l},{d},0,{len(samples)},"
                         f"{len(replay_buffer) if replay_buffer else 0},"
                         f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n")
         except Exception as e:
@@ -623,7 +625,7 @@ def main():
     """Entry point for self-play training."""
     import argparse
     parser = argparse.ArgumentParser(description="Hive self-play training")
-    parser.add_argument("--iterations", type=int, default=100)
+    parser.add_argument("--generations", type=int, default=100)
     parser.add_argument("--games", type=int, default=10)
     parser.add_argument("--simulations", type=int, default=100)
     parser.add_argument("--epochs", type=int, default=5)
@@ -640,8 +642,8 @@ def main():
         num_blocks=args.blocks, channels=args.channels
     )
     trainer.run(
-        num_iterations=args.iterations, games_per_iter=args.games,
-        simulations=args.simulations, epochs_per_iter=args.epochs,
+        num_generations=args.generations, games_per_gen=args.games,
+        simulations=args.simulations, epochs_per_gen=args.epochs,
         batch_size=args.batch_size,
     )
 

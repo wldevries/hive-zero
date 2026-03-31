@@ -19,16 +19,16 @@ def main():
 
     # Training
     train_parser = subparsers.add_parser("train", help="Run self-play training")
-    train_parser.add_argument("--iterations", type=int, default=None,
-                              help="Number of training iterations (default: infinite)")
+    train_parser.add_argument("--generations", type=int, default=None,
+                              help="Number of training generations (default: infinite)")
     train_parser.add_argument("--time-limit", type=float, default=None,
-                              help="Training time limit in minutes (stops after current iteration)")
+                              help="Training time limit in minutes (stops after current generation)")
     train_parser.add_argument("--games", type=int, default=20,
-                              help="Self-play games per iteration")
+                              help="Self-play games per generation")
     train_parser.add_argument("--simulations", type=int, default=100,
                               help="MCTS simulations per move")
     train_parser.add_argument("--epochs", type=int, default=1,
-                              help="Training epochs per iteration")
+                              help="Training epochs per generation")
     train_parser.add_argument("--training-batch-size", type=int, default=512)
     train_parser.add_argument("--model", type=str, default="model.pt",
                               help="Model file path")
@@ -43,17 +43,17 @@ def main():
     train_parser.add_argument("--max-moves", type=int, default=200,
                               help="Max moves per self-play game")
     train_parser.add_argument("--replay-window", type=int, default=8,
-                              help="Replay buffer size in iterations (buffer = replay-window * games * max-moves)")
+                              help="Replay buffer size in generations (buffer = replay-window * games * max-moves)")
     train_parser.add_argument("--playout-cap-p", type=float, default=0.0,
                               help="Playout cap randomization: probability of full search per turn (0=disabled, 0.25=recommended)")
     train_parser.add_argument("--fast-cap", type=int, default=20,
                               help="Simulations for fast-search turns when playout cap is enabled (default: 20)")
     train_parser.add_argument("--checkpoint-every", type=int, default=10,
-                              help="Save checkpoint every N iterations (default: 10)")
+                              help="Save checkpoint every N generations (default: 10)")
     train_parser.add_argument("--checkpoint-eval", action="store_true",
                               help="Run model-vs-best eval at each checkpoint")
     train_parser.add_argument("--eval-every", type=int, default=0,
-                              help="Run evaluation vs Mzinga every N iterations (0=disabled)")
+                              help="Run evaluation vs Mzinga every N generations (0=disabled)")
     train_parser.add_argument("--eval-games", type=int, default=6,
                               help="Number of evaluation games per eval round")
     train_parser.add_argument("--eval-simulations", type=int, default=200,
@@ -228,8 +228,8 @@ def main():
                 "mzinga_time": args.mzinga_time,
             }
         trainer.run(
-            num_iterations=args.iterations, games_per_iter=args.games,
-            simulations=args.simulations, epochs_per_iter=args.epochs,
+            num_generations=args.generations, games_per_gen=args.games,
+            simulations=args.simulations, epochs_per_gen=args.epochs,
             batch_size=args.training_batch_size, max_moves=args.max_moves,
             time_limit_minutes=args.time_limit,
             eval_config=eval_config,

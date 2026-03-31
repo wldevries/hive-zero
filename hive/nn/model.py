@@ -115,7 +115,7 @@ def create_model(num_blocks: int = 10, channels: int = 128,
     return HiveNet(num_blocks=num_blocks, channels=channels, grid_size=grid_size)
 
 
-def save_checkpoint(model: HiveNet, path: str, iteration: int = 0,
+def save_checkpoint(model: HiveNet, path: str, generation: int = 0,
                     metadata: dict | None = None):
     """Save model with training metadata."""
     checkpoint = {
@@ -124,10 +124,43 @@ def save_checkpoint(model: HiveNet, path: str, iteration: int = 0,
         "num_blocks": model.res_blocks.__len__(),
         "channels": model.input_conv.out_channels,
         "grid_size": model.grid_size,
-        "iteration": iteration,
+        "generation": generation,
         "metadata": metadata or {},
     }
     torch.save(checkpoint, path)
+
+
+def export_onnx(model: HiveNet, path: str):
+    """Export model to ONNX format for Rust-native inference via ort.
+
+    Inputs: board_tensor (B, 39, G, G), reserve (B, 10)
+    Outputs: policy (B, 11*G*G), value (B, 1), aux (B, 6)
+    """
+    import os
+    g = model.grid_size
+    was_training = model.training
+    model.eval()
+    dummy_board = torch.zeros(1, NUM_CHANNELS, g, g)
+    dummy_reserve = torch.zeros(1, RESERVE_SIZE)
+    torch.onnx.export(
+        model,
+        (dummy_board, dummy_reserve),
+        path,
+        input_names=["board", "reserve"],
+        output_names=["policy", "value", "aux"],
+        dynamic_axes={
+            "board": {0: "batch"},
+            "reserve": {0: "batch"},
+            "policy": {0: "batch"},
+            "value": {0: "batch"},
+            "aux": {0: "batch"},
+        },
+        opset_version=17,
+    )
+    if was_training:
+        model.train()
+    size_mb = os.path.getsize(path) / (1024 * 1024)
+    print(f"  ONNX exported: {path} ({size_mb:.1f} MB)")
 
 
 def load_checkpoint(path: str) -> tuple[HiveNet, dict]:
@@ -146,7 +179,10 @@ def load_checkpoint(path: str) -> tuple[HiveNet, dict]:
                   if k in model_state and v.shape == model_state[k].shape}
     model.load_state_dict(compatible, strict=False)
     if "model_state_dict" not in checkpoint:
-        checkpoint = {"iteration": 0, "metadata": {}}
+        checkpoint = {"generation": 0, "metadata": {}}
+    # Backwards compat: old checkpoints use "iteration"
+    if "generation" not in checkpoint and "iteration" in checkpoint:
+        checkpoint["generation"] = checkpoint.pop("iteration")
 
     model.eval()
     return model, checkpoint

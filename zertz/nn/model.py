@@ -93,17 +93,50 @@ def create_model(num_blocks: int = 6, channels: int = 64) -> ZertzNet:
     return ZertzNet(num_blocks=num_blocks, channels=channels)
 
 
-def save_checkpoint(model: ZertzNet, path: str, iteration: int = 0,
+def save_checkpoint(model: ZertzNet, path: str, generation: int = 0,
                     metadata: dict | None = None):
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "game": "zertz",
         "num_blocks": len(model.res_blocks),
         "channels": model.input_conv.out_channels,
-        "iteration": iteration,
+        "generation": generation,
         "metadata": metadata or {},
     }
     torch.save(checkpoint, path)
+
+
+def export_onnx(model: ZertzNet, path: str):
+    """Export model to ONNX format for Rust-native inference via ort.
+
+    Inputs: board_tensor (B, 6, 7, 7), reserve (B, 22)
+    Outputs: place (B, 196), cap_source (B, 49), cap_dest (B, 49), value (B, 1)
+    """
+    import os
+    was_training = model.training
+    model.eval()
+    dummy_board = torch.zeros(1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
+    dummy_reserve = torch.zeros(1, RESERVE_SIZE)
+    torch.onnx.export(
+        model,
+        (dummy_board, dummy_reserve),
+        path,
+        input_names=["board", "reserve"],
+        output_names=["place", "cap_source", "cap_dest", "value"],
+        dynamic_axes={
+            "board": {0: "batch"},
+            "reserve": {0: "batch"},
+            "place": {0: "batch"},
+            "cap_source": {0: "batch"},
+            "cap_dest": {0: "batch"},
+            "value": {0: "batch"},
+        },
+        opset_version=17,
+    )
+    if was_training:
+        model.train()
+    size_mb = os.path.getsize(path) / (1024 * 1024)
+    print(f"  ONNX exported: {path} ({size_mb:.1f} MB)")
 
 
 def load_checkpoint(path: str) -> tuple[ZertzNet, dict]:
@@ -117,6 +150,9 @@ def load_checkpoint(path: str) -> tuple[ZertzNet, dict]:
                   if k in model_state and v.shape == model_state[k].shape}
     model.load_state_dict(compatible, strict=False)
     if "model_state_dict" not in checkpoint:
-        checkpoint = {"iteration": 0, "metadata": {}}
+        checkpoint = {"generation": 0, "metadata": {}}
+    # Backwards compat: old checkpoints use "iteration"
+    if "generation" not in checkpoint and "iteration" in checkpoint:
+        checkpoint["generation"] = checkpoint.pop("iteration")
     model.eval()
     return model, checkpoint
