@@ -392,7 +392,7 @@ impl PySelfPlaySession {
         progress_fn: Option<&Bound<'_, PyAny>>,
         opening_sequences: Option<Vec<Vec<String>>>,
         onnx_path: Option<String>,
-    ) -> PySelfPlayResult {
+    ) -> PyResult<PySelfPlayResult> {
         let opening_sequences = opening_sequences.unwrap_or_default();
         let mut backend = if let Some(ref path) = onnx_path {
             InferenceBackend::Native {
@@ -779,6 +779,7 @@ impl PySelfPlaySession {
                 };
                 let _ = pfn.call1((finished_count, num_games as u32, num_active, total_m, num_resigned, max_turn));
             }
+            py.check_signals()?;
         }
 
         // --- Build training samples with outcomes ---
@@ -872,7 +873,7 @@ impl PySelfPlaySession {
             }
         }
 
-        PySelfPlayResult {
+        Ok(PySelfPlayResult {
             grid_size,
             board_data: result_board_data,
             reserve_data: result_reserve_data,
@@ -897,7 +898,7 @@ impl PySelfPlaySession {
             calibration_would_resign: cal_would_resign,
             calibration_false_positives: cal_false_pos,
             final_games: games,
-        }
+        })
     }
 }
 

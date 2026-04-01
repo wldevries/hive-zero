@@ -52,6 +52,8 @@ def main():
     train_parser.add_argument("--comment", type=str, default="")
     train_parser.add_argument("--augment-symmetry", action="store_true",
                               help="Apply random D6 hex symmetry augmentation during training (12x effective data)")
+    train_parser.add_argument("--use-ort", action="store_true",
+                              help="Use Rust-native ORT inference instead of Python eval (requires .onnx model)")
 
     # Play mode
     play_parser = subparsers.add_parser("play", help="Play against the AI")
@@ -120,6 +122,7 @@ def main():
             time_limit_minutes=args.time_limit,
             comment=args.comment,
             augment_symmetry=args.augment_symmetry,
+            use_ort=args.use_ort,
         )
     elif args.command == "battle":
         from zertz.selfplay.battle import run_battle

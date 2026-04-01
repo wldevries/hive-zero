@@ -546,6 +546,7 @@ impl PyZertzSelfPlaySession {
                 let active_count = active.iter().filter(|&&a| a).count() as u32;
                 pfn.call1((finished_count, num_games as u32, active_count, total_moves)).ok();
             }
+            py.check_signals()?;
         }
 
         // --- Build training data ---
@@ -825,6 +826,7 @@ impl PyZertzSelfPlaySession {
                 let active_count = active.iter().filter(|&&a| a).count() as u32;
                 pfn.call1(py, (finished_count, num_games as u32, active_count, total_moves)).ok();
             }
+            py.check_signals()?;
         }
 
         Ok(PyZertzBattleResult { wins_model1, wins_model2, draws, wins_white, wins_grey, wins_black, wins_combo, game_lengths })

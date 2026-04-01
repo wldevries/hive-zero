@@ -143,6 +143,7 @@ class SelfPlayTrainer:
         time_limit_minutes: Optional[float] = None,
         comment: str = "",
         augment_symmetry: bool = False,
+        use_ort: bool = False,
     ):
         from hive_engine import ZertzSelfPlaySession
 
@@ -206,6 +207,16 @@ class SelfPlayTrainer:
                 f"\n=== {_cc(self.model_name)}  Gen {generation}  [sims={simulations}{cap_str}] ==="
             )
 
+            onnx_path = None
+            if use_ort:
+                onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
+                if not os.path.exists(onnx_path):
+                    print(f"  ORT requested but {onnx_path} not found, exporting...")
+                    export_onnx(self.model, onnx_path)
+
+            if not use_ort:
+                self.model.eval()
+
             # --- Self-play ---
             session = ZertzSelfPlaySession(
                 num_games=games_per_gen,
@@ -220,7 +231,6 @@ class SelfPlayTrainer:
                 fast_cap=fast_cap,
                 play_batch_size=play_batch_size,
             )
-            self.model.eval()
 
             pbar = tqdm(total=max_moves, unit="turn", desc="  Self-play", leave=False)
             turn = [0]
@@ -233,7 +243,10 @@ class SelfPlayTrainer:
                 pbar.set_postfix(active=f"{active}/{total}")
 
             play_start = time.time()
-            result = session.play_games(self._eval_fn, progress_fn=progress_fn)
+            if onnx_path:
+                result = session.play_games(progress_fn=progress_fn, onnx_path=onnx_path)
+            else:
+                result = session.play_games(self._eval_fn, progress_fn=progress_fn)
             play_time = time.time() - play_start
             pbar.update(pbar.total - pbar.n)
             pbar.close()

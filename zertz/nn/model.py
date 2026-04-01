@@ -115,8 +115,8 @@ def export_onnx(model: ZertzNet, path: str):
     import os
     was_training = model.training
     model.eval()
-    dummy_board = torch.zeros(1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
-    dummy_reserve = torch.zeros(1, RESERVE_SIZE)
+    dummy_board = torch.zeros(1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE).cuda()
+    dummy_reserve = torch.zeros(1, RESERVE_SIZE).cuda()
     input_names = ["board", "reserve"]
     output_names = ["place", "cap_source", "cap_dest", "value"]
     torch.onnx.export(
