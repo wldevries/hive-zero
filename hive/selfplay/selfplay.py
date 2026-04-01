@@ -4,8 +4,10 @@ from __future__ import annotations
 import torch
 import numpy as np
 import os
+import time
 from typing import Optional
 
+from shared.lr_scheduler import LRScheduler
 from shared.training_log import csv_comment
 
 LOG_HEADER = (
@@ -39,9 +41,14 @@ from ..nn.training import HiveDataset, Trainer
 class SelfPlayTrainer:
     """Full self-play training pipeline."""
 
-    def __init__(self, model_path: str = "model.pt", device: str = "cpu",
-                 num_blocks: int = 6, channels: int = 64,
-                 checkpoint_dir: str = "checkpoints", lr: float = 0.02,
+    def __init__(self,
+                 model_path: str = "model.pt",
+                 device: str = "cpu",
+                 num_blocks: int = 6,
+                 channels: int = 64,
+                 checkpoint_dir: str = "checkpoints",
+                 lr: float = 0.02,
+                 lr_scheduler: Optional[LRScheduler] = None,
                  grid_size: int = 23):
         self.model_path = model_path
         self.model_name = os.path.splitext(os.path.basename(model_path))[0]
@@ -70,6 +77,7 @@ class SelfPlayTrainer:
             print(f"Created new model ({num_blocks} blocks, {channels} channels, grid {grid_size}x{grid_size})")
 
         self.model.to(device)
+        self.lr_scheduler = lr_scheduler
         self.trainer = Trainer(self.model, device=device, lr=lr)
 
     def run(self, num_generations: int | None = None, games_per_gen: int = 10,
@@ -115,7 +123,7 @@ class SelfPlayTrainer:
                 all turns are full). KataGo-style playout cap randomization.
             fast_cap: Number of simulations for fast-search turns.
         """
-        import time
+        from .rust_selfplay import RustParallelSelfPlay
         start_time = time.time()
         self._comment = comment
 
@@ -167,18 +175,22 @@ class SelfPlayTrainer:
                 opening_games_csv, opening_boardspace_dir, opening_min_elo,
             )
 
-        cap_label = ""
+        sim_label = ""
         if playout_cap_p > 0:
-            cap_label = f" [sims={simulations}, fast={fast_cap}, p={playout_cap_p}]"
+            sim_label = f" [sims={simulations}, fast={fast_cap}, p={playout_cap_p}]"
         else:
-            cap_label = f" [sims={simulations}]"
+            sim_label = f" [sims={simulations}]"
 
-        import itertools
+        generation = self.start_generation
+
         interrupted = False
-        for i in (range(num_generations) if num_generations is not None else itertools.count()):
+        while True:
             if interrupted:
                 break
-            generation = self.start_generation + i + 1
+
+            if (num_generations is not None) and generation >= self.start_generation + num_generations:
+                print(f"\nReached target of {num_generations} generations, stopping.")
+                break
 
             if time_limit_minutes is not None:
                 elapsed = (time.time() - start_time) / 60.0
@@ -186,11 +198,25 @@ class SelfPlayTrainer:
                     print(f"\nTime limit reached ({elapsed:.1f}m / {time_limit_minutes}m)")
                     break
 
+            generation += 1
+            gen_start = time.time()
+
+            # Apply LR schedule
+            if self.lr_scheduler is not None:
+                scheduled_lr = self.lr_scheduler.get_scheduled_lr(generation)
+                if scheduled_lr is not None:
+                    for pg in self.trainer.optimizer.param_groups:
+                        pg['lr'] = scheduled_lr
+
+            # Header
             elapsed_str = f" [{(time.time() - start_time) / 60:.1f}m]" if time_limit_minutes else ""
 
-            from .rust_selfplay import RustParallelSelfPlay
-
             mode_label = "MCTS"
+            sim_label = (
+                f" [sims={simulations}, fast={fast_cap}, p={playout_cap_p}]"
+                if playout_cap_p > 0
+                else f" [sims={simulations}]"
+            )
             opening_label = ""
             if opening_book:
                 rand_str = f"{random_opening_moves[0]}-{random_opening_moves[1]}" if isinstance(random_opening_moves, tuple) else random_opening_moves
@@ -198,10 +224,11 @@ class SelfPlayTrainer:
             elif random_opening_moves:
                 rand_str = f"{random_opening_moves[0]}-{random_opening_moves[1]}" if isinstance(random_opening_moves, tuple) else random_opening_moves
                 opening_label = f" [rand={rand_str}]"
-            print(f"\n=== Generation {generation} [{mode_label}]{cap_label}{opening_label}{elapsed_str} ===")
+            print(
+                f"\n=== {_cc(self.model_name)}  Gen {generation} [{mode_label}]{sim_label}{opening_label}{elapsed_str} ==="
+            )
 
             # Generate self-play games
-            iter_start = time.time()
             torch.cuda.empty_cache()
             _print_vram("pre-play")
 
@@ -248,7 +275,7 @@ class SelfPlayTrainer:
                 break
             if not use_ort:
                 self.model.float()
-            play_time = time.time() - iter_start
+            play_time = time.time() - gen_start
             _print_vram("post-play")
 
             # Insert training data into replay buffer
@@ -268,7 +295,7 @@ class SelfPlayTrainer:
 
             total_positions = result.num_samples
             fast_positions = sum(value_only_flags)
-            game_time = time.time() - iter_start
+            game_time = time.time() - gen_start
             fast_str = ""
             if fast_positions > 0:
                 fast_str = f" ({fast_positions} value-only)"

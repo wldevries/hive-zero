@@ -2,6 +2,8 @@
 
 import argparse
 
+from shared.lr_scheduler import lr_scheduler_from_string
+
 
 def main():
     parser = argparse.ArgumentParser(description="Zertz AI Engine")
@@ -85,13 +87,9 @@ def main():
     elif args.command == "train":
         from zertz.selfplay.selfplay import SelfPlayTrainer
 
-        lr_schedule = None
+        lr_scheduler = None
         if args.lr_schedule:
-            lr_schedule = []
-            for pair in args.lr_schedule.split(","):
-                it, lr_val = pair.split(":")
-                lr_schedule.append((int(it), float(lr_val)))
-            lr_schedule.sort()
+            lr_scheduler = lr_scheduler_from_string(args.lr_schedule)
 
         trainer = SelfPlayTrainer(
             model_path=args.model,
@@ -99,7 +97,7 @@ def main():
             num_blocks=args.blocks,
             channels=args.channels,
             lr=args.lr,
-            lr_schedule=lr_schedule,
+            lr_scheduler=lr_scheduler,
             checkpoint_dir=args.checkpoint_dir,
         )
         trainer.run(

@@ -20,6 +20,7 @@ _cy = lambda v: f"{colorama.Fore.YELLOW}{_BRIGHT}{v}{_RESET}"
 _cr = lambda v: f"{colorama.Fore.RED}{_BRIGHT}{v}{_RESET}"
 _cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
 
+from shared.lr_scheduler import LRScheduler
 from shared.training_log import csv_comment
 
 from ..nn.model import ZertzNet, create_model, load_checkpoint, save_checkpoint, export_onnx
@@ -53,7 +54,7 @@ class SelfPlayTrainer:
         num_blocks: int = 6,
         channels: int = 64,
         lr: float = 0.02,
-        lr_schedule: Optional[list[tuple[int, float]]] = None,
+        lr_scheduler: Optional[LRScheduler] = None,
         checkpoint_dir: str = "checkpoints/zertz",
     ):
         self.model_path = model_path
@@ -80,26 +81,8 @@ class SelfPlayTrainer:
             )
 
         self.model.to(device)
-        self.lr_schedule = lr_schedule
+        self.lr_scheduler = lr_scheduler
         self.trainer = Trainer(model=self.model, device=device, lr=lr)
-
-    def _get_scheduled_lr(self, iteration: int) -> Optional[float]:
-        """Return the LR for this iteration by linearly interpolating between waypoints."""
-        if not self.lr_schedule:
-            return None
-        # Before first waypoint or at/after last: clamp
-        if iteration <= self.lr_schedule[0][0]:
-            return self.lr_schedule[0][1]
-        if iteration >= self.lr_schedule[-1][0]:
-            return self.lr_schedule[-1][1]
-        # Find surrounding waypoints and interpolate
-        for i in range(len(self.lr_schedule) - 1):
-            it0, lr0 = self.lr_schedule[i]
-            it1, lr1 = self.lr_schedule[i + 1]
-            if it0 <= iteration <= it1:
-                t = (iteration - it0) / (it1 - it0)
-                return lr0 + t * (lr1 - lr0)
-        return self.lr_schedule[-1][1]
 
     def _eval_fn(self, board_tensor_np, reserve_np):
         """NN inference callback for Rust self-play.
@@ -189,13 +172,14 @@ class SelfPlayTrainer:
                     break
 
             generation += 1
-            iter_start = time.time()
+            gen_start = time.time()
 
             # Apply LR schedule
-            scheduled_lr = self._get_scheduled_lr(generation)
-            if scheduled_lr is not None:
-                for pg in self.trainer.optimizer.param_groups:
-                    pg['lr'] = scheduled_lr
+            if self.lr_scheduler is not None:
+                scheduled_lr = self.lr_scheduler.get_scheduled_lr(generation)
+                if scheduled_lr is not None:
+                    for pg in self.trainer.optimizer.param_groups:
+                        pg['lr'] = scheduled_lr
 
             # Header
             cap_str = (
@@ -342,7 +326,7 @@ class SelfPlayTrainer:
                     f"lr={lr:.4f})"
                 )
 
-                duration = time.time() - iter_start
+                duration = time.time() - gen_start
 
                 # --- Log each epoch ---
                 with open(log_path, "a") as f:
@@ -364,7 +348,7 @@ class SelfPlayTrainer:
 
             # --- Save model ---
             metadata = {**train_params, "lr": lr}
-            save_checkpoint(self.model, self.model_path, iteration=generation, metadata=metadata)
+            save_checkpoint(self.model, self.model_path, generation=generation, metadata=metadata)
             onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
             export_onnx(self.model, onnx_path)
             print(f"  Model saved: {self.model_path} (gen {generation})")
@@ -374,7 +358,7 @@ class SelfPlayTrainer:
                 ckpt_path = os.path.join(
                     self.checkpoint_dir, f"{self.model_name}_gen{generation:05d}.pt"
                 )
-                save_checkpoint(self.model, ckpt_path, iteration=generation, metadata=metadata)
+                save_checkpoint(self.model, ckpt_path, generation=generation, metadata=metadata)
                 print(f"  Checkpoint saved to {ckpt_path}")
 
         print(f"\nTraining complete after gen {generation}. Final model: {self.model_path}")
