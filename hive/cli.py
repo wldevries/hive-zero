@@ -3,6 +3,9 @@
 import argparse
 import sys
 
+from shared import lr_scheduler
+from shared.lr_scheduler import lr_scheduler_from_string
+
 
 def main():
     parser = argparse.ArgumentParser(description="Hive AI Engine")
@@ -76,6 +79,10 @@ def main():
                               help="Dirichlet noise weight (default: 0.25)")
     train_parser.add_argument("--lr", type=float, default=0.02,
                               help="Learning rate for SGD optimizer (default: 0.02)")
+    train_parser.add_argument(
+        "--lr-schedule", type=str, default=None,
+        help="Stepped LR schedule as iter:lr pairs, e.g. '0:0.1,20:0.02,40:0.01'. Overrides --lr."
+    )
     train_parser.add_argument("--resign-threshold", type=float, default=-0.97,
                               help="Resign when value < threshold for N consecutive moves (default: -0.97)")
     train_parser.add_argument("--resign-min-moves", type=int, default=20,
@@ -222,12 +229,23 @@ def main():
                   max_moves=args.max_moves, verbose=args.verbose)
 
     elif args.command == "train":
+        from hive.selfplay.selfplay import SelfPlayTrainer
+
         if args.resign_threshold > 0:
             parser.error(f"--resign-threshold must be negative (e.g. -0.95), got {args.resign_threshold}")
-        from hive.selfplay.selfplay import SelfPlayTrainer
+        
+        
+        lr_scheduler = None
+        if args.lr_schedule:
+            lr_scheduler = lr_scheduler_from_string(args.lr_schedule)
+
         trainer = SelfPlayTrainer(
-            model_path=args.model, device=args.device,
-            num_blocks=args.blocks, channels=args.channels, lr=args.lr,
+            model_path=args.model, 
+            device=args.device,
+            num_blocks=args.blocks, 
+            channels=args.channels, 
+            lr=args.lr,
+            lr_scheduler=lr_scheduler,
             grid_size=args.grid_size,
         )
         eval_config = None
@@ -240,9 +258,12 @@ def main():
                 "mzinga_time": args.mzinga_time,
             }
         trainer.run(
-            num_generations=args.generations, games_per_gen=args.games,
-            simulations=args.simulations, epochs_per_gen=args.epochs,
-            batch_size=args.training_batch_size, max_moves=args.max_moves,
+            num_generations=args.generations,
+            games_per_gen=args.games,
+            simulations=args.simulations,
+            epochs_per_gen=args.epochs,
+            batch_size=args.training_batch_size,
+            max_moves=args.max_moves,
             time_limit_minutes=args.time_limit,
             eval_config=eval_config,
             checkpoint_every=args.checkpoint_every,

@@ -1,16 +1,16 @@
 /// Encode/decode Hive moves for the factorized (source, dest) neural network policy.
 /// Must produce identical layout to Python move_encoder.py.
 ///
-/// Policy layout — flat vector of size 7 * grid_size * grid_size:
+/// Policy layout — flat vector of size 11 * grid_size * grid_size:
 ///
-///   [0 .. 5*G*G)      — placement head (piece_type × dest)
+///   [0 .. 5*G*G)       — placement head (piece_type × dest)
 ///       place_offset = type_idx * G*G + row*G + col
 ///
-///   [5*G*G .. 6*G*G)  — movement source head (src hex)
+///   [5*G*G .. 6*G*G)   — movement source head (src hex)
 ///       src_offset = 5*G*G + row*G + col
 ///
-///   [6*G*G .. 7*G*G)  — movement destination head (dest hex)
-///       dst_offset = 6*G*G + row*G + col
+///   [6*G*G .. 11*G*G)  — movement destination head (piece_type × dest)
+///       dst_offset = 6*G*G + type_idx*G*G + row*G + col
 ///
 /// MCTS prior computation:
 ///   Placement(type, dest):    prior = policy[place_offset]
@@ -26,8 +26,8 @@ use crate::game::{Game, Move};
 use core_game::game::PolicyIndex;
 
 /// Conceptual "channels" for policy_size = NUM_POLICY_CHANNELS * G * G:
-///   5 placement channels + 1 src channel + 1 dst channel.
-pub const NUM_POLICY_CHANNELS: usize = 7;
+///   5 placement channels + 1 src channel + 5 dst channels (piece_type × dest).
+pub const NUM_POLICY_CHANNELS: usize = 11;
 /// Number of placement head channels (one per piece type).
 pub const NUM_PLACE_CHANNELS: usize = 5;
 
@@ -72,13 +72,15 @@ pub fn encode_placement(piece: Piece, dest: Hex, grid_size: usize) -> Option<Pol
     Some(PolicyIndex::Single(type_idx * grid_size * grid_size + cell(row, col, grid_size)))
 }
 
-/// Encode a movement move (src, dest) as a Sum PolicyIndex.
+/// Encode a movement move (src, piece, dest) as a Sum PolicyIndex.
+/// The dst index is piece-type-conditioned: dst_offset + type_idx * G² + cell.
 /// Returns None if either hex is out of grid bounds.
-pub fn encode_movement(src: Hex, dest: Hex, grid_size: usize) -> Option<PolicyIndex> {
+pub fn encode_movement(src: Hex, piece: Piece, dest: Hex, grid_size: usize) -> Option<PolicyIndex> {
     let (sr, sc) = hex_to_grid(src, grid_size)?;
     let (dr, dc) = hex_to_grid(dest, grid_size)?;
     let src_idx = src_section_offset(grid_size) + cell(sr, sc, grid_size);
-    let dst_idx = dst_section_offset(grid_size) + cell(dr, dc, grid_size);
+    let type_idx = piece.piece_type() as usize;
+    let dst_idx = dst_section_offset(grid_size) + type_idx * grid_size * grid_size + cell(dr, dc, grid_size);
     Some(PolicyIndex::Sum(src_idx, dst_idx))
 }
 
@@ -90,8 +92,8 @@ pub fn encode_game_move(mv: &Move, grid_size: usize) -> Option<PolicyIndex> {
         // Placement
         encode_placement(piece, dest, grid_size)
     } else {
-        // Movement
-        encode_movement(mv.from.unwrap(), dest, grid_size)
+        // Movement — piece type conditions the destination channel
+        encode_movement(mv.from.unwrap(), piece, dest, grid_size)
     }
 }
 
@@ -161,13 +163,16 @@ mod tests {
 
     #[test]
     fn test_encode_movement_sum() {
-        // Movement (1,0) -> (0,0): src=(11,12), dst=(11,11)
-        match encode_movement((1, 0), (0, 0), GS) {
+        // Movement ant (1,0) -> (0,0): src=(11,12), dst=(11,11)
+        // Ant type_idx = 4
+        let ant = Piece::new(PieceColor::White, PieceType::Ant, 1);
+        match encode_movement((1, 0), ant, (0, 0), GS) {
             Some(PolicyIndex::Sum(a, b)) => {
                 let src_off = src_section_offset(GS);
                 let dst_off = dst_section_offset(GS);
                 assert_eq!(a, src_off + 11 * GS + 12); // (1,0) -> row11, col12
-                assert_eq!(b, dst_off + 11 * GS + 11); // (0,0) -> center
+                // Ant type_idx=4, dest=(0,0) -> center (row11, col11)
+                assert_eq!(b, dst_off + 4 * GS * GS + 11 * GS + 11);
             }
             other => panic!("expected Sum, got {:?}", other),
         }

@@ -4,18 +4,22 @@
 
 ```mermaid
 graph TD
-    BT["Board Tensor<br/>(B, 39, G, G)"]:::input --> CAT["Concat"]
+    BT["Board Tensor<br/>(B, 19, G, G)"]:::input --> CAT["Concat"]
     RV["Reserve Vector<br/>(B, 10)"]:::input --> BC["Broadcast to (B, 10, G, G)"]
     BC --> CAT
-    CAT --> INPUT["(B, 49, G, G)"]
+    CAT --> INPUT["(B, 29, G, G)"]
 
-    INPUT --> IC["Input Conv2d(49 → C, 3x3) + BN + ReLU"]
-    IC --> RB["10 × ResBlock<br/>Conv3x3 + BN + ReLU + Conv3x3 + BN + skip"]
+    INPUT --> IC["Input Conv2d(29 → C, 3x3) + BN + ReLU"]
+    IC --> RB["N × ResBlock<br/>Conv3x3 + BN + ReLU + Conv3x3 + BN + skip"]
     RB --> TRUNK["Trunk Output<br/>(B, C, G, G)"]
 
     TRUNK --> PC["Conv1x1(C → C) + BN + ReLU"]
-    PC --> PO["Conv1x1(C → 11)"]
-    PO --> PFLAT["Policy logits<br/>(B, 11·G·G)"]:::output
+    PC --> PPL["Conv1x1(C → 5)<br/>place head (B, 5, G, G)"]
+    PC --> PSR["Conv1x1(C → 1)<br/>src head (B, 1, G, G)"]
+    PC --> PDT["Conv1x1(C → 5)<br/>dst head (B, 5, G, G)"]
+    PPL --> PFLAT["Concat + Flatten<br/>(B, 11·G·G)"]:::output
+    PSR --> PFLAT
+    PDT --> PFLAT
 
     TRUNK --> VC["Conv1x1(C → 1) + BN + ReLU"]
     VC --> VF["Flatten → (B, G·G)"]
@@ -35,15 +39,16 @@ graph TD
 
 Tensor dimensions use `(B, ...)` notation where B = batch size.
 
-### Board tensor: `(B, 39, G, G)`
-39 channels on a GxG grid (default G=23, configurable, must be odd). Flat-top axial hex coordinates centered on the grid. All channels are current-player-relative.
+### Board tensor: `(B, 19, G, G)`
+19 channels on a GxG grid (default G=23, configurable, must be odd). Flat-top axial hex coordinates centered on the grid. All channels are current-player-relative. Piece channels use type identity (no per-individual numbering).
 
 | Channels | Content |
 |----------|---------|
-| 0-10 | Current player's pieces at base level (0=Queen, 1=Spider1, 2=Spider2, 3=Beetle1, 4=Beetle2, 5=Grasshopper1, 6=Grasshopper2, 7=Grasshopper3, 8=Ant1, 9=Ant2, 10=Ant3) |
-| 11-21 | Opponent's pieces at base level (same indexing) |
-| 22-37 | Stacked beetles by identity and depth: channel = 22 + player_offset(0 or 8) + (beetle_num-1)*4 + (depth-1). 4 beetles x 4 depths = 16 channels |
-| 38 | Stack height at each cell |
+| 0-4 | Current player's pieces at base level (0=Queen, 1=Spider, 2=Beetle, 3=Grasshopper, 4=Ant) |
+| 5-9 | Opponent's pieces at base level (same type ordering) |
+| 10-13 | Current player's stacked beetle depth: ch 10+d = beetle stacked at depth d+1 (generic, not per-individual) |
+| 14-17 | Opponent's stacked beetle depth (same scheme) |
+| 18 | Stack height at each cell |
 
 ### Reserve vector: `(B, 10)`
 Current-player-relative piece counts remaining in hand.
@@ -56,10 +61,10 @@ Current-player-relative piece counts remaining in hand.
 ## Trunk
 
 Reserve vector is broadcast spatially and concatenated with the board tensor before the trunk:
-`(B, 39, G, G)` + `(B, 10, G, G)` → `(B, 49, G, G)`
+`(B, 19, G, G)` + `(B, 10, G, G)` → `(B, 29, G, G)`
 
 ```
-Input Conv2d(49 -> C, 3x3, pad=1) + BN + ReLU
+Input Conv2d(29 -> C, 3x3, pad=1) + BN + ReLU
   |
 N x ResBlock:
   Conv2d(C -> C, 3x3, pad=1) + BN + ReLU
@@ -71,17 +76,35 @@ Output: `(B, C, G, G)`
 Default config: **C=128, N=10** (10 residual blocks, 128 channels)
 
 ## Policy Head
+
+Three separate output heads off a shared conv+BN layer, concatenated into a flat vector:
+
 ```
 Conv2d(C -> C, 1x1) + BN + ReLU           -> (B, C, G, G)
-Conv2d(C -> 11, 1x1)                      -> (B, 11, G, G)
-Flatten                                   -> (B, 11*G*G)
+  ├── Conv2d(C -> 5, 1x1)  place head     -> (B, 5, G, G)   [placement: piece_type × dest]
+  ├── Conv2d(C -> 1, 1x1)  src head       -> (B, 1, G, G)   [movement source]
+  └── Conv2d(C -> 5, 1x1)  dst head       -> (B, 5, G, G)   [movement dest: piece_type × dest]
+Concat + Flatten                          -> (B, 11*G*G)
 ```
-11 output channels = piece index within current player (0=Queen, 1-2=Spider, 3-4=Beetle, 5-7=Grasshopper, 8-10=Ant). Destination cell stores the logit. Same channel scheme covers both placement and movement.
 
-Default policy size: 11 x 23 x 23 = **5,819**
+### Policy layout (flat vector of size 11·G·G)
+
+| Range | Head | Content |
+|-------|------|---------|
+| `[0 .. 5·G²)` | place | Placement logits: `type_idx * G² + dest_cell` |
+| `[5·G² .. 6·G²)` | src | Movement source logit: `src_cell` |
+| `[6·G² .. 11·G²)` | dst | Movement dest logit: `type_idx * G² + dest_cell` |
+
+### MCTS prior computation
+- **Placement**(type, dest): `prior = policy[type * G² + dest_cell]`
+- **Movement**(src, piece, dest): `prior = policy[5*G² + src_cell] + policy[6*G² + type*G² + dest_cell]`
+
+The type-conditioned destination allows the network to independently learn that "ant arrives here" vs "queen arrives here" have different strategic value.
+
+Default policy size: 11 × 23 × 23 = **5,819**
 
 ### Policy loss
-Cross-entropy over the full policy vector.
+Three independent soft cross-entropy losses (place head, src head, dst head), summed. Zero-target entries contribute zero loss. Movement training data is marginalized: visit counts accumulate to both the src cell and the (type, dest) cell.
 
 ## Value Head
 
@@ -137,10 +160,10 @@ loss = policy_loss + value_loss + aux_loss
 | Playout cap randomization | Yes (KataGo-style) |
 
 ## Parameter Count (C=128, N=10, G=17)
-- Input conv: 49 x 128 x 3 x 3 = 56,448
-- Per ResBlock: 2 x (128 x 128 x 3 x 3) = 294,912 -> 10 blocks = 2,949,120
+- Input conv: 29 x 128 x 3 x 3 = 33,408
+- Per ResBlock: 2 x (128 x 128 x 3 x 3) = 294,912 → 10 blocks = 2,949,120
 - BatchNorm (trunk): (128 x 2) x (10+1) = 2,816
-- Policy head: 128x128x1 + 128x11x1 + BN = 16,384 + 1,408 + 256 = 18,048
+- Policy head: 128x128x1 + BN(128) + Conv(128→5) + Conv(128→1) + Conv(128→5) = 16,384 + 256 + 645 + 129 + 645 = 18,059
 - Value head: 128x1x1 + 289x256 + 256x1 + BN = 128 + 73,984 + 256 + 2 = 74,370
 - Aux head: 128x1x1 + 289x64 + 64x6 + BN = 128 + 18,496 + 384 + 2 = 19,010
 - **Total: ~3.1M parameters**

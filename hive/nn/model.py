@@ -24,8 +24,8 @@ class HiveNet(nn.Module):
         - Policy heads (factorized, concatenated into flat vector):
             place_head: Conv1x1(C -> 5, G, G)  [placement: piece_type x dest]
             src_head:   Conv1x1(C -> 1, G, G)  [movement source]
-            dst_head:   Conv1x1(C -> 1, G, G)  [movement destination]
-          Output: flat (batch, 7*G*G) = [place | src | dst]
+            dst_head:   Conv1x1(C -> 5, G, G)  [movement destination: piece_type x dest]
+          Output: flat (batch, 11*G*G) = [place | src | dst]
         - Value head: conv(1x1) -> flatten -> FC(256) -> tanh
         - Auxiliary head: conv(1x1) -> flatten -> FC(64) -> sigmoid
           (my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility)
@@ -51,14 +51,14 @@ class HiveNet(nn.Module):
         # Factorized policy heads — share a common conv+BN, then 3 output heads.
         # place_head: (B, 5, G, G)  - one channel per piece type, placement logits
         # src_head:   (B, 1, G, G)  - movement source logits
-        # dst_head:   (B, 1, G, G)  - movement destination logits
-        # Concatenated flat output: (B, 7*G*G) = [place | src | dst]
+        # dst_head:   (B, 5, G, G)  - movement destination logits (piece_type x dest)
+        # Concatenated flat output: (B, 11*G*G) = [place | src | dst]
         self.num_policy_channels = NUM_POLICY_CHANNELS
         self.policy_conv = nn.Conv2d(channels, channels, 1, bias=False)
         self.policy_bn = nn.BatchNorm2d(channels)
         self.policy_place = nn.Conv2d(channels, NUM_PLACE_CHANNELS, 1)  # (B,5,G,G)
         self.policy_src   = nn.Conv2d(channels, 1, 1)                   # (B,1,G,G)
-        self.policy_dst   = nn.Conv2d(channels, 1, 1)                   # (B,1,G,G)
+        self.policy_dst   = nn.Conv2d(channels, NUM_PLACE_CHANNELS, 1)  # (B,5,G,G)
 
         # Value head
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
