@@ -116,6 +116,24 @@ class SelfPlayTrainer:
 
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
+        train_params = {
+            "simulations": simulations,
+            "games_per_gen": games_per_gen,
+            "epochs_per_gen": epochs_per_gen,
+            "batch_size": batch_size,
+            "max_moves": max_moves,
+            "replay_window": replay_window,
+            "playout_cap_p": playout_cap_p,
+            "fast_cap": fast_cap,
+            # "temperature": temperature,
+            # "temp_threshold": temp_threshold,
+            # "c_puct": c_puct,
+            # "dir_alpha": dir_alpha,
+            # "dir_epsilon": dir_epsilon,
+            # "play_batch_size": play_batch_size,
+            "augment_symmetry": augment_symmetry,
+        }
+
         # Training log (CSV, truncated on fresh start)
         self._log_path = f"{self.model_name}_log.csv"
         log_path = self._log_path
@@ -337,17 +355,13 @@ class SelfPlayTrainer:
                         f"{avg_gl:.1f},{med_gl},{avg_dl:.1f},{med_dl}\n")
             self._comment = ""
 
-            # Save latest model + periodic checkpoint
-            metadata = {
-                "total_loss": losses["total_loss"],
-                "policy_loss": losses["policy_loss"],
-                "value_loss": losses["value_loss"],
-                "samples": len(replay_buffer),
-            }
+            # --- Save model ---
+            metadata = {**train_params, "lr": self.trainer._current_lr}
             save_checkpoint(self.model, self.model_path, generation, metadata)
             onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
             export_onnx(self.model, onnx_path)
 
+            # --- Checkpoint ---            
             if generation % checkpoint_every == 0:
                 ckpt_path = os.path.join(self.checkpoint_dir, f"{self.model_name}_gen{generation:05d}.pt")
                 save_checkpoint(self.model, ckpt_path, generation, metadata)
