@@ -64,6 +64,16 @@ def main():
                               help="Rounds of leaf selection to accumulate before a GPU inference "
                                    "call during self-play MCTS. 1 (default) = flush every round "
                                    "(batch ≈ active game count). N > 1 = N × active games per call.")
+    train_parser.add_argument("--temperature", type=float, default=1.0,
+                              help="MCTS temperature for move selection (default: 1.0)")
+    train_parser.add_argument("--temp-threshold", type=int, default=30,
+                              help="Move number after which temperature drops to 0 (default: 30)")
+    train_parser.add_argument("--c-puct", type=float, default=1.5,
+                              help="PUCT exploration constant (default: 1.5)")
+    train_parser.add_argument("--dir-alpha", type=float, default=0.3,
+                              help="Dirichlet noise alpha (default: 0.3)")
+    train_parser.add_argument("--dir-epsilon", type=float, default=0.25,
+                              help="Dirichlet noise weight (default: 0.25)")
     train_parser.add_argument("--lr", type=float, default=0.02,
                               help="Learning rate for SGD optimizer (default: 0.02)")
     train_parser.add_argument("--resign-threshold", type=float, default=-0.97,
@@ -241,6 +251,11 @@ def main():
             fast_cap=args.fast_cap,
             replay_window=args.replay_window,
             leaf_batch_size=args.play_batch_size,
+            temperature=args.temperature,
+            temp_threshold=args.temp_threshold,
+            c_puct=args.c_puct,
+            dir_alpha=args.dir_alpha,
+            dir_epsilon=args.dir_epsilon,
             resign_threshold=args.resign_threshold,
             resign_min_moves=args.resign_min_moves,
             random_opening_moves=args.random_opening_moves,

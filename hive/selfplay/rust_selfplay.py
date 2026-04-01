@@ -20,6 +20,8 @@ class RustParallelSelfPlay:
     def __init__(self, model, device: str = "cpu",
                  simulations: int = 100, max_moves: int = 200,
                  temperature: float = 1.0, temp_threshold: int = 30,
+                 c_puct: float = 1.5,
+                 dir_alpha: float = 0.3, dir_epsilon: float = 0.25,
                  resign_threshold: float = -0.97, resign_moves: int = 5,
                  resign_min_moves: int = 20,
                  calibration_frac: float = 0.1,
@@ -35,6 +37,9 @@ class RustParallelSelfPlay:
         self.max_moves = max_moves
         self.temperature = temperature
         self.temp_threshold = temp_threshold
+        self.c_puct = c_puct
+        self.dir_alpha = dir_alpha
+        self.dir_epsilon = dir_epsilon
         self.resign_threshold = resign_threshold
         self.resign_moves = resign_moves
         self.resign_min_moves = resign_min_moves
@@ -90,7 +95,9 @@ class RustParallelSelfPlay:
             temp_threshold=self.temp_threshold,
             playout_cap_p=self.playout_cap_p,
             fast_cap=self.fast_cap,
-            c_puct=1.5,
+            c_puct=self.c_puct,
+            dir_alpha=self.dir_alpha,
+            dir_epsilon=self.dir_epsilon,
             leaf_batch_size=self.leaf_batch_size,
             resign_threshold=self.resign_threshold,
             resign_moves=self.resign_moves,

@@ -187,6 +187,8 @@ struct SelfPlayConfig {
     playout_cap_p: f32,
     fast_cap: usize,
     c_puct: f32,
+    dir_alpha: f32,
+    dir_epsilon: f32,
     leaf_batch_size: usize,
     resign_threshold: Option<f32>,
     resign_moves: u32,
@@ -340,6 +342,8 @@ impl PySelfPlaySession {
         playout_cap_p = 0.0,
         fast_cap = 20,
         c_puct = 1.5,
+        dir_alpha = 0.3,
+        dir_epsilon = 0.25,
         leaf_batch_size = 512,
         resign_threshold = None,
         resign_moves = 5,
@@ -359,6 +363,8 @@ impl PySelfPlaySession {
         playout_cap_p: f32,
         fast_cap: usize,
         c_puct: f32,
+        dir_alpha: f32,
+        dir_epsilon: f32,
         leaf_batch_size: usize,
         resign_threshold: Option<f32>,
         resign_moves: u32,
@@ -372,7 +378,7 @@ impl PySelfPlaySession {
         PySelfPlaySession {
             config: SelfPlayConfig {
                 num_games, simulations, max_moves, temperature, temp_threshold,
-                playout_cap_p, fast_cap, c_puct, leaf_batch_size,
+                playout_cap_p, fast_cap, c_puct, dir_alpha, dir_epsilon, leaf_batch_size,
                 resign_threshold, resign_moves, resign_min_moves, calibration_frac,
                 random_opening_moves_min, random_opening_moves_max, skip_timeout_games,
                 grid_size,
@@ -596,7 +602,7 @@ impl PySelfPlaySession {
             // Apply Dirichlet noise to full-search games only
             for (i, &gi) in mcts_games.iter().enumerate() {
                 if is_full[i] {
-                    searches[gi].apply_root_dirichlet(0.3, 0.25);
+                    searches[gi].apply_root_dirichlet(cfg.dir_alpha, cfg.dir_epsilon);
                 }
             }
 
