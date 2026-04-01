@@ -205,3 +205,7 @@ wasm-pack build --target web --out-dir ../../../web/wasm
 - **Visual style**: Clean, minimal. Iterate later.
 - **NN runtime**: `tract-onnx` in Rust/wasm (pure Rust, compiles to wasm32).
 - **MCTS**: Reuse existing Rust MCTS, add a simple single-game wrapper for synchronous tract inference.
+
+
+ort-tract?
+https://ort.pyke.io/backends/tract
