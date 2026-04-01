@@ -15,9 +15,72 @@ use zertz_game::move_encoding::{encode_move, POLICY_SIZE};
 use zertz_game::random_play::{classify_win, WinType};
 use zertz_game::zertz::{Marble, ZertzBoard, ZertzMove, MAX_CAPTURE_JUMPS};
 use core_game::game::{Game, Outcome, Player};
+use crate::inference::ZertzInference;
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 
+// ---------------------------------------------------------------------------
+// Inference backend
+// ---------------------------------------------------------------------------
+
+/// Wraps either a Python eval callback or a native engine (ORT, tract, …).
+enum InferenceBackend<'py> {
+    Python {
+        py: Python<'py>,
+        eval_fn: &'py Bound<'py, PyAny>,
+    },
+    Native {
+        engine: Box<dyn crate::inference::ZertzInference>,
+    },
+}
+
+/// Implement the trait so callers only need `backend.infer_batch(…)` with no
+/// match arms at each call site.
+impl crate::inference::ZertzInference for InferenceBackend<'_> {
+    fn infer_batch(
+        &mut self,
+        boards: &[f32],
+        reserves: &[f32],
+        batch_size: usize,
+        num_channels: usize,
+        grid_size: usize,
+        reserve_size: usize,
+    ) -> Result<crate::inference::ZertzInferenceResult, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            InferenceBackend::Python { py, eval_fn } => {
+                let board_flat = boards.len() / batch_size;
+                let board_arr = numpy::ndarray::Array2::from_shape_vec(
+                    (batch_size, board_flat), boards.to_vec()
+                ).unwrap();
+                let board_np = PyArray2::from_owned_array_bound(*py, board_arr);
+                let board_4d = board_np.reshape([batch_size, num_channels, grid_size, grid_size])
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+                let reserve_arr = numpy::ndarray::Array2::from_shape_vec(
+                    (batch_size, reserve_size), reserves.to_vec()
+                ).unwrap();
+                let reserve_np = PyArray2::from_owned_array_bound(*py, reserve_arr);
+
+                let result = eval_fn.call1((board_4d, reserve_np))?;
+                let tuple = result.downcast::<PyTuple>().map_err(|_|
+                    "eval_fn must return (place, cap_source, cap_dest, value) tuple"
+                )?;
+                let place: PyReadonlyArray2<f32> = tuple.get_item(0)?.extract()?;
+                let cap_source: PyReadonlyArray2<f32> = tuple.get_item(1)?.extract()?;
+                let cap_dest: PyReadonlyArray2<f32> = tuple.get_item(2)?.extract()?;
+                let value: PyReadonlyArray1<f32> = tuple.get_item(3)?.extract()?;
+                Ok(crate::inference::ZertzInferenceResult {
+                    place: place.as_slice().unwrap().to_vec(),
+                    cap_source: cap_source.as_slice().unwrap().to_vec(),
+                    cap_dest: cap_dest.as_slice().unwrap().to_vec(),
+                    value: value.as_slice().unwrap().to_vec(),
+                })
+            },
+            InferenceBackend::Native { engine } => {
+                engine.infer_batch(boards, reserves, batch_size, num_channels, grid_size, reserve_size)
+            },
+        }
+    }
+}
 // ---------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------
@@ -206,13 +269,24 @@ impl PyZertzSelfPlaySession {
     /// Play all games to completion.
     /// eval_fn(boards[N,C,H,W]) -> (policy[N,P], value[N])
     /// progress_fn(finished, total, active, total_moves) called after each turn.
-    #[pyo3(signature = (eval_fn, progress_fn=None))]
+    #[pyo3(signature = (eval_fn=None, progress_fn=None, onnx_path=None))]
     fn play_games(
         &self,
         py: Python<'_>,
-        eval_fn: &Bound<'_, PyAny>,
+        eval_fn: Option<&Bound<'_, PyAny>>,
         progress_fn: Option<&Bound<'_, PyAny>>,
+        onnx_path: Option<String>,
     ) -> PyResult<PyZertzSelfPlayResult> {
+        let mut backend = if let Some(ref path) = onnx_path {
+            InferenceBackend::Native {
+                engine: Box::new(crate::inference::ZertzOrtEngine::load(path)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?),
+            }
+        } else {
+            let ef = eval_fn.expect("eval_fn is required when onnx_path is not provided");
+            InferenceBackend::Python { py, eval_fn: ef }
+        };
+
         let num_games = self.num_games;
         let use_playout_cap = self.playout_cap_p > 0.0;
 
@@ -288,23 +362,9 @@ impl PyZertzSelfPlaySession {
             }
 
             // Initial NN eval for MCTS root policy
-            let board_arr = numpy::ndarray::Array2::from_shape_vec((n, BOARD_FLAT), flat_boards).unwrap();
-            let board_np = PyArray2::from_owned_array_bound(py, board_arr);
-            let board_4d = board_np.reshape([n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
-            let reserve_arr = numpy::ndarray::Array2::from_shape_vec((n, RESERVE_SIZE), flat_reserves).unwrap();
-            let reserve_np = PyArray2::from_owned_array_bound(py, reserve_arr);
-
-            let result = eval_fn.call1((board_4d, reserve_np))?;
-            let tuple = result.downcast::<PyTuple>().map_err(|_| {
-                pyo3::exceptions::PyTypeError::new_err("eval_fn must return (place, cap_source, cap_dest, value) tuple")
-            })?;
-            let place_arr: PyReadonlyArray2<f32> = tuple.get_item(0)?.extract()?;
-            let src_arr: PyReadonlyArray2<f32> = tuple.get_item(1)?.extract()?;
-            let dst_arr: PyReadonlyArray2<f32> = tuple.get_item(2)?.extract()?;
-            let _value_arr: PyReadonlyArray1<f32> = tuple.get_item(3)?.extract()?;
-            let init_place = place_arr.as_slice()?.to_vec();
-            let init_src = src_arr.as_slice()?.to_vec();
-            let init_dst = dst_arr.as_slice()?.to_vec();
+            let r = backend.infer_batch(&flat_boards, &flat_reserves, n, NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            let (init_place, init_src, init_dst) = (r.place, r.cap_source, r.cap_dest);
 
             // Init MCTS trees
             for (i, &gi) in mcts_games.iter().enumerate() {
@@ -357,24 +417,10 @@ impl PyZertzSelfPlaySession {
                     leaf_reserves_flat[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
                 }
 
-                let leaf_arr = numpy::ndarray::Array2::from_shape_vec((nl, BOARD_FLAT), leaf_boards_flat).unwrap();
-                let leaf_np = PyArray2::from_owned_array_bound(py, leaf_arr);
-                let leaf_4d = leaf_np.reshape([nl, NUM_CHANNELS, GRID_SIZE, GRID_SIZE]).unwrap();
-                let leaf_res_arr = numpy::ndarray::Array2::from_shape_vec((nl, RESERVE_SIZE), leaf_reserves_flat).unwrap();
-                let leaf_res_np = PyArray2::from_owned_array_bound(py, leaf_res_arr);
-
-                let leaf_result = eval_fn.call1((leaf_4d, leaf_res_np))?;
-                let leaf_tuple = leaf_result.downcast::<PyTuple>().map_err(|_| {
-                    pyo3::exceptions::PyTypeError::new_err("eval_fn must return (place, cap_source, cap_dest, value) tuple")
-                })?;
-                let lp_place: PyReadonlyArray2<f32> = leaf_tuple.get_item(0)?.extract()?;
-                let lp_src: PyReadonlyArray2<f32> = leaf_tuple.get_item(1)?.extract()?;
-                let lp_dst: PyReadonlyArray2<f32> = leaf_tuple.get_item(2)?.extract()?;
-                let lv_arr: PyReadonlyArray1<f32> = leaf_tuple.get_item(3)?.extract()?;
-                let leaf_place = lp_place.as_slice()?.to_vec();
-                let leaf_src = lp_src.as_slice()?.to_vec();
-                let leaf_dst = lp_dst.as_slice()?.to_vec();
-                let leaf_values = lv_arr.as_slice()?.to_vec();
+                let lr = backend.infer_batch(&leaf_boards_flat, &leaf_reserves_flat, nl, NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                let (leaf_place, leaf_src, leaf_dst, leaf_values) =
+                    (lr.place, lr.cap_source, lr.cap_dest, lr.value);
 
                 let mut per_game_leaves: Vec<Vec<NodeId>> = vec![Vec::new(); n];
                 let mut per_game_values: Vec<Vec<f32>> = vec![Vec::new(); n];

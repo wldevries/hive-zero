@@ -5,6 +5,40 @@ use std::path::{Path, PathBuf};
 use ort::session::Session;
 use ort::value::Tensor;
 
+// ---------------------------------------------------------------------------
+// Inference traits (game-specific)
+// ---------------------------------------------------------------------------
+
+/// Game-agnostic inference interface for Hive. Implementations may use ORT,
+/// tract (WASM), or any other backend. No `Send` bound — Python-backed impls
+/// hold GIL tokens and cannot be `Send`.
+pub trait HiveInference {
+    fn infer_batch(
+        &mut self,
+        boards: &[f32],
+        reserves: &[f32],
+        batch_size: usize,
+        num_channels: usize,
+        grid_size: usize,
+        reserve_size: usize,
+    ) -> Result<HiveInferenceResult, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// Game-agnostic inference interface for Zertz. Implementations may use ORT,
+/// tract (WASM), or any other backend. No `Send` bound — Python-backed impls
+/// hold GIL tokens and cannot be `Send`.
+pub trait ZertzInference {
+    fn infer_batch(
+        &mut self,
+        boards: &[f32],
+        reserves: &[f32],
+        batch_size: usize,
+        num_channels: usize,
+        grid_size: usize,
+        reserve_size: usize,
+    ) -> Result<ZertzInferenceResult, Box<dyn std::error::Error + Send + Sync>>;
+}
+
 /// Result of a batch inference call for Hive.
 pub struct HiveInferenceResult {
     /// Flattened policy logits: [B * policy_size]
@@ -28,6 +62,21 @@ pub struct ZertzInferenceResult {
 /// ONNX Runtime inference engine for Hive.
 pub struct HiveOrtEngine {
     session: Session,
+}
+
+impl HiveInference for HiveOrtEngine {
+    fn infer_batch(
+        &mut self,
+        boards: &[f32],
+        reserves: &[f32],
+        batch_size: usize,
+        num_channels: usize,
+        grid_size: usize,
+        reserve_size: usize,
+    ) -> Result<HiveInferenceResult, Box<dyn std::error::Error + Send + Sync>> {
+        self.infer(boards.to_vec(), reserves.to_vec(), batch_size, num_channels, grid_size, reserve_size)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
 }
 
 fn find_onnxruntime_dylib() -> PathBuf {
@@ -100,6 +149,21 @@ impl HiveOrtEngine {
 /// ONNX Runtime inference engine for Zertz.
 pub struct ZertzOrtEngine {
     session: Session,
+}
+
+impl ZertzInference for ZertzOrtEngine {
+    fn infer_batch(
+        &mut self,
+        boards: &[f32],
+        reserves: &[f32],
+        batch_size: usize,
+        num_channels: usize,
+        grid_size: usize,
+        reserve_size: usize,
+    ) -> Result<ZertzInferenceResult, Box<dyn std::error::Error + Send + Sync>> {
+        self.infer(boards.to_vec(), reserves.to_vec(), batch_size, num_channels, grid_size, reserve_size)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
 }
 
 impl ZertzOrtEngine {
