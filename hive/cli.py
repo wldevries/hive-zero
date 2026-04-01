@@ -91,6 +91,8 @@ def main():
                               help="Exclude positions from games that hit the move limit (timeouts) from training")
     train_parser.add_argument("--augment-symmetry", action="store_true",
                               help="Apply random D6 hex symmetry augmentation during training (12x effective data)")
+    train_parser.add_argument("--use-ort", action="store_true",
+                              help="Use Rust-native ORT inference instead of Python eval (requires .onnx model)")
 
     # Supervised pre-training
     pretrain_parser = subparsers.add_parser(
@@ -248,6 +250,7 @@ def main():
             skip_timeout_games=args.skip_timeout_games,
             augment_symmetry=args.augment_symmetry,
             comment=args.comment,
+            use_ort=args.use_ort,
         )
     else:
         # Default: UHP engine

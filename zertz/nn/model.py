@@ -117,21 +117,21 @@ def export_onnx(model: ZertzNet, path: str):
     model.eval()
     dummy_board = torch.zeros(1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
     dummy_reserve = torch.zeros(1, RESERVE_SIZE)
+    input_names = ["board", "reserve"]
+    output_names = ["place", "cap_source", "cap_dest", "value"]
     torch.onnx.export(
         model,
         (dummy_board, dummy_reserve),
         path,
-        input_names=["board", "reserve"],
-        output_names=["place", "cap_source", "cap_dest", "value"],
-        dynamic_axes={
-            "board": {0: "batch"},
-            "reserve": {0: "batch"},
-            "place": {0: "batch"},
-            "cap_source": {0: "batch"},
-            "cap_dest": {0: "batch"},
-            "value": {0: "batch"},
-        },
-        opset_version=17,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_shapes=(
+            {0: "batch_size"},
+            {0: "batch_size"}
+        ),
+        dynamo=True,
+        verbose=False,
+        opset_version=21,
     )
     if was_training:
         model.train()

@@ -140,22 +140,23 @@ def export_onnx(model: HiveNet, path: str):
     g = model.grid_size
     was_training = model.training
     model.eval()
-    dummy_board = torch.zeros(1, NUM_CHANNELS, g, g)
-    dummy_reserve = torch.zeros(1, RESERVE_SIZE)
+    dummy_board = torch.zeros(1, NUM_CHANNELS, g, g).cuda()
+    dummy_reserve = torch.zeros(1, RESERVE_SIZE).cuda()    
+    input_names = ["board", "reserve"]
+    output_names = ["policy", "value", "aux"]
     torch.onnx.export(
         model,
         (dummy_board, dummy_reserve),
         path,
-        input_names=["board", "reserve"],
-        output_names=["policy", "value", "aux"],
-        dynamic_axes={
-            "board": {0: "batch"},
-            "reserve": {0: "batch"},
-            "policy": {0: "batch"},
-            "value": {0: "batch"},
-            "aux": {0: "batch"},
-        },
-        opset_version=17,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_shapes=(
+            {0: "batch"},
+            {0: "batch"}
+        ),
+        dynamo=True,
+        verbose=False,
+        opset_version=21,
     )
     if was_training:
         model.train()

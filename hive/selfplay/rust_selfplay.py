@@ -71,11 +71,13 @@ class RustParallelSelfPlay:
 
         return eval_fn
 
-    def play_games(self, num_games: int, opening_sequences: list[list[str]] | None = None):
+    def play_games(self, num_games: int, opening_sequences: list[list[str]] | None = None,
+                   onnx_path: str | None = None):
         """Play num_games entirely in Rust. Returns SelfPlayResult.
 
         opening_sequences: per-game UHP move lists to replay before MCTS.
             Empty inner list (or None) means use random_opening_moves for that game.
+        onnx_path: if provided, use Rust-native ORT inference instead of Python eval.
         """
         from hive_engine import RustSelfPlaySession
 
@@ -111,8 +113,13 @@ class RustParallelSelfPlay:
             pbar.set_postfix(active=f"{active}/{total}",
                              resigned=resigned if resigned else 0)
 
-        result = session.play_games(self._eval_fn(), progress,
-                                    opening_sequences=opening_sequences)
+        if onnx_path:
+            result = session.play_games(progress_fn=progress,
+                                        opening_sequences=opening_sequences,
+                                        onnx_path=onnx_path)
+        else:
+            result = session.play_games(self._eval_fn(), progress,
+                                        opening_sequences=opening_sequences)
         pbar.update(pbar.total - pbar.n)
         pbar.close()
         return result

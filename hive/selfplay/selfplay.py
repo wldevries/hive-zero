@@ -96,7 +96,8 @@ class SelfPlayTrainer:
             opening_min_elo: float = 1600.0,
             skip_timeout_games: bool = False,
             augment_symmetry: bool = False,
-            comment: str = ""):
+            comment: str = "",
+            use_ort: bool = False):
         """Run the full training loop.
 
         Args:
@@ -200,17 +201,28 @@ class SelfPlayTrainer:
                 skip_timeout_games=skip_timeout_games,
             )
 
-            self.model.eval()
-            self.model.bfloat16()
+            ort_path = None
+            if use_ort:
+                ort_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
+                if not os.path.exists(ort_path):
+                    print(f"  ORT requested but {ort_path} not found, exporting...")
+                    export_onnx(self.model, ort_path)
+
+            if not use_ort:
+                self.model.eval()
+                self.model.bfloat16()
             try:
-                result = sp.play_games(games_per_gen, opening_sequences=opening_sequences)
+                result = sp.play_games(games_per_gen, opening_sequences=opening_sequences,
+                                       onnx_path=ort_path)
             except BaseException as e:
                 if not isinstance(e, KeyboardInterrupt) and "KeyboardInterrupt" not in str(e):
                     raise
                 print("\n  Ctrl-C received, exiting cleanly.")
-                self.model.float()
+                if not use_ort:
+                    self.model.float()
                 break
-            self.model.float()
+            if not use_ort:
+                self.model.float()
             play_time = time.time() - iter_start
             _print_vram("post-play")
 

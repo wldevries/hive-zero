@@ -6,9 +6,9 @@ __pycache__/
 .venv/
 *.pt
 *.pth
+*.onnx
+*.onnx.data
 checkpoints/
-training_log.tsv
-pretrain_log.tsv
 *.sgf
 *.zip
 games/**/*.csv

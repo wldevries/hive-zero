@@ -1,3 +1,5 @@
+use core::panic;
+
 /// Self-play game loop in Rust.
 /// Plays all games to completion, only calling back to Python for GPU NN inference.
 /// Returns training data as contiguous arrays.
@@ -26,6 +28,17 @@ const DECISIVE_WEIGHT: f32 = 10.0;
 struct SendPtr(*mut MctsSearch<Game>);
 unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
+
+/// Inference backend for self-play: Python eval callback or Rust-native ORT.
+enum InferenceBackend<'py> {
+    Python {
+        py: Python<'py>,
+        eval_fn: &'py Bound<'py, PyAny>,
+    },
+    Ort {
+        engine: crate::inference::HiveOrtEngine,
+    },
+}
 
 /// Per-turn training record stored during play.
 struct TurnRecord {
@@ -322,18 +335,29 @@ impl PySelfPlaySession {
         }
     }
 
-    /// Play all games to completion. Only calls eval_fn for GPU inference.
+    /// Play all games to completion.
+    /// Uses eval_fn (Python callback) or onnx_path (Rust-native ORT) for GPU inference.
     /// progress_fn(finished, total, active, total_moves, resigned) is called each turn.
     /// opening_sequences: per-game UHP move lists to replay before MCTS (empty list = use random_opening_moves).
-    #[pyo3(signature = (eval_fn, progress_fn=None, opening_sequences=None))]
+    #[pyo3(signature = (eval_fn=None, progress_fn=None, opening_sequences=None, onnx_path=None))]
     fn play_games(
         &self,
         py: Python<'_>,
-        eval_fn: &Bound<'_, PyAny>,
+        eval_fn: Option<&Bound<'_, PyAny>>,
         progress_fn: Option<&Bound<'_, PyAny>>,
         opening_sequences: Option<Vec<Vec<String>>>,
+        onnx_path: Option<String>,
     ) -> PySelfPlayResult {
         let opening_sequences = opening_sequences.unwrap_or_default();
+        let mut backend = if let Some(ref path) = onnx_path {
+            InferenceBackend::Ort {
+                engine: crate::inference::HiveOrtEngine::load(path)
+                    .expect("Failed to load ONNX model"),
+            }
+        } else {
+            let ef = eval_fn.expect("eval_fn is required when onnx_path is not provided");
+            InferenceBackend::Python { py, eval_fn: ef }
+        };
         let cfg = &self.config;
         let num_games = cfg.num_games;
         let use_playout_cap = cfg.playout_cap_p > 0.0;
@@ -474,13 +498,10 @@ impl PySelfPlaySession {
                 vec![true; n]
             };
 
-            // --- Encode positions (sequential — per-board work is too small for rayon) ---
+            // --- Encode positions into training buffer (f32) ---
             let mut turn_board_offsets: Vec<usize> = Vec::with_capacity(n);
             let mut turn_reserve_offsets: Vec<usize> = Vec::with_capacity(n);
-            let mut flat_boards_bf16 = vec![0u16; n * board_size];
-            let mut flat_reserves_bf16 = vec![0u16; n * RESERVE_SIZE];
-            for (i, &gi) in mcts_games.iter().enumerate() {
-                // Encode f32 into training buffer
+            for &gi in mcts_games.iter() {
                 let board_off = board_buf.len();
                 let reserve_off = reserve_buf.len();
                 board_buf.resize(board_off + board_size, 0.0);
@@ -493,32 +514,57 @@ impl PySelfPlaySession {
                 );
                 turn_board_offsets.push(board_off);
                 turn_reserve_offsets.push(reserve_off);
-                // Encode bf16 for GPU eval
-                board_encoding::encode_board_bf16(
-                    &games[gi],
-                    &mut flat_boards_bf16[i * board_size..(i + 1) * board_size],
-                    &mut flat_reserves_bf16[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
-                    grid_size,
-                );
             }
 
-            // --- GPU: initial policy eval (bf16) ---
-            let board_arr = numpy::ndarray::Array2::from_shape_vec(
-                (n, board_size), flat_boards_bf16,
-            ).unwrap();
-            let board_np = PyArray2::from_owned_array_bound(py, board_arr);
-            let board_4d = board_np.reshape([n, NUM_CHANNELS, grid_size, grid_size]).unwrap();
-            let reserve_arr = numpy::ndarray::Array2::from_shape_vec(
-                (n, RESERVE_SIZE), flat_reserves_bf16,
-            ).unwrap();
-            let reserve_np = PyArray2::from_owned_array_bound(py, reserve_arr);
+            // --- Initial policy eval (backend-specific) ---
+            let (init_policies, init_values) = match &mut backend {
+                InferenceBackend::Python { py, eval_fn } => {
+                    // Encode bf16 for Python GPU eval
+                    let mut flat_boards_bf16 = vec![0u16; n * board_size];
+                    let mut flat_reserves_bf16 = vec![0u16; n * RESERVE_SIZE];
+                    for (i, &gi) in mcts_games.iter().enumerate() {
+                        board_encoding::encode_board_bf16(
+                            &games[gi],
+                            &mut flat_boards_bf16[i * board_size..(i + 1) * board_size],
+                            &mut flat_reserves_bf16[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
+                            grid_size,
+                        );
+                    }
+                    let board_arr = numpy::ndarray::Array2::from_shape_vec(
+                        (n, board_size), flat_boards_bf16,
+                    ).unwrap();
+                    let board_np = PyArray2::from_owned_array_bound(*py, board_arr);
+                    let board_4d = board_np.reshape([n, NUM_CHANNELS, grid_size, grid_size]).unwrap();
+                    let reserve_arr = numpy::ndarray::Array2::from_shape_vec(
+                        (n, RESERVE_SIZE), flat_reserves_bf16,
+                    ).unwrap();
+                    let reserve_np = PyArray2::from_owned_array_bound(*py, reserve_arr);
 
-            let result = eval_fn.call1((board_4d, reserve_np)).expect("eval_fn call failed");
-            let tuple = result.downcast::<PyTuple>().expect("eval_fn must return tuple");
-            let policy_arr: PyReadonlyArray2<f32> = tuple.get_item(0).unwrap().extract().unwrap();
-            let value_arr: PyReadonlyArray1<f32> = tuple.get_item(1).unwrap().extract().unwrap();
-            let init_policies = policy_arr.as_slice().unwrap().to_vec();
-            let init_values = value_arr.as_slice().unwrap().to_vec();
+                    let result = eval_fn.call1((board_4d, reserve_np)).expect("eval_fn call failed");
+                    let tuple = result.downcast::<PyTuple>().expect("eval_fn must return tuple");
+                    let policy_arr: PyReadonlyArray2<f32> = tuple.get_item(0).unwrap().extract().unwrap();
+                    let value_arr: PyReadonlyArray1<f32> = tuple.get_item(1).unwrap().extract().unwrap();
+                    (policy_arr.as_slice().unwrap().to_vec(), value_arr.as_slice().unwrap().to_vec())
+                },
+                InferenceBackend::Ort { engine } => {
+                    // Collect f32 from training buffer for ORT inference
+                    let mut flat_boards = Vec::with_capacity(n * board_size);
+                    let mut flat_reserves = Vec::with_capacity(n * RESERVE_SIZE);
+                    for i in 0..n {
+                        flat_boards.extend_from_slice(
+                            &board_buf[turn_board_offsets[i]..turn_board_offsets[i] + board_size]
+                        );
+                        flat_reserves.extend_from_slice(
+                            &reserve_buf[turn_reserve_offsets[i]..turn_reserve_offsets[i] + RESERVE_SIZE]
+                        );
+                    }
+                    let result = engine.infer(
+                        flat_boards, flat_reserves,
+                        n, NUM_CHANNELS, grid_size, RESERVE_SIZE,
+                    ).expect("ORT inference failed");
+                    (result.policy, result.value)
+                },
+            };
 
             // --- Init MCTS trees (rayon parallel) ---
             let game_clones: Vec<Game> = mcts_games.iter().map(|&gi| games[gi].clone()).collect();
@@ -573,16 +619,20 @@ impl PySelfPlaySession {
 
             // Run interleaved simulations
             if !searching.is_empty() {
-                run_simulations_internal(
-                    py,
-                    &mut searches,
-                    &mcts_games,
-                    &searching,
-                    &sim_caps,
-                    cfg.leaf_batch_size,
-                    eval_fn,
-                    grid_size,
-                );
+                match &mut backend {
+                    InferenceBackend::Python { py, eval_fn } => {
+                        run_simulations_internal(
+                            *py, &mut searches, &mcts_games, &searching,
+                            &sim_caps, cfg.leaf_batch_size, eval_fn, grid_size,
+                        );
+                    },
+                    InferenceBackend::Ort { engine } => {
+                        run_simulations_ort(
+                            engine, &mut searches, &mcts_games, &searching,
+                            &sim_caps, cfg.leaf_batch_size, grid_size,
+                        );
+                    },
+                }
             }
 
             // --- Collect results and play moves ---
@@ -961,6 +1011,96 @@ fn run_simulations_internal(
             pending_gi.clear();
             // pending_leaves already emptied via take()
             // pending_boards / pending_reserves already emptied via take()
+        }
+    }
+}
+
+/// ORT version of run_simulations_internal — uses HiveOrtEngine instead of Python eval_fn.
+/// Uses f32 encoding directly (no bf16 conversion needed).
+fn run_simulations_ort(
+    engine: &mut crate::inference::HiveOrtEngine,
+    searches: &mut Vec<MctsSearch<Game>>,
+    mcts_games: &[usize],
+    searching: &[usize],
+    per_game_caps: &[usize],
+    rounds_per_flush: usize,
+    grid_size: usize,
+) {
+    let board_size = NUM_CHANNELS * grid_size * grid_size;
+    let policy_size = move_encoding::policy_size(grid_size);
+    let mut sims_done: Vec<usize> = vec![0; searching.len()];
+    let mut still_searching: Vec<usize> = (0..searching.len()).collect();
+    let mut round: usize = 0;
+
+    let mut pending_gi: Vec<usize> = Vec::new();
+    let mut pending_leaves: Vec<(u32, Game)> = Vec::new();
+    let mut pending_boards: Vec<f32> = Vec::new();
+    let mut pending_reserves: Vec<f32> = Vec::new();
+
+    let mut enc_board = vec![0f32; board_size];
+    let mut enc_reserve = vec![0f32; RESERVE_SIZE];
+
+    while !still_searching.is_empty() || !pending_leaves.is_empty() {
+        if !still_searching.is_empty() {
+            for &si in &still_searching {
+                let gi = mcts_games[searching[si]];
+                let search = &mut searches[gi];
+                let leaves = search.select_leaves(1);
+                sims_done[si] += leaves.len().max(1);
+                for (_, game) in &leaves {
+                    board_encoding::encode_board(game, &mut enc_board, &mut enc_reserve, grid_size);
+                    pending_gi.push(gi);
+                    pending_boards.extend_from_slice(&enc_board);
+                    pending_reserves.extend_from_slice(&enc_reserve);
+                }
+                pending_leaves.extend(leaves);
+            }
+
+            still_searching.retain(|&si| sims_done[si] < per_game_caps[si]);
+            round += 1;
+        }
+
+        let should_flush = (!pending_leaves.is_empty())
+            && (round % rounds_per_flush == 0 || still_searching.is_empty());
+
+        if should_flush {
+            let total = pending_leaves.len();
+
+            let boards_data = std::mem::take(&mut pending_boards);
+            let reserves_data = std::mem::take(&mut pending_reserves);
+
+            let result = engine.infer(
+                boards_data, reserves_data,
+                total, NUM_CHANNELS, grid_size, RESERVE_SIZE,
+            ).expect("ORT inference failed");
+
+            let policy_data = &result.policy;
+            let value_data = &result.value;
+
+            let mut gi_groups: std::collections::HashMap<
+                usize, (Vec<(u32, Game)>, Vec<Vec<f32>>, Vec<f32>)
+            > = std::collections::HashMap::new();
+            let drained_leaves = std::mem::take(&mut pending_leaves);
+            for (i, &gi) in pending_gi.iter().enumerate() {
+                let entry = gi_groups.entry(gi).or_default();
+                entry.0.push(drained_leaves[i].clone());
+                entry.1.push(policy_data[i * policy_size..(i + 1) * policy_size].to_vec());
+                entry.2.push(value_data[i]);
+            }
+
+            let unique_gis: Vec<usize> = gi_groups.keys().copied().collect();
+            let expand_ptrs: Vec<SendPtr> = unique_gis.iter()
+                .map(|&gi| SendPtr(&mut searches[gi] as *mut MctsSearch<Game>))
+                .collect();
+
+            expand_ptrs.par_iter().zip(unique_gis.par_iter()).for_each(|(sp, &gi)| {
+                let search = unsafe { &mut *sp.0 };
+                let (leaves, policies, values) = gi_groups.get(&gi).unwrap();
+                let mut leaves_clone = leaves.clone();
+                search.expand_and_backprop(&mut leaves_clone, policies, values);
+            });
+
+            pending_gi.clear();
         }
     }
 }
