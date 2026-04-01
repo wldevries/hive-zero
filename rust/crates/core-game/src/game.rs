@@ -57,13 +57,24 @@ pub trait Game: Clone + Send {
     fn is_pass(mv: &Self::Move) -> bool;
 }
 
+/// How to extract a scalar prior from the flat policy vector.
+///
+/// `Single(idx)`: `prior = policy[idx]`
+/// `Sum(a, b)`:   `prior = policy[a] + policy[b]` (factorized logits, e.g. src + dst)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolicyIndex {
+    Single(usize),
+    Sum(usize, usize),
+}
+
 /// Neural network encoding trait — tensor encoding and policy masks for AlphaZero training.
 pub trait NNGame: Game {
     /// Number of channels in the board tensor encoding.
     const BOARD_CHANNELS: usize;
     /// Size of the reserve/auxiliary input vector.
     const RESERVE_SIZE: usize;
-    /// Number of policy channels (piece types per player).
+    /// Number of policy channels. For factorized policies this is the conceptual
+    /// channel count used to compute policy_size = NUM_POLICY_CHANNELS * G * G.
     const NUM_POLICY_CHANNELS: usize;
 
     /// Spatial grid dimension for NN encoding (runtime, may differ from physical board size).
@@ -83,7 +94,9 @@ pub trait NNGame: Game {
     fn encode_board(&self, board_out: &mut [f32], reserve_out: &mut [f32]);
 
     /// Get the legal move mask (policy_size()) and indexed moves.
-    fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(usize, Self::Move)>);
+    /// Each move is paired with a `PolicyIndex` describing how to compute its prior
+    /// from the flat policy vector.
+    fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(PolicyIndex, Self::Move)>);
 }
 
 // Keep the old name as an alias during migration.

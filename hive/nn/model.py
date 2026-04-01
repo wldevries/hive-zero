@@ -7,11 +7,11 @@ import torch.nn.functional as F
 
 from shared.nn.resblock import ResBlock
 from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
-from ..encoding.move_encoder import NUM_POLICY_CHANNELS, policy_size
+from ..encoding.move_encoder import NUM_POLICY_CHANNELS, NUM_PLACE_CHANNELS, policy_size
 
 
 class HiveNet(nn.Module):
-    """AlphaZero-style network with policy, value, and auxiliary heads.
+    """AlphaZero-style network with factorized policy, value, and auxiliary heads.
 
     Reserve vector is broadcast spatially and concatenated with the board
     tensor before the trunk, so the trunk sees both board state and global
@@ -21,7 +21,11 @@ class HiveNet(nn.Module):
         - Broadcast reserve + concat with board tensor
         - Input convolution
         - Residual tower (num_blocks blocks)
-        - Policy head: conv -> flatten -> POLICY_SIZE
+        - Policy heads (factorized, concatenated into flat vector):
+            place_head: Conv1x1(C -> 5, G, G)  [placement: piece_type x dest]
+            src_head:   Conv1x1(C -> 1, G, G)  [movement source]
+            dst_head:   Conv1x1(C -> 1, G, G)  [movement destination]
+          Output: flat (batch, 7*G*G) = [place | src | dst]
         - Value head: conv(1x1) -> flatten -> FC(256) -> tanh
         - Auxiliary head: conv(1x1) -> flatten -> FC(64) -> sigmoid
           (my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility)
@@ -44,14 +48,17 @@ class HiveNet(nn.Module):
         # Residual tower
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
 
-        # Policy head - convolutional to avoid giant linear layer
-        # Outputs per-cell logits: one channel per piece (11 pieces per player).
-        # Channel = piece index (0=Queen, 1-2=Spider, 3-4=Beetle, 5-7=Grasshopper, 8-10=Ant).
-        # Covers both placement and movement — no separate direction channels.
+        # Factorized policy heads — share a common conv+BN, then 3 output heads.
+        # place_head: (B, 5, G, G)  - one channel per piece type, placement logits
+        # src_head:   (B, 1, G, G)  - movement source logits
+        # dst_head:   (B, 1, G, G)  - movement destination logits
+        # Concatenated flat output: (B, 7*G*G) = [place | src | dst]
         self.num_policy_channels = NUM_POLICY_CHANNELS
         self.policy_conv = nn.Conv2d(channels, channels, 1, bias=False)
         self.policy_bn = nn.BatchNorm2d(channels)
-        self.policy_out = nn.Conv2d(channels, self.num_policy_channels, 1)
+        self.policy_place = nn.Conv2d(channels, NUM_PLACE_CHANNELS, 1)  # (B,5,G,G)
+        self.policy_src   = nn.Conv2d(channels, 1, 1)                   # (B,1,G,G)
+        self.policy_dst   = nn.Conv2d(channels, 1, 1)                   # (B,1,G,G)
 
         # Value head
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
@@ -74,25 +81,26 @@ class HiveNet(nn.Module):
             reserve_vector: (batch, RESERVE_SIZE)
 
         Returns:
-            policy_logits: (batch, POLICY_SIZE)
+            policy_logits: (batch, 7*G*G) flat = [place_part | src_part | dst_part]
             value: (batch, 1) in [-1, 1]
             aux: (batch, 6) in [0, 1] — [my_qd, opp_qd, my_qe, opp_qe, my_mob, opp_mob]
         """
         # Broadcast reserve spatially and concat with board tensor
         g = board_tensor.size(-1)
         r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, g, g)
-        x = torch.cat([board_tensor, r], dim=1)  # (B, 39+10, G, G)
+        x = torch.cat([board_tensor, r], dim=1)  # (B, 19+10, G, G)
 
         # Shared trunk
         x = F.relu(self.input_bn(self.input_conv(x)))
         for block in self.res_blocks:
             x = block(x)
 
-        # Policy head - outputs (batch, num_policy_channels, GRID_SIZE, GRID_SIZE)
-        # Then flattened to (batch, num_policy_channels * GRID_SIZE * GRID_SIZE)
+        # Factorized policy heads
         p = F.relu(self.policy_bn(self.policy_conv(x)))
-        p = self.policy_out(p)
-        policy_logits = p.view(p.size(0), -1)
+        place = self.policy_place(p).view(p.size(0), -1)  # (B, 5*G*G)
+        src   = self.policy_src(p).view(p.size(0), -1)    # (B, G*G)
+        dst   = self.policy_dst(p).view(p.size(0), -1)    # (B, G*G)
+        policy_logits = torch.cat([place, src, dst], dim=1)  # (B, 7*G*G)
 
         # Value head
         v = F.relu(self.value_bn(self.value_conv(x)))

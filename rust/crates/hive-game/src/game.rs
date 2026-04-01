@@ -5,7 +5,7 @@ use crate::board::Board;
 use crate::piece::{Piece, PieceColor, PieceType, PIECE_COUNTS, ALL_PIECE_TYPES, player_pieces};
 use crate::rules::{get_moves, get_placements};
 
-use core_game::game::{Game as GameTrait, NNGame, Player, Outcome};
+use core_game::game::{Game as GameTrait, NNGame, Player, Outcome, PolicyIndex};
 use core_game::symmetry::D6Symmetry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -553,7 +553,7 @@ impl NNGame for Game {
         crate::board_encoding::encode_board(self, board_out, reserve_out, self.nn_grid_size);
     }
 
-    fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(usize, Move)>) {
+    fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(PolicyIndex, Move)>) {
         crate::move_encoding::get_legal_move_mask(self, self.nn_grid_size)
     }
 }

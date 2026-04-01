@@ -3,35 +3,34 @@
 
 use crate::hex::Hex;
 use crate::game::Game;
-use crate::piece::{PieceColor, ALL_PIECE_TYPES, PIECE_COUNTS, PIECES_PER_PLAYER};
+use crate::piece::{PieceColor, ALL_PIECE_TYPES, PIECE_COUNTS};
 
 /// Number of board encoding channels.
-pub const NUM_CHANNELS: usize = 39;
+pub const NUM_CHANNELS: usize = 19;
 /// Reserve vector size: 5 piece types x 2 colors.
 pub const RESERVE_SIZE: usize = 10;
 
 /// Channel layout (all channels current-player-relative):
 ///
-/// Base layer — piece at depth 0 of each hex (binary, one per piece):
-///   0-10:  Current player's pieces  (Q, S1, S2, B1, B2, G1, G2, G3, A1, A2, A3)
-///   11-21: Opponent's pieces
+/// Base layer — piece type at depth 0 of each hex (binary, one per type):
+///   0-4:  Current player's pieces  (Q=0, S=1, B=2, G=3, A=4)
+///   5-9:  Opponent's pieces        (same type order)
 ///
-/// Stacked beetles — beetle at depth D above the base (binary):
-///   22-25: Current player's Beetle1 at depths 1-4
-///   26-29: Current player's Beetle2 at depths 1-4
-///   30-33: Opponent's Beetle1 at depths 1-4
-///   34-37: Opponent's Beetle2 at depths 1-4
+/// Stacked pieces — generic "stacker" channels by depth (binary):
+///   10-13: Current player's stacker at depths 1-4
+///   14-17: Opponent's stacker at depths 1-4
 ///
-///   Channel = 22 + player_offset(0 or 8) + (beetle_number-1)*4 + (depth-1)
-///
-/// 38: Stack height (normalized /7)
+/// 18: Stack height (normalized /7)
 ///
 /// Reserve vector (current-player-relative):
 ///   0-4:  Current player's reserve counts (normalized by max)
 ///   5-9:  Opponent's reserve counts
 
-const STACKED_BEETLE_BASE: usize = 22;
-const STACK_HEIGHT_CH: usize = 38;
+const MY_PIECES_BASE: usize = 0;
+const OPP_PIECES_BASE: usize = 5;
+const MY_STACKER_BASE: usize = 10;
+const OPP_STACKER_BASE: usize = 14;
+const STACK_HEIGHT_CH: usize = 18;
 
 /// Map hex coordinates to encoding grid indices, using grid_size for the encoding.
 #[inline]
@@ -47,8 +46,8 @@ fn hex_to_encoding_grid(h: Hex, grid_size: usize) -> Option<(usize, usize)> {
 }
 
 #[inline]
-fn piece_idx(piece: crate::piece::Piece) -> usize {
-    piece.linear_index() % PIECES_PER_PLAYER
+fn piece_type_idx(piece: crate::piece::Piece) -> usize {
+    piece.piece_type() as usize
 }
 
 /// Convert f32 to bfloat16, stored as u16 (truncation, matches PyTorch convention).
@@ -85,16 +84,15 @@ pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [
 
         for (depth, piece) in stack.iter().enumerate() {
             let mine = is_mine(piece.color());
-            let idx = piece_idx(piece);
+            let type_idx = piece_type_idx(piece);
 
             if depth == 0 {
-                let ch = if mine { idx } else { 11 + idx };
+                let ch = if mine { MY_PIECES_BASE + type_idx } else { OPP_PIECES_BASE + type_idx };
                 board_out[ch * gs2 + cell] = bf16_one;
             } else {
-                let player_offset = if mine { 0 } else { 8 };
-                let beetle_offset = (piece.number() as usize - 1) * 4;
+                let stacker_base = if mine { MY_STACKER_BASE } else { OPP_STACKER_BASE };
                 let depth_offset = (depth - 1).min(3);
-                let ch = STACKED_BEETLE_BASE + player_offset + beetle_offset + depth_offset;
+                let ch = stacker_base + depth_offset;
                 board_out[ch * gs2 + cell] = bf16_one;
             }
         }
@@ -142,18 +140,17 @@ pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32],
         // stack.iter() goes bottom-to-top; depth 0 = base piece
         for (depth, piece) in stack.iter().enumerate() {
             let mine = is_mine(piece.color());
-            let idx = piece_idx(piece);
+            let type_idx = piece_type_idx(piece);
 
             if depth == 0 {
-                // Base layer: any piece type, current-player-relative
-                let ch = if mine { idx } else { 11 + idx };
+                // Base layer: piece type, current-player-relative
+                let ch = if mine { MY_PIECES_BASE + type_idx } else { OPP_PIECES_BASE + type_idx };
                 board_out[ch * gs2 + cell] = 1.0;
             } else {
-                // Stacked piece — must be a beetle
-                let player_offset = if mine { 0 } else { 8 };
-                let beetle_offset = (piece.number() as usize - 1) * 4;
-                let depth_offset = (depth - 1).min(3); // depths 1-4 → offsets 0-3
-                let ch = STACKED_BEETLE_BASE + player_offset + beetle_offset + depth_offset;
+                // Stacked piece — generic stacker channel by depth
+                let stacker_base = if mine { MY_STACKER_BASE } else { OPP_STACKER_BASE };
+                let depth_offset = (depth - 1).min(3);
+                let ch = stacker_base + depth_offset;
                 board_out[ch * gs2 + cell] = 1.0;
             }
         }
@@ -210,11 +207,11 @@ mod tests {
         let mut game = Game::new();
         let wq = Piece::new(PieceColor::White, PieceType::Queen, 1);
         game.play_move(&Move::placement(wq, (0, 0)));
-        // Black's turn — white queen is opponent's piece (channel 11 = opponent Q)
+        // Black's turn — white queen is opponent's piece, type index 0 → channel OPP_PIECES_BASE+0 = 5
 
         let (bt, rv) = encode(&game);
-        // White queen at center (11,11) — opponent's piece, index 0 → channel 11
-        assert_eq!(at(&bt, 11, 11, 11), 1.0);
+        // White queen at center (11,11) — opponent's piece → channel 5
+        assert_eq!(at(&bt, 5, 11, 11), 1.0);
         // Not in current player's channels
         assert_eq!(at(&bt, 0, 11, 11), 0.0);
         // Opponent (white) queen used → reserve slot 5 (opponent Q) = 0
@@ -239,14 +236,14 @@ mod tests {
         // Move wb1 onto wQ — stack at (0,0): [wQ, wB1], white's turn
         game.play_move(&Move::movement(wb1, (-1, 0), (0, 0)));
         // Now black's turn. Stack at (0,0) from black's perspective:
-        // base = wQ (opponent's Q, channel 11), stacked = wB1 (opponent's B1 at depth 1)
-        // Opponent's B1 at depth 1: channel = 22 + 8 + 0*4 + 0 = 30
+        // base = wQ (opponent's Q, type 0 → channel OPP_PIECES_BASE+0 = 5)
+        // stacked = wB1 (opponent's stacker at depth 1 → channel OPP_STACKER_BASE+0 = 14)
 
         let (bt, _) = encode(&game);
-        // base at (0,0) = opponent's queen → channel 11
-        assert_eq!(at(&bt, 11, 11, 11), 1.0);
-        // opponent's B1 at depth 1 → channel 30
-        assert_eq!(at(&bt, 30, 11, 11), 1.0);
+        // base at (0,0) = opponent's queen → channel 5
+        assert_eq!(at(&bt, 5, 11, 11), 1.0);
+        // opponent's stacker at depth 1 → channel 14
+        assert_eq!(at(&bt, 14, 11, 11), 1.0);
         // stack height = 2/7
         let h = at(&bt, 38, 11, 11);
         assert!((h - 2.0 / 7.0).abs() < 1e-6);
@@ -272,10 +269,10 @@ mod tests {
         // White's turn: bQ is opponent at (1,0)
         let (bt_b, _) = encode(&game_b);
 
-        // Both cases: opponent's queen in channel 11
-        assert_eq!(at(&bt_a, 11, 11, 11), 1.0); // wQ at center, black's turn
-        assert_eq!(at(&bt_b, 11, 11, 12), 1.0); // bQ at (1,0)=(row11,col12), white's turn
-        // Neither appears in current player's channels (0-10)
+        // Both cases: opponent's queen in channel 5 (OPP_PIECES_BASE + Queen=0)
+        assert_eq!(at(&bt_a, 5, 11, 11), 1.0); // wQ at center, black's turn
+        assert_eq!(at(&bt_b, 5, 11, 12), 1.0); // bQ at (1,0)=(row11,col12), white's turn
+        // Neither appears in current player's channels (0-4)
         assert_eq!(at(&bt_a, 0, 11, 11), 0.0);
         assert_eq!(at(&bt_b, 0, 11, 12), 0.0);
     }

@@ -147,24 +147,34 @@ impl PyGame {
     }
 
     /// Get legal move mask and indexed moves.
+    /// Returns (mask, moves) where each move has:
+    ///   (primary_idx, secondary_idx_or_none, piece_str, from_pos, to_pos)
+    /// Placements: secondary = None (Single index).
+    /// Movements:  secondary = Some(dst_idx) (Sum of src + dst indices).
     fn get_legal_move_mask<'py>(
         &mut self, py: Python<'py>
-    ) -> (Bound<'py, PyArray1<f32>>, Vec<(usize, String, Option<(i8, i8)>, (i8, i8))>) {
+    ) -> (Bound<'py, PyArray1<f32>>, Vec<(usize, Option<usize>, String, Option<(i8, i8)>, (i8, i8))>) {
+        use core_game::game::PolicyIndex;
         let gs = self.game.nn_grid_size;
         let (mask, indexed_moves) = move_encoding::get_legal_move_mask(&mut self.game, gs);
         let mask_array = make_array1(py, &mask);
-        let moves_list: Vec<_> = indexed_moves.iter().map(|(idx, mv)| {
+        let moves_list: Vec<_> = indexed_moves.iter().map(|(enc, mv)| {
             let piece_str = mv.piece.unwrap().to_uhp_string();
-            (*idx, piece_str, mv.from, mv.to.unwrap())
+            let (primary, secondary) = match *enc {
+                PolicyIndex::Single(idx) => (idx, None),
+                PolicyIndex::Sum(a, b) => (a, Some(b)),
+            };
+            (primary, secondary, piece_str, mv.from, mv.to.unwrap())
         }).collect();
         (mask_array, moves_list)
     }
 
-    /// Encode a specific move as policy index. Returns -1 if out of grid.
-    #[pyo3(signature = (piece_str, from_pos, to_pos))]
-    fn encode_move(&self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) -> i64 {
+    /// Encode a placement move as flat policy index. Returns -1 if out of grid.
+    /// For movement encoding use encode_movement instead.
+    #[pyo3(signature = (piece_str, to_pos))]
+    fn encode_placement(&self, piece_str: &str, to_pos: (i8, i8)) -> i64 {
         let piece = Piece::from_str(piece_str).expect("invalid piece string");
-        match move_encoding::encode_move_checked(piece, from_pos, to_pos, self.game.nn_grid_size) {
+        match move_encoding::encode_placement_flat(piece, to_pos, self.game.nn_grid_size) {
             Some(idx) => idx as i64,
             None => -1,
         }

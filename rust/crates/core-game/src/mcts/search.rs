@@ -3,7 +3,7 @@
 
 use super::arena::{NodeArena, NodeId};
 use super::node::MctsNode;
-use crate::game::{GameEngine, Outcome, Player};
+use crate::game::{GameEngine, Outcome, Player, PolicyIndex};
 
 const DEFAULT_C_PUCT: f32 = 1.5;
 
@@ -176,8 +176,11 @@ fn expand_with_policy<G: GameEngine>(
     let mut prev_child_id: Option<NodeId> = None;
     let mut child_count = 0u16;
 
-    for &(idx, mv) in &indexed_moves {
-        let prior = policy[idx];
+    for &(enc, mv) in &indexed_moves {
+        let prior = match enc {
+            PolicyIndex::Single(idx) => policy[idx],
+            PolicyIndex::Sum(a, b) => policy[a] + policy[b],
+        };
         total_prior += prior;
 
         let child_id = arena.alloc(Some(node_id), mv, prior, child_turn);

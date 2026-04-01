@@ -14,6 +14,7 @@ use crate::inference::HiveInference;
 use hive_game::game::{Game, GameState};
 use hive_game::hex::hex_neighbors;
 use core_game::game::NNGame;
+use core_game::game::PolicyIndex;
 use core_game::mcts::search::MctsSearch;
 use hive_game::move_encoding::{self, encode_game_move};
 use hive_game::piece::{Piece, PieceColor, PieceType};
@@ -709,14 +710,19 @@ impl PySelfPlaySession {
                     }
                 }
 
-                // Build policy vector
+                // Build policy vector: placements → single slot; movements → marginals (src + dst)
                 let mut policy_vector = vec![0.0f32; policy_size];
                 for (j, (mv, _)) in dist.iter().enumerate() {
                     if mv.piece.is_some() {
-                        if let Some(idx) = encode_game_move(mv, grid_size) {
-                            if idx < policy_size {
-                                policy_vector[idx] = probs[j];
+                        match encode_game_move(mv, grid_size) {
+                            Some(PolicyIndex::Single(idx)) => {
+                                if idx < policy_size { policy_vector[idx] = probs[j]; }
                             }
+                            Some(PolicyIndex::Sum(a, b)) => {
+                                if a < policy_size { policy_vector[a] += probs[j]; }
+                                if b < policy_size { policy_vector[b] += probs[j]; }
+                            }
+                            None => {}
                         }
                     }
                 }

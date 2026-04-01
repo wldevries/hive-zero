@@ -12,7 +12,11 @@ from tqdm import tqdm
 
 from .model import HiveNet, create_model, save_model
 from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
-from ..encoding.move_encoder import NUM_POLICY_CHANNELS, policy_size as compute_policy_size
+from ..encoding.move_encoder import (
+    NUM_POLICY_CHANNELS, NUM_PLACE_CHANNELS,
+    policy_size as compute_policy_size,
+    src_section_offset, dst_section_offset,
+)
 
 # ---------------------------------------------------------------------------
 # Hex D6 symmetry: lazy-loaded per grid_size.
@@ -134,7 +138,7 @@ class HiveDataset(Dataset):
                 bf = board.reshape(NUM_CHANNELS, gc)
                 padded = np.concatenate([bf, np.zeros((NUM_CHANNELS, 1), dtype=np.float32)], axis=1)
                 board = padded[:, perm].reshape(NUM_CHANNELS, gs, gs)
-                # Policy: (11*gs*gs,) → (11, gc) → permute → flatten
+                # Policy: (7*gs*gs,) → (7, gc) → permute → flatten
                 pf = policy.reshape(NUM_POLICY_CHANNELS, gc)
                 padded_p = np.concatenate([pf, np.zeros((NUM_POLICY_CHANNELS, 1), dtype=np.float32)], axis=1)
                 policy = padded_p[:, perm].reshape(-1)
@@ -206,9 +210,29 @@ class Trainer:
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 policy_logits, value, aux = self.model(board, reserve)
 
-            # Policy loss: weighted cross-entropy, masked for value-only samples
-            log_probs = torch.log_softmax(policy_logits, dim=1)
-            per_sample_policy = -(policy_target * log_probs).sum(dim=1)
+            # Policy loss: factorized 3-head cross-entropy.
+            # Flat policy = [place(5*G²) | src(G²) | dst(G²)]
+            gs = board.size(-1)
+            gs2 = gs * gs
+            src_off = NUM_PLACE_CHANNELS * gs2
+            dst_off = (NUM_PLACE_CHANNELS + 1) * gs2
+
+            place_logits = policy_logits[:, :src_off]       # (B, 5*G²)
+            src_logits   = policy_logits[:, src_off:dst_off] # (B, G²)
+            dst_logits   = policy_logits[:, dst_off:]        # (B, G²)
+
+            place_target = policy_target[:, :src_off]
+            src_target   = policy_target[:, src_off:dst_off]
+            dst_target   = policy_target[:, dst_off:]
+
+            # Soft CE per head: -sum(target * log_softmax(logits))
+            # Zero when all targets are zero (no placements or no movements in this position).
+            def soft_ce(logits, target):
+                return -(target * torch.log_softmax(logits, dim=1)).sum(dim=1)
+
+            per_sample_policy = soft_ce(place_logits, place_target) \
+                               + soft_ce(src_logits, src_target) \
+                               + soft_ce(dst_logits, dst_target)
             policy_weight = weight * (~vo_mask).float()
             policy_loss = (per_sample_policy * policy_weight).mean()
 

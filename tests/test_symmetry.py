@@ -76,10 +76,10 @@ class TestPermutations:
         """Applying any permutation to a board preserves the number of nonzero cells."""
         board = np.zeros((NUM_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
         # Place some pieces near center (will stay in-bounds under rotation)
-        board[0, 11, 11] = 1.0  # queen at center
-        board[1, 11, 12] = 1.0  # spider adjacent
-        board[11, 12, 11] = 1.0  # opponent queen
-        board[38, 11, 11] = 2.0 / 7  # stack height
+        board[0, 11, 11] = 1.0  # my queen at center
+        board[1, 11, 12] = 1.0  # my spider adjacent
+        board[5, 12, 11] = 1.0  # opponent queen
+        board[18, 11, 11] = 2.0 / 7  # stack height
         original_nonzero = np.count_nonzero(board)
 
         for i, perm in enumerate(_SYM_PERMS):
@@ -95,10 +95,12 @@ class TestDatasetAugmentation:
     def _make_dataset(self):
         ds = HiveDataset(max_size=10)
         board = np.zeros((NUM_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
-        board[0, CENTER, CENTER] = 1.0  # queen at center
-        board[1, CENTER, CENTER + 1] = 1.0  # spider right of center
+        board[0, CENTER, CENTER] = 1.0          # my queen (type 0) at center
+        board[1, CENTER, CENTER + 1] = 1.0      # my spider (type 1) right of center
         policy = np.zeros(POLICY_SIZE, dtype=np.float32)
+        # place a queen placement: channel 0 (Queen type), at center
         policy[0 * _GRID_CELLS + cell(CENTER, CENTER + 2)] = 0.7  # queen to (11,13)
+        # place a spider placement: channel 1 (Spider type)
         policy[1 * _GRID_CELLS + cell(CENTER, CENTER + 1)] = 0.3  # spider at (11,12)
         ds.add_sample(board, np.ones(RESERVE_SIZE, dtype=np.float32), policy, 1.0)
         return ds
