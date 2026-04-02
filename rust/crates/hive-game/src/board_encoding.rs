@@ -1,12 +1,12 @@
 /// Encode Hive board state as a fixed-size tensor for neural network input.
 /// Must produce bitwise-identical output to Python board_encoder.py.
 
-use crate::hex::Hex;
+use crate::hex::{Hex, hex_distance};
 use crate::game::Game;
-use crate::piece::{PieceColor, ALL_PIECE_TYPES, PIECE_COUNTS};
+use crate::piece::{Piece, PieceColor, PieceType, ALL_PIECE_TYPES, PIECE_COUNTS};
 
 /// Number of board encoding channels.
-pub const NUM_CHANNELS: usize = 19;
+pub const NUM_CHANNELS: usize = 24;
 /// Reserve vector size: 5 piece types x 2 colors.
 pub const RESERVE_SIZE: usize = 10;
 
@@ -22,6 +22,15 @@ pub const RESERVE_SIZE: usize = 10;
 ///
 /// 18: Stack height (normalized /7)
 ///
+/// Queen geometry channels:
+///   19: Hex distance to my queen (normalized by grid_size; 1.0 if queen not placed)
+///   20: Hex distance to opponent's queen (normalized; 1.0 if not placed)
+///   21: Adjacent to my queen (binary: 1 if cell is a neighbor of my queen)
+///   22: Adjacent to opponent's queen (binary)
+///
+/// One Hive constraint:
+///   23: Pinned piece (binary: 1 if occupied and removing would split the hive)
+///
 /// Reserve vector (current-player-relative):
 ///   0-4:  Current player's reserve counts (normalized by max)
 ///   5-9:  Opponent's reserve counts
@@ -31,6 +40,11 @@ const OPP_PIECES_BASE: usize = 5;
 const MY_STACKER_BASE: usize = 10;
 const OPP_STACKER_BASE: usize = 14;
 const STACK_HEIGHT_CH: usize = 18;
+const MY_QUEEN_DIST_CH: usize = 19;
+const OPP_QUEEN_DIST_CH: usize = 20;
+const MY_QUEEN_ADJ_CH: usize = 21;
+const OPP_QUEEN_ADJ_CH: usize = 22;
+const PINNED_CH: usize = 23;
 
 /// Map hex coordinates to encoding grid indices, using grid_size for the encoding.
 #[inline]
@@ -110,6 +124,54 @@ pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [
             reserve_out[5 + i] = f32_to_bf16(game.reserve_count(opp_color, pt) as f32 / max_count);
         }
     }
+
+    // Queen geometry channels (19-22) and pinned channel (23).
+    let my_queen = Piece::new(cur_color, PieceType::Queen, 1);
+    let opp_queen = Piece::new(opp_color, PieceType::Queen, 1);
+    let my_queen_pos = game.board.piece_position(my_queen);
+    let opp_queen_pos = game.board.piece_position(opp_queen);
+    let norm = grid_size as f32;
+    let center = (grid_size / 2) as i16;
+
+    for row in 0..grid_size {
+        for col in 0..grid_size {
+            let cell = row * grid_size + col;
+            let h: Hex = ((col as i16 - center) as i8, (row as i16 - center) as i8);
+
+            match my_queen_pos {
+                Some(qpos) => {
+                    let d = hex_distance(h, qpos);
+                    board_out[MY_QUEEN_DIST_CH * gs2 + cell] = f32_to_bf16(d as f32 / norm);
+                    if d == 1 {
+                        board_out[MY_QUEEN_ADJ_CH * gs2 + cell] = bf16_one;
+                    }
+                }
+                None => {
+                    board_out[MY_QUEEN_DIST_CH * gs2 + cell] = bf16_one;
+                }
+            }
+
+            match opp_queen_pos {
+                Some(qpos) => {
+                    let d = hex_distance(h, qpos);
+                    board_out[OPP_QUEEN_DIST_CH * gs2 + cell] = f32_to_bf16(d as f32 / norm);
+                    if d == 1 {
+                        board_out[OPP_QUEEN_ADJ_CH * gs2 + cell] = bf16_one;
+                    }
+                }
+                None => {
+                    board_out[OPP_QUEEN_DIST_CH * gs2 + cell] = bf16_one;
+                }
+            }
+        }
+    }
+
+    // Pinned pieces: articulation points of the hive graph.
+    for ap in game.board.articulation_points() {
+        if let Some((row, col)) = hex_to_encoding_grid(ap, grid_size) {
+            board_out[PINNED_CH * gs2 + row * grid_size + col] = bf16_one;
+        }
+    }
 }
 
 /// Encode a game state into board tensor and reserve vector.
@@ -167,6 +229,54 @@ pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32],
         if max_count > 0.0 {
             reserve_out[i] = game.reserve_count(cur_color, pt) as f32 / max_count;
             reserve_out[5 + i] = game.reserve_count(opp_color, pt) as f32 / max_count;
+        }
+    }
+
+    // Queen geometry channels (19-22) and pinned channel (23).
+    let my_queen = Piece::new(cur_color, PieceType::Queen, 1);
+    let opp_queen = Piece::new(opp_color, PieceType::Queen, 1);
+    let my_queen_pos = game.board.piece_position(my_queen);
+    let opp_queen_pos = game.board.piece_position(opp_queen);
+    let norm = grid_size as f32;
+    let center = (grid_size / 2) as i16;
+
+    for row in 0..grid_size {
+        for col in 0..grid_size {
+            let cell = row * grid_size + col;
+            let h: Hex = ((col as i16 - center) as i8, (row as i16 - center) as i8);
+
+            match my_queen_pos {
+                Some(qpos) => {
+                    let d = hex_distance(h, qpos);
+                    board_out[MY_QUEEN_DIST_CH * gs2 + cell] = d as f32 / norm;
+                    if d == 1 {
+                        board_out[MY_QUEEN_ADJ_CH * gs2 + cell] = 1.0;
+                    }
+                }
+                None => {
+                    board_out[MY_QUEEN_DIST_CH * gs2 + cell] = 1.0;
+                }
+            }
+
+            match opp_queen_pos {
+                Some(qpos) => {
+                    let d = hex_distance(h, qpos);
+                    board_out[OPP_QUEEN_DIST_CH * gs2 + cell] = d as f32 / norm;
+                    if d == 1 {
+                        board_out[OPP_QUEEN_ADJ_CH * gs2 + cell] = 1.0;
+                    }
+                }
+                None => {
+                    board_out[OPP_QUEEN_DIST_CH * gs2 + cell] = 1.0;
+                }
+            }
+        }
+    }
+
+    // Pinned pieces: articulation points of the hive graph.
+    for ap in game.board.articulation_points() {
+        if let Some((row, col)) = hex_to_encoding_grid(ap, grid_size) {
+            board_out[PINNED_CH * gs2 + row * grid_size + col] = 1.0;
         }
     }
 }
@@ -245,7 +355,7 @@ mod tests {
         // opponent's stacker at depth 1 → channel 14
         assert_eq!(at(&bt, 14, 11, 11), 1.0);
         // stack height = 2/7
-        let h = at(&bt, 38, 11, 11);
+        let h = at(&bt, STACK_HEIGHT_CH, 11, 11);
         assert!((h - 2.0 / 7.0).abs() < 1e-6);
     }
 
