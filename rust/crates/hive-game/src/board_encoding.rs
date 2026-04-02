@@ -304,8 +304,21 @@ mod tests {
     #[test]
     fn test_empty_board() {
         let game = Game::new();
+        let gs = game.nn_grid_size;
         let (bt, rv) = encode(&game);
-        assert!(bt.iter().all(|&v| v == 0.0));
+        // Channels 0-18 and 21-23 are zero on an empty board.
+        // Channels 19-20 (queen distances) are 1.0 when queens are not placed.
+        let gs2 = gs * gs;
+        for ch in 0..NUM_CHANNELS {
+            for cell in 0..gs2 {
+                let v = bt[ch * gs2 + cell];
+                if ch == MY_QUEEN_DIST_CH || ch == OPP_QUEEN_DIST_CH {
+                    assert_eq!(v, 1.0, "ch={ch} cell={cell}");
+                } else {
+                    assert_eq!(v, 0.0, "ch={ch} cell={cell}");
+                }
+            }
+        }
         // All pieces in reserve for both players
         for i in 0..RESERVE_SIZE {
             assert_eq!(rv[i], 1.0);

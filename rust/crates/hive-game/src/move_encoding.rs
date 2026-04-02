@@ -201,15 +201,16 @@ mod tests {
 
     #[test]
     fn test_movement_different_src_differ() {
-        // Same dest, different src → different Sum indices
-        let e1 = encode_movement((1, 0), (0, 0), GS);
-        let e2 = encode_movement((2, 0), (0, 0), GS);
+        // Same dest and piece type, different src → different Sum indices
+        let piece = Piece::new(PieceColor::White, PieceType::Ant, 1);
+        let e1 = encode_movement((1, 0), piece, (0, 0), GS);
+        let e2 = encode_movement((2, 0), piece, (0, 0), GS);
         assert_ne!(e1, e2);
     }
 
     #[test]
     fn test_policy_size() {
-        assert_eq!(policy_size(23), 7 * 23 * 23);
+        assert_eq!(policy_size(23), NUM_POLICY_CHANNELS * 23 * 23);
     }
 
     #[test]
