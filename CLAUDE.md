@@ -46,18 +46,17 @@ rust/
 - **Symmetry augmentation**: previously implemented (12 hex symmetries) but removed — not in use.
 - **Replay buffer**: in-memory only, not persisted to disk. Lost on process exit. Pretrain and selfplay run as separate processes so the buffer is always empty at the start of selfplay.
 - **Fast-cap turns**: no Dirichlet noise, play strongest move, added to buffer with value-only training (policy loss masked)
-- **Heuristic value** for unfinished games: queen neighbor pressure + beetle-on-queen bonus (no draw penalty)
+- **Heuristic value** for unfinished games: queen neighbor pressure only (no draw penalty)
 - **Auxiliary heads**: Six sigmoid outputs from a dedicated pathway off the trunk (conv1x1→FC64→FC6), predicting per-position metrics for both current and opponent player. Trained with MSE, always active (not masked). Provides gradient signal on every position even in drawn games.
-  - Queen danger (neighbors/6 + beetle-on-top bonus, 0–1)
+  - Queen danger (neighbors/6, 0–1)
   - Queen escape (legal slide destinations / 6, 0–1)
   - Piece mobility (fraction of pieces with ≥1 legal move, 0–1)
 - **Opening diversity**: Two mechanisms to avoid early-game convergence:
   - `--random-opening-moves MIN-MAX`: play N random moves (uniform in [min, max]) before MCTS takes over
   - `--opening-book PATH`: use boardspace game openings, with `--boardspace-frac` controlling the mix vs random openings
-- **Resignation**: `--resign-threshold` (default -0.95) with `--resign-min-moves` safety. Calibration games (10%) play to completion to measure false positive rate.
+- **Resignation**: `--resign-threshold` (default -0.97) with `--resign-min-moves` safety. Calibration games (10%) play to completion to measure false positive rate.
 - **Skip timeout games**: `--skip-timeout-games` discards all training data from games that hit the move cap
-- **Rayon parallelism**: MCTS tree ops (select, encode, expand, backprop) parallelized across games
-- **RustBatchMCTS.run_simulations**: full simulation loop in Rust with single Python GPU callback per round
+- **RustSelfPlaySession**: full simulation loop in Rust with a single Python GPU callback (or ORT) per inference batch. Inference is the bottleneck; MCTS ops (init, expand_and_backprop) use rayon across games but are negligible relative to GPU time.
 
 ### Known issue: self-play draw convergence (Hive only)
 From-scratch Hive self-play converges to draws within a few iterations. The network can't learn to win

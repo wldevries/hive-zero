@@ -126,8 +126,8 @@ def export_onnx(model: ZertzNet, path: str):
         input_names=input_names,
         output_names=output_names,
         dynamic_shapes=(
-            {0: "batch_size"},
-            {0: "batch_size"}
+            {0: "batch_board"},
+            {0: "batch_reserve"}
         ),
         dynamo=True,
         verbose=False,

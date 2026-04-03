@@ -7,8 +7,6 @@ use core::panic;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
-use rayon::prelude::*;
-
 use hive_game::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE, f32_to_bf16};
 use crate::inference::HiveInference;
 use hive_game::game::{Game, GameState};
@@ -26,10 +24,6 @@ use rand::prelude::Distribution;
 
 const DECISIVE_WEIGHT: f32 = 10.0;
 
-/// Wrapper to send raw pointers across threads (safe when indices are unique).
-struct SendPtr(*mut MctsSearch<Game>);
-unsafe impl Send for SendPtr {}
-unsafe impl Sync for SendPtr {}
 
 /// Wraps either a Python eval callback or a native engine (ORT, tract, …).
 enum InferenceBackend<'py> {
@@ -112,11 +106,7 @@ fn queen_danger(game: &Game, color: PieceColor) -> f32 {
             let neighbors = hex_neighbors(pos).iter()
                 .filter(|&&n| game.board.is_occupied(n))
                 .count() as f32;
-            let beetle_on_top = {
-                let stack = game.board.stack_at(pos);
-                stack.height() > 1
-            };
-            ((neighbors / 6.0) + if beetle_on_top { 0.15 } else { 0.0 }).min(1.0)
+            (neighbors / 6.0).min(1.0)
         }
     }
 }
@@ -583,21 +573,14 @@ impl PySelfPlaySession {
                 .expect("inference failed");
             let (init_policies, init_values) = (r.policy, r.value);
 
-            // --- Init MCTS trees (rayon parallel) ---
+            // --- Init MCTS trees ---
             let game_clones: Vec<Game> = mcts_games.iter().map(|&gi| games[gi].clone()).collect();
-            {
-                let c_puct = cfg.c_puct;
-                let search_ptrs: Vec<SendPtr> = mcts_games.iter()
-                    .map(|&gi| SendPtr(&mut searches[gi] as *mut MctsSearch<Game>))
-                    .collect();
-
-                search_ptrs.par_iter().enumerate().for_each(|(i, sp)| {
-                    let search = unsafe { &mut *sp.0 };
-                    search.c_puct = c_puct;
-                    search.use_forced_playouts = true;
-                    let policy = &init_policies[i * policy_size..(i + 1) * policy_size];
-                    search.init(&game_clones[i], policy);
-                });
+            for (i, &gi) in mcts_games.iter().enumerate() {
+                let search = &mut searches[gi];
+                search.c_puct = cfg.c_puct;
+                search.use_forced_playouts = true;
+                let policy = &init_policies[i * policy_size..(i + 1) * policy_size];
+                search.init(&game_clones[i], policy);
             }
 
             // Apply Dirichlet noise to full-search games only
@@ -987,17 +970,10 @@ fn run_simulations(
                 entry.2.push(value_data[i]);
             }
 
-            let unique_gis: Vec<usize> = gi_groups.keys().copied().collect();
-            let expand_ptrs: Vec<SendPtr> = unique_gis.iter()
-                .map(|&gi| SendPtr(&mut searches[gi] as *mut MctsSearch<Game>))
-                .collect();
-
-            expand_ptrs.par_iter().zip(unique_gis.par_iter()).for_each(|(sp, &gi)| {
-                let search = unsafe { &mut *sp.0 };
-                let (leaves, policies, values) = gi_groups.get(&gi).unwrap();
+            for (&gi, (leaves, policies, values)) in &gi_groups {
                 let mut leaves_clone = leaves.clone();
-                search.expand_and_backprop(&mut leaves_clone, policies, values);
-            });
+                searches[gi].expand_and_backprop(&mut leaves_clone, policies, values);
+            }
 
             pending_gi.clear();
         }

@@ -429,19 +429,9 @@ impl Game {
             hex_neighbors(pos).iter().filter(|&&n| self.board.is_occupied(n)).count()
         }) as f32;
 
-        // Check for beetle on queen (extra dangerous)
-        let w_beetle_on_queen = self.board.piece_position(wq).map_or(false, |pos| {
-            let stack = self.board.stack_at(pos);
-            stack.height() > 1 && stack.top().map_or(false, |p| p.color() == PieceColor::Black)
-        });
-        let b_beetle_on_queen = self.board.piece_position(bq).map_or(false, |pos| {
-            let stack = self.board.stack_at(pos);
-            stack.height() > 1 && stack.top().map_or(false, |p| p.color() == PieceColor::White)
-        });
-
-        // Queen danger: neighbors/6, with beetle-on-queen bonus
-        let w_danger = w_queen_neighbors / 6.0 + if w_beetle_on_queen { 0.15 } else { 0.0 };
-        let b_danger = b_queen_neighbors / 6.0 + if b_beetle_on_queen { 0.15 } else { 0.0 };
+        // Queen danger: neighbors/6
+        let w_danger = w_queen_neighbors / 6.0;
+        let b_danger = b_queen_neighbors / 6.0;
 
         // Score: opponent danger minus own danger, clamped to [-1, 1]
         let w_score = (b_danger - w_danger).clamp(-1.0, 1.0);

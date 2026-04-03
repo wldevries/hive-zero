@@ -159,8 +159,8 @@ def export_onnx(model: HiveNet, path: str):
         input_names=input_names,
         output_names=output_names,
         dynamic_shapes=(
-            {0: "batch"},
-            {0: "batch"}
+            {0: "batch_board"},
+            {0: "batch_reserve"}
         ),
         dynamo=True,
         verbose=False,
