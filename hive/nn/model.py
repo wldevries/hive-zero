@@ -51,9 +51,9 @@ class HiveNet(nn.Module):
         # Residual tower
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
 
-        # Self-attention layers (global relationship reasoning after CNN trunk)
+        # Self-attention layers with adaLN-Zero (conditioned on reserve vector)
         self.attention_layers = nn.ModuleList(
-            [SpatialAttention(channels) for _ in range(num_attention_layers)]
+            [SpatialAttention(channels, cond_dim=RESERVE_SIZE) for _ in range(num_attention_layers)]
         )
 
         # Factorized policy heads — share a common conv+BN, then 3 output heads.
@@ -103,9 +103,9 @@ class HiveNet(nn.Module):
         for block in self.res_blocks:
             x = block(x)
 
-        # Self-attention (global relationship reasoning)
+        # Self-attention (global reasoning, conditioned on reserve vector)
         for attn in self.attention_layers:
-            x = attn(x)
+            x = attn(x, reserve_vector)
 
         # Factorized policy heads
         p = F.relu(self.policy_bn(self.policy_conv(x)))
