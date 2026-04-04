@@ -198,6 +198,38 @@ impl Symmetry for D6Symmetry {
     }
 }
 
+/// Apply a D6 symmetry to a `(num_channels, grid_size, grid_size)` f32 tensor in-place.
+///
+/// Convention: `sym.transform_hex` maps input coords → output coords, matching
+/// `d6_grid_permutations` in the Python bindings. Out-of-bounds output cells are 0.
+pub fn apply_d6_sym_spatial(tensor: &mut [f32], sym: D6Symmetry, num_channels: usize, grid_size: usize) {
+    if sym == D6Symmetry::identity() {
+        return;
+    }
+    let center = grid_size as i32 / 2;
+    let gs = grid_size;
+    let num_cells = gs * gs;
+    debug_assert_eq!(tensor.len(), num_channels * num_cells);
+    let mut out = vec![0f32; tensor.len()];
+    for in_row in 0..gs {
+        for in_col in 0..gs {
+            let q = in_col as i32 - center;
+            let r = in_row as i32 - center;
+            let (q2, r2) = sym.transform_hex(q, r);
+            let out_row = r2 + center;
+            let out_col = q2 + center;
+            if out_row >= 0 && out_row < gs as i32 && out_col >= 0 && out_col < gs as i32 {
+                let in_cell = in_row * gs + in_col;
+                let out_cell = out_row as usize * gs + out_col as usize;
+                for c in 0..num_channels {
+                    out[c * num_cells + out_cell] = tensor[c * num_cells + in_cell];
+                }
+            }
+        }
+    }
+    tensor.copy_from_slice(&out);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +348,44 @@ mod tests {
         // Origin should be fixed under all symmetries.
         for &s in D6Symmetry::all() {
             assert_eq!(s.transform_hex(0, 0), (0, 0), "s={:?}", s);
+        }
+    }
+
+    #[test]
+    fn test_apply_d6_sym_spatial_roundtrip() {
+        // Applying sym then sym.inverse() should recover the original tensor for
+        // hexagonally-valid cells (cells within the hex radius stay in bounds under
+        // all D6 symmetries, since hex symmetries preserve distance from origin).
+        let grid_size = 7usize;  // radius 3 — all 37 valid hex cells within radius 3
+        let radius = (grid_size / 2) as i32;
+        let center = radius;
+        let num_channels = 3usize;
+        let n = num_channels * grid_size * grid_size;
+
+        // Build a tensor with non-zero values only in hexagonally-valid cells.
+        let mut original = vec![0f32; n];
+        let mut val = 1.0f32;
+        for r in 0..grid_size {
+            for c in 0..grid_size {
+                let q = c as i32 - center;
+                let rr = r as i32 - center;
+                // Valid hex cell: |q| ≤ radius, |r| ≤ radius, |q+r| ≤ radius
+                if q.abs() <= radius && rr.abs() <= radius && (q + rr).abs() <= radius {
+                    for ch in 0..num_channels {
+                        original[ch * grid_size * grid_size + r * grid_size + c] = val;
+                        val += 1.0;
+                    }
+                }
+            }
+        }
+
+        for &sym in D6Symmetry::all() {
+            let mut tensor = original.clone();
+            super::apply_d6_sym_spatial(&mut tensor, sym, num_channels, grid_size);
+            super::apply_d6_sym_spatial(&mut tensor, sym.inverse(), num_channels, grid_size);
+            for (i, (&a, &b)) in original.iter().zip(tensor.iter()).enumerate() {
+                assert!((a - b).abs() < 1e-6, "sym={:?} i={} a={} b={}", sym, i, a, b);
+            }
         }
     }
 }

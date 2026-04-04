@@ -1,0 +1,2 @@
+python-preference = "only-system"
+cache-keys = [{ file = "pyproject.toml" }, { file = "rust/**/*.toml" }, { file = "rust/**/*.rs" }]

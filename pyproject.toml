@@ -18,10 +18,6 @@ zertz = "zertz.cli:main"
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
-[tool.uv]
-# Rebuild Rust extension when source changes
-cache-keys = [{ file = "pyproject.toml" }, { file = "rust/**/*.toml" }, { file = "rust/**/*.rs" }]
-
 [tool.maturin]
 manifest-path = "rust/crates/engine-zero/Cargo.toml"
 module-name = "hive_engine"

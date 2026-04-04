@@ -16,7 +16,7 @@ use core_game::game::PolicyIndex;
 use core_game::mcts::search::MctsSearch;
 use hive_game::move_encoding::{self, encode_game_move};
 use hive_game::piece::{Piece, PieceColor, PieceType};
-use core_game::symmetry::Symmetry;
+use core_game::symmetry::{Symmetry, D6Symmetry, apply_d6_sym_spatial};
 
 use rand::Rng;
 use rand::distributions::WeightedIndex;
@@ -558,7 +558,8 @@ impl PySelfPlaySession {
                 turn_reserve_offsets.push(reserve_off);
             }
 
-            // --- Initial policy eval ---
+            // --- Initial policy eval (random D6 symmetry per game to avoid orientation bias) ---
+            let root_syms: Vec<D6Symmetry> = (0..n).map(|_| D6Symmetry::random(&mut rng)).collect();
             let mut flat_boards = Vec::with_capacity(n * board_size);
             let mut flat_reserves = Vec::with_capacity(n * RESERVE_SIZE);
             for i in 0..n {
@@ -568,10 +569,22 @@ impl PySelfPlaySession {
                 flat_reserves.extend_from_slice(
                     &reserve_buf[turn_reserve_offsets[i]..turn_reserve_offsets[i] + RESERVE_SIZE]
                 );
+                apply_d6_sym_spatial(
+                    &mut flat_boards[i * board_size..(i + 1) * board_size],
+                    root_syms[i], NUM_CHANNELS, grid_size,
+                );
             }
             let r = backend.infer_batch(&flat_boards, &flat_reserves, n, NUM_CHANNELS, grid_size, RESERVE_SIZE)
                 .expect("inference failed");
-            let (init_policies, init_values) = (r.policy, r.value);
+            let (mut init_policies, init_values) = (r.policy, r.value);
+            // Inverse-transform policy back to original orientation
+            let num_policy_channels = move_encoding::NUM_POLICY_CHANNELS;
+            for i in 0..n {
+                apply_d6_sym_spatial(
+                    &mut init_policies[i * policy_size..(i + 1) * policy_size],
+                    root_syms[i].inverse(), num_policy_channels, grid_size,
+                );
+            }
 
             // --- Init MCTS trees ---
             let game_clones: Vec<Game> = mcts_games.iter().map(|&gi| games[gi].clone()).collect();
@@ -911,11 +924,14 @@ fn run_simulations(
 ) {
     let board_size = NUM_CHANNELS * grid_size * grid_size;
     let policy_size = move_encoding::policy_size(grid_size);
+    let num_policy_channels = move_encoding::NUM_POLICY_CHANNELS;
     let mut sims_done: Vec<usize> = vec![0; searching.len()];
     let mut still_searching: Vec<usize> = (0..searching.len()).collect();
     let mut round: usize = 0;
+    let mut rng = rand::thread_rng();
 
     let mut pending_gi: Vec<usize> = Vec::new();
+    let mut pending_syms: Vec<D6Symmetry> = Vec::new();
     let mut pending_leaves: Vec<(u32, Game)> = Vec::new();
     let mut pending_boards: Vec<f32> = Vec::new();
     let mut pending_reserves: Vec<f32> = Vec::new();
@@ -931,8 +947,11 @@ fn run_simulations(
                 let leaves = search.select_leaves(1);
                 sims_done[si] += leaves.len().max(1);
                 for (_, game) in &leaves {
+                    let sym = D6Symmetry::random(&mut rng);
                     board_encoding::encode_board(game, &mut enc_board, &mut enc_reserve, grid_size);
+                    apply_d6_sym_spatial(&mut enc_board, sym, NUM_CHANNELS, grid_size);
                     pending_gi.push(gi);
+                    pending_syms.push(sym);
                     pending_boards.extend_from_slice(&enc_board);
                     pending_reserves.extend_from_slice(&enc_reserve);
                 }
@@ -966,7 +985,9 @@ fn run_simulations(
             for (i, &gi) in pending_gi.iter().enumerate() {
                 let entry = gi_groups.entry(gi).or_default();
                 entry.0.push(drained_leaves[i].clone());
-                entry.1.push(policy_data[i * policy_size..(i + 1) * policy_size].to_vec());
+                let mut policy = policy_data[i * policy_size..(i + 1) * policy_size].to_vec();
+                apply_d6_sym_spatial(&mut policy, pending_syms[i].inverse(), num_policy_channels, grid_size);
+                entry.1.push(policy);
                 entry.2.push(value_data[i]);
             }
 
@@ -976,6 +997,7 @@ fn run_simulations(
             }
 
             pending_gi.clear();
+            pending_syms.clear();
         }
     }
 }

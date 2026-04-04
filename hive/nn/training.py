@@ -1,7 +1,6 @@
 """Training loop for the Hive neural network."""
 
 from __future__ import annotations
-import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -121,45 +120,50 @@ class HiveDataset(Dataset):
         self._size = 0
 
     def __len__(self):
-        return self._size
+        return self._size * 12 if self.augment_symmetry else self._size
 
     def __getitem__(self, idx):
-        board = self.board_tensors[idx]
-        policy = self.policy_targets[idx]
-
         if self.augment_symmetry:
-            sym = random.randint(0, 11)
-            if sym != 0:  # 0 = identity, skip
-                gs = self.grid_size
-                gc = gs * gs
-                sym_perms = _load_sym_perms(gs)
-                perm = sym_perms[sym]
-                # Board: (NUM_CHANNELS, gs, gs) → permute spatial cells
-                bf = board.reshape(NUM_CHANNELS, gc)
-                padded = np.concatenate([bf, np.zeros((NUM_CHANNELS, 1), dtype=np.float32)], axis=1)
-                board = padded[:, perm].reshape(NUM_CHANNELS, gs, gs)
-                # Policy: (7*gs*gs,) → (7, gc) → permute → flatten
-                pf = policy.reshape(NUM_POLICY_CHANNELS, gc)
-                padded_p = np.concatenate([pf, np.zeros((NUM_POLICY_CHANNELS, 1), dtype=np.float32)], axis=1)
-                policy = padded_p[:, perm].reshape(-1)
+            sym = idx % 12
+            base_idx = idx // 12
+        else:
+            sym = 0
+            base_idx = idx
+
+        board = self.board_tensors[base_idx]
+        policy = self.policy_targets[base_idx]
+
+        if sym != 0:
+            gs = self.grid_size
+            gc = gs * gs
+            sym_perms = _load_sym_perms(gs)
+            perm = sym_perms[sym]
+            # Board: (NUM_CHANNELS, gs, gs) → permute spatial cells
+            bf = board.reshape(NUM_CHANNELS, gc)
+            padded = np.concatenate([bf, np.zeros((NUM_CHANNELS, 1), dtype=np.float32)], axis=1)
+            board = padded[:, perm].reshape(NUM_CHANNELS, gs, gs)
+            # Policy: (7*gs*gs,) → (7, gc) → permute → flatten
+            pf = policy.reshape(NUM_POLICY_CHANNELS, gc)
+            padded_p = np.concatenate([pf, np.zeros((NUM_POLICY_CHANNELS, 1), dtype=np.float32)], axis=1)
+            policy = padded_p[:, perm].reshape(-1)
         else:
             board = board.copy()
             policy = policy.copy()
 
         # Auxiliary targets as a single tensor [qd, qd, qe, qe, mob, mob]
         aux_targets = np.array([
-            self.my_queen_danger[idx], self.opp_queen_danger[idx],
-            self.my_queen_escape[idx], self.opp_queen_escape[idx],
-            self.my_mobility[idx], self.opp_mobility[idx],
+            self.my_queen_danger[base_idx], self.opp_queen_danger[base_idx],
+            self.my_queen_escape[base_idx], self.opp_queen_escape[base_idx],
+            self.my_mobility[base_idx], self.opp_mobility[base_idx],
         ], dtype=np.float32)
         return (
             torch.from_numpy(board),
-            torch.from_numpy(self.reserve_vectors[idx].copy()),
+            torch.from_numpy(self.reserve_vectors[base_idx].copy()),
             torch.from_numpy(policy),
-            torch.tensor(self.value_targets[idx], dtype=torch.float32),
-            torch.tensor(self.weights[idx], dtype=torch.float32),
-            torch.tensor(self.value_only[idx], dtype=torch.bool),
-            torch.tensor(self.policy_only[idx], dtype=torch.bool),
+            torch.tensor(self.value_targets[base_idx], dtype=torch.float32),
+            torch.tensor(self.weights[base_idx], dtype=torch.float32),
+            torch.tensor(self.value_only[base_idx], dtype=torch.bool),
+            torch.tensor(self.policy_only[base_idx], dtype=torch.bool),
             torch.from_numpy(aux_targets),
         )
 

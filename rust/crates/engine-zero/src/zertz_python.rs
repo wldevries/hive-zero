@@ -15,6 +15,7 @@ use zertz_game::move_encoding::{encode_move, POLICY_SIZE};
 use zertz_game::random_play::{classify_win, WinType};
 use zertz_game::zertz::{Marble, ZertzBoard, ZertzMove, MAX_CAPTURE_JUMPS};
 use core_game::game::{Game, Outcome, Player};
+use core_game::symmetry::{D6Symmetry, Symmetry, apply_d6_sym_spatial};
 use crate::inference::ZertzInference;
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
@@ -345,7 +346,8 @@ impl PyZertzSelfPlaySession {
                 .collect();
             full_search_turns += is_full.iter().filter(|&&f| f).count() as u32;
 
-            // Encode current positions
+            // Encode current positions (with random D6 symmetry per game to avoid orientation bias)
+            let root_syms: Vec<D6Symmetry> = (0..n).map(|_| D6Symmetry::random(&mut rng)).collect();
             let mut turn_board_offsets: Vec<usize> = Vec::with_capacity(n);
             let mut turn_reserve_offsets: Vec<usize> = Vec::with_capacity(n);
             let mut flat_boards = vec![0f32; n * BOARD_FLAT];
@@ -357,6 +359,7 @@ impl PyZertzSelfPlaySession {
                 reserve_buf.resize(roff + RESERVE_SIZE, 0.0);
                 encode_board(&boards[gi], &mut board_buf[boff..boff + BOARD_FLAT], &mut reserve_buf[roff..roff + RESERVE_SIZE]);
                 encode_board(&boards[gi], &mut flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT], &mut flat_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE]);
+                apply_d6_sym_spatial(&mut flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT], root_syms[i], NUM_CHANNELS, GRID_SIZE);
                 turn_board_offsets.push(boff);
                 turn_reserve_offsets.push(roff);
             }
@@ -364,7 +367,14 @@ impl PyZertzSelfPlaySession {
             // Initial NN eval for MCTS root policy
             let r = backend.infer_batch(&flat_boards, &flat_reserves, n, NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            let (init_place, init_src, init_dst) = (r.place, r.cap_source, r.cap_dest);
+            let (mut init_place, mut init_src, mut init_dst) = (r.place, r.cap_source, r.cap_dest);
+            // Inverse-transform policy heads back to original orientation
+            for i in 0..n {
+                let inv = root_syms[i].inverse();
+                apply_d6_sym_spatial(&mut init_place[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE], inv, PLACE_HEAD_SIZE / (GRID_SIZE * GRID_SIZE), GRID_SIZE);
+                apply_d6_sym_spatial(&mut init_src[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE], inv, 1, GRID_SIZE);
+                apply_d6_sym_spatial(&mut init_dst[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE], inv, 1, GRID_SIZE);
+            }
 
             // Init MCTS trees
             for (i, &gi) in mcts_games.iter().enumerate() {
@@ -410,11 +420,15 @@ impl PyZertzSelfPlaySession {
                 let nl = leaf_ids.len();
                 let mut leaf_boards_flat = vec![0f32; nl * BOARD_FLAT];
                 let mut leaf_reserves_flat = vec![0f32; nl * RESERVE_SIZE];
+                let mut leaf_syms: Vec<D6Symmetry> = Vec::with_capacity(nl);
                 for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
                     let gi = mcts_games[i];
                     let (board_enc, reserve_enc) = searches[gi].encode_leaf(leaf);
                     leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
                     leaf_reserves_flat[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
+                    let sym = D6Symmetry::random(&mut rng);
+                    apply_d6_sym_spatial(&mut leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], sym, NUM_CHANNELS, GRID_SIZE);
+                    leaf_syms.push(sym);
                 }
 
                 let lr = backend.infer_batch(&leaf_boards_flat, &leaf_reserves_flat, nl, NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE)
@@ -422,12 +436,9 @@ impl PyZertzSelfPlaySession {
                 let (leaf_place, leaf_src, leaf_dst, leaf_values) =
                     (lr.place, lr.cap_source, lr.cap_dest, lr.value);
 
+                let place_channels = PLACE_HEAD_SIZE / (GRID_SIZE * GRID_SIZE);
                 let mut per_game_leaves: Vec<Vec<NodeId>> = vec![Vec::new(); n];
                 let mut per_game_values: Vec<Vec<f32>> = vec![Vec::new(); n];
-                // We need to keep per-leaf slices alive, so store Vec<f32> per leaf.
-                // Actually, the slices reference leaf_place/leaf_src/leaf_dst which are local.
-                // We need owned data per leaf for the PolicyHeads slices to be valid.
-                // Store per-game Vec of (place_chunk, src_chunk, dst_chunk) as owned Vecs.
                 struct LeafHeadData {
                     place: Vec<f32>,
                     src: Vec<f32>,
@@ -435,12 +446,15 @@ impl PyZertzSelfPlaySession {
                 }
                 let mut per_game_head_data: Vec<Vec<LeafHeadData>> = (0..n).map(|_| Vec::new()).collect();
                 for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
+                    let inv = leaf_syms[k].inverse();
+                    let mut place = leaf_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE].to_vec();
+                    let mut src = leaf_src[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec();
+                    let mut dst = leaf_dst[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec();
+                    apply_d6_sym_spatial(&mut place, inv, place_channels, GRID_SIZE);
+                    apply_d6_sym_spatial(&mut src, inv, 1, GRID_SIZE);
+                    apply_d6_sym_spatial(&mut dst, inv, 1, GRID_SIZE);
                     per_game_leaves[i].push(leaf);
-                    per_game_head_data[i].push(LeafHeadData {
-                        place: leaf_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE].to_vec(),
-                        src: leaf_src[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec(),
-                        dst: leaf_dst[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec(),
-                    });
+                    per_game_head_data[i].push(LeafHeadData { place, src, dst });
                     per_game_values[i].push(leaf_values[k]);
                 }
                 for (i, &gi) in mcts_games.iter().enumerate() {
@@ -703,20 +717,31 @@ impl PyZertzSelfPlaySession {
             Ok((place, src, dst, value))
         };
 
+        let mut rng = rand::thread_rng();
+        let place_channels = PLACE_HEAD_SIZE / (GRID_SIZE * GRID_SIZE);
+
         while active.iter().any(|&a| a) {
             let mcts_games: Vec<usize> = (0..num_games).filter(|&gi| active[gi]).collect();
             if mcts_games.is_empty() { break; }
             let n = mcts_games.len();
 
+            let root_syms: Vec<D6Symmetry> = (0..n).map(|_| D6Symmetry::random(&mut rng)).collect();
             let mut flat_boards = vec![0f32; n * BOARD_FLAT];
             let mut flat_reserves = vec![0f32; n * RESERVE_SIZE];
             let mut fn1_flags: Vec<bool> = Vec::with_capacity(n);
             for (i, &gi) in mcts_games.iter().enumerate() {
                 encode_board(&boards[gi], &mut flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT], &mut flat_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE]);
+                apply_d6_sym_spatial(&mut flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT], root_syms[i], NUM_CHANNELS, GRID_SIZE);
                 fn1_flags.push(use_fn1_for(gi, boards[gi].next_player()));
             }
 
-            let (init_place, init_src, init_dst, _) = call_evals(py, &flat_boards, &flat_reserves, &fn1_flags, n)?;
+            let (mut init_place, mut init_src, mut init_dst, _) = call_evals(py, &flat_boards, &flat_reserves, &fn1_flags, n)?;
+            for i in 0..n {
+                let inv = root_syms[i].inverse();
+                apply_d6_sym_spatial(&mut init_place[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE], inv, place_channels, GRID_SIZE);
+                apply_d6_sym_spatial(&mut init_src[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE], inv, 1, GRID_SIZE);
+                apply_d6_sym_spatial(&mut init_dst[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE], inv, 1, GRID_SIZE);
+            }
             for (i, &gi) in mcts_games.iter().enumerate() {
                 let heads = PolicyHeads {
                     place: &init_place[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE],
@@ -749,11 +774,15 @@ impl PyZertzSelfPlaySession {
                 let mut leaf_boards_flat = vec![0f32; nl * BOARD_FLAT];
                 let mut leaf_reserves_flat = vec![0f32; nl * RESERVE_SIZE];
                 let mut leaf_fn1_flags: Vec<bool> = Vec::with_capacity(nl);
+                let mut leaf_syms: Vec<D6Symmetry> = Vec::with_capacity(nl);
                 for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
                     let gi = mcts_games[i];
                     let (board_enc, reserve_enc) = searches[gi].encode_leaf(leaf);
                     leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
                     leaf_reserves_flat[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
+                    let sym = D6Symmetry::random(&mut rng);
+                    apply_d6_sym_spatial(&mut leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], sym, NUM_CHANNELS, GRID_SIZE);
+                    leaf_syms.push(sym);
                     let leaf_player = searches[gi].get_leaf_player(leaf);
                     leaf_fn1_flags.push(use_fn1_for(gi, leaf_player));
                 }
@@ -765,16 +794,20 @@ impl PyZertzSelfPlaySession {
                     src: Vec<f32>,
                     dst: Vec<f32>,
                 }
+                let place_channels = PLACE_HEAD_SIZE / (GRID_SIZE * GRID_SIZE);
                 let mut per_game_leaves: Vec<Vec<NodeId>> = vec![Vec::new(); n];
                 let mut per_game_head_data: Vec<Vec<LeafHeadData>> = (0..n).map(|_| Vec::new()).collect();
                 let mut per_game_values: Vec<Vec<f32>> = vec![Vec::new(); n];
                 for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
+                    let inv = leaf_syms[k].inverse();
+                    let mut place = leaf_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE].to_vec();
+                    let mut src = leaf_src[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec();
+                    let mut dst = leaf_dst[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec();
+                    apply_d6_sym_spatial(&mut place, inv, place_channels, GRID_SIZE);
+                    apply_d6_sym_spatial(&mut src, inv, 1, GRID_SIZE);
+                    apply_d6_sym_spatial(&mut dst, inv, 1, GRID_SIZE);
                     per_game_leaves[i].push(leaf);
-                    per_game_head_data[i].push(LeafHeadData {
-                        place: leaf_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE].to_vec(),
-                        src: leaf_src[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec(),
-                        dst: leaf_dst[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec(),
-                    });
+                    per_game_head_data[i].push(LeafHeadData { place, src, dst });
                     per_game_values[i].push(leaf_values[k]);
                 }
                 for (i, &gi) in mcts_games.iter().enumerate() {
