@@ -46,6 +46,7 @@ class SelfPlayTrainer:
                  device: str = "cpu",
                  num_blocks: int = 6,
                  channels: int = 64,
+                 num_attention_layers: int = 0,
                  checkpoint_dir: str = "checkpoints",
                  lr: float = 0.02,
                  lr_scheduler: Optional[LRScheduler] = None,
@@ -64,17 +65,20 @@ class SelfPlayTrainer:
             self.start_generation = ckpt.get("generation", 0)
             blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
+            attn = len(self.model.attention_layers)
             gs = self.model.grid_size
             params = sum(p.numel() for p in self.model.parameters())
             print(f"Resumed from {model_path} (generation {self.start_generation}, "
-                  f"{blocks} blocks, {ch} channels, grid {gs}x{gs}, {params/1e6:.2f}M params)")
+                  f"{blocks} blocks, {ch} channels, {attn} attn layers, grid {gs}x{gs}, {params/1e6:.2f}M params)")
             if blocks != num_blocks or ch != channels:
                 print(f"  WARNING: --blocks {num_blocks} --channels {channels} ignored "
                       f"(checkpoint shape: {blocks} blocks, {ch} channels)")
             self.grid_size = gs
         else:
-            self.model = create_model(num_blocks, channels, grid_size=grid_size)
-            print(f"Created new model ({num_blocks} blocks, {channels} channels, grid {grid_size}x{grid_size})")
+            self.model = create_model(num_blocks, channels, grid_size=grid_size,
+                                      num_attention_layers=num_attention_layers)
+            print(f"Created new model ({num_blocks} blocks, {channels} channels, "
+                  f"{num_attention_layers} attn layers, grid {grid_size}x{grid_size})")
 
         self.model.to(device)
         self.lr_scheduler = lr_scheduler

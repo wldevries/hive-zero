@@ -41,6 +41,8 @@ def main():
                               help="Residual blocks in network")
     train_parser.add_argument("--channels", type=int, default=64,
                               help="Channels in network")
+    train_parser.add_argument("--attention-layers", type=int, default=0,
+                              help="Self-attention layers after CNN trunk (default: 0)")
     train_parser.add_argument("--grid-size", type=int, default=23,
                               help="NN encoding grid size (must be odd, default 23)")
     train_parser.add_argument("--max-moves", type=int, default=200,
@@ -128,6 +130,8 @@ def main():
     pretrain_parser.add_argument("--device", default="cuda")
     pretrain_parser.add_argument("--blocks", type=int, default=6)
     pretrain_parser.add_argument("--channels", type=int, default=64)
+    pretrain_parser.add_argument("--attention-layers", type=int, default=0,
+                                 help="Self-attention layers after CNN trunk (default: 0)")
     pretrain_parser.add_argument("--grid-size", type=int, default=23,
                                  help="NN encoding grid size (must be odd, default 23)")
     pretrain_parser.add_argument("--lr", type=float, default=0.005,
@@ -184,8 +188,9 @@ def main():
         print(f"  {len(zip_index)} zip files found")
         pretrainer = Pretrainer(
             model_path=args.model, device=args.device,
-            num_blocks=args.blocks, channels=args.channels, lr=args.lr,
-            grid_size=args.grid_size,
+            num_blocks=args.blocks, channels=args.channels,
+            num_attention_layers=args.attention_layers,
+            lr=args.lr, grid_size=args.grid_size,
         )
         pretrainer.run(
             games=games, zip_index=zip_index,
@@ -242,10 +247,11 @@ def main():
             lr_scheduler = lr_scheduler_from_string(args.lr_schedule)
 
         trainer = SelfPlayTrainer(
-            model_path=args.model, 
+            model_path=args.model,
             device=args.device,
-            num_blocks=args.blocks, 
-            channels=args.channels, 
+            num_blocks=args.blocks,
+            channels=args.channels,
+            num_attention_layers=args.attention_layers,
             lr=args.lr,
             lr_scheduler=lr_scheduler,
             grid_size=args.grid_size,

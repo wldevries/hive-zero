@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from shared.nn.attention import SpatialAttention
 from shared.nn.resblock import ResBlock
 from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
 from ..encoding.move_encoder import NUM_POLICY_CHANNELS, NUM_PLACE_CHANNELS, policy_size
@@ -21,6 +22,7 @@ class HiveNet(nn.Module):
         - Broadcast reserve + concat with board tensor
         - Input convolution
         - Residual tower (num_blocks blocks)
+        - Self-attention layers (global relationship reasoning)
         - Policy heads (factorized, concatenated into flat vector):
             place_head: Conv1x1(C -> 5, G, G)  [placement: piece_type x dest]
             src_head:   Conv1x1(C -> 1, G, G)  [movement source]
@@ -32,7 +34,8 @@ class HiveNet(nn.Module):
     """
 
     def __init__(self, num_blocks: int = 10, channels: int = 128,
-                 grid_size: int = DEFAULT_GRID_SIZE):
+                 grid_size: int = DEFAULT_GRID_SIZE,
+                 num_attention_layers: int = 0):
         super().__init__()
         self.game = "hive"
         if grid_size > DEFAULT_GRID_SIZE:
@@ -47,6 +50,11 @@ class HiveNet(nn.Module):
 
         # Residual tower
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
+
+        # Self-attention layers (global relationship reasoning after CNN trunk)
+        self.attention_layers = nn.ModuleList(
+            [SpatialAttention(channels) for _ in range(num_attention_layers)]
+        )
 
         # Factorized policy heads — share a common conv+BN, then 3 output heads.
         # place_head: (B, 5, G, G)  - one channel per piece type, placement logits
@@ -95,6 +103,10 @@ class HiveNet(nn.Module):
         for block in self.res_blocks:
             x = block(x)
 
+        # Self-attention (global relationship reasoning)
+        for attn in self.attention_layers:
+            x = attn(x)
+
         # Factorized policy heads
         p = F.relu(self.policy_bn(self.policy_conv(x)))
         place = self.policy_place(p).view(p.size(0), -1)  # (B, 5*G*G)
@@ -118,9 +130,11 @@ class HiveNet(nn.Module):
 
 
 def create_model(num_blocks: int = 10, channels: int = 128,
-                 grid_size: int = DEFAULT_GRID_SIZE) -> HiveNet:
+                 grid_size: int = DEFAULT_GRID_SIZE,
+                 num_attention_layers: int = 0) -> HiveNet:
     """Create a new HiveNet model."""
-    return HiveNet(num_blocks=num_blocks, channels=channels, grid_size=grid_size)
+    return HiveNet(num_blocks=num_blocks, channels=channels, grid_size=grid_size,
+                   num_attention_layers=num_attention_layers)
 
 
 def save_checkpoint(model: HiveNet, path: str, generation: int = 0,
@@ -131,6 +145,7 @@ def save_checkpoint(model: HiveNet, path: str, generation: int = 0,
         "game": "hive",
         "num_blocks": model.res_blocks.__len__(),
         "channels": model.input_conv.out_channels,
+        "num_attention_layers": len(model.attention_layers),
         "grid_size": model.grid_size,
         "generation": generation,
         "metadata": metadata or {},
@@ -183,7 +198,9 @@ def load_checkpoint(path: str) -> tuple[HiveNet, dict]:
     num_blocks = checkpoint.get("num_blocks", 10)
     channels = checkpoint.get("channels", 128)
     grid_size = checkpoint.get("grid_size", DEFAULT_GRID_SIZE)
-    model = HiveNet(num_blocks=num_blocks, channels=channels, grid_size=grid_size)
+    num_attention_layers = checkpoint.get("num_attention_layers", 0)
+    model = HiveNet(num_blocks=num_blocks, channels=channels, grid_size=grid_size,
+                    num_attention_layers=num_attention_layers)
 
     # Support both checkpoint format and raw state_dict
     state_dict = checkpoint.get("model_state_dict", checkpoint)

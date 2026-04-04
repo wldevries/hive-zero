@@ -292,6 +292,7 @@ class Pretrainer:
         device: str = "cuda",
         num_blocks: int = 6,
         channels: int = 64,
+        num_attention_layers: int = 0,
         lr: float = 0.005,
         grid_size: int = 23,
     ):
@@ -307,19 +308,21 @@ class Pretrainer:
             it = ckpt.get("generation", 0)
             blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
+            attn = len(self.model.attention_layers)
             gs = self.model.grid_size
             params = sum(p.numel() for p in self.model.parameters())
             print(
                 f"Resumed from {model_path} "
-                f"(iteration {it}, {blocks}b×{ch}ch, grid {gs}x{gs}, {params/1e6:.2f}M params)"
+                f"(iteration {it}, {blocks}b×{ch}ch, {attn} attn, grid {gs}x{gs}, {params/1e6:.2f}M params)"
             )
             grid_size = gs
         else:
-            self.model = create_model(num_blocks, channels, grid_size=grid_size)
+            self.model = create_model(num_blocks, channels, grid_size=grid_size,
+                                      num_attention_layers=num_attention_layers)
             params = sum(p.numel() for p in self.model.parameters())
             print(
                 f"Created new model ({num_blocks} blocks, {channels} channels, "
-                f"grid {grid_size}x{grid_size}, {params/1e6:.2f}M params)"
+                f"{num_attention_layers} attn layers, grid {grid_size}x{grid_size}, {params/1e6:.2f}M params)"
             )
         self.grid_size = grid_size
 
