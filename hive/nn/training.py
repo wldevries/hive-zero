@@ -182,7 +182,7 @@ class Trainer:
     def _current_lr(self) -> float:
         return self.optimizer.param_groups[0]['lr']
 
-    def train_epoch(self, dataset: HiveDataset, batch_size: int = 64) -> dict:
+    def train_epoch(self, dataset: HiveDataset, batch_size: int = 64, value_loss_scale: float = 1.0) -> dict:
         """Train one epoch. Returns loss dict."""
         self.model.train()
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -250,7 +250,7 @@ class Trainer:
             aux_loss = qd_loss + qe_loss + mob_loss
 
             # Combined loss
-            loss = policy_loss + value_loss + aux_loss
+            loss = policy_loss + value_loss_scale * value_loss + aux_loss
 
             self.optimizer.zero_grad()
             loss.backward()

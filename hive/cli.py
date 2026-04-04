@@ -83,6 +83,8 @@ def main():
         "--lr-schedule", type=str, default=None,
         help="Stepped LR schedule as iter:lr pairs, e.g. '0:0.1,20:0.02,40:0.01'. Overrides --lr."
     )
+    train_parser.add_argument("--value-loss-scale", type=float, default=1.0,
+                              help="Scale factor for value loss in combined loss (default: 1.0)")
     train_parser.add_argument("--resign-threshold", type=float, default=-0.97,
                               help="Resign when value < threshold for N consecutive moves (default: -0.97)")
     train_parser.add_argument("--resign-min-moves", type=int, default=20,
@@ -287,6 +289,7 @@ def main():
             augment_symmetry=args.augment_symmetry,
             comment=args.comment,
             use_ort=args.use_ort,
+            value_loss_scale=args.value_loss_scale,
         )
     else:
         # Default: UHP engine

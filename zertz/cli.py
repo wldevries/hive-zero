@@ -56,6 +56,8 @@ def main():
                               help="Apply random D6 hex symmetry augmentation during training (12x effective data)")
     train_parser.add_argument("--use-ort", action="store_true",
                               help="Use Rust-native ORT inference instead of Python eval (requires .onnx model)")
+    train_parser.add_argument("--value-loss-scale", type=float, default=1.0,
+                              help="Scale factor for value loss in combined loss (default: 1.0)")
 
     # Play mode
     play_parser = subparsers.add_parser("play", help="Play against the AI")
@@ -121,6 +123,7 @@ def main():
             comment=args.comment,
             augment_symmetry=args.augment_symmetry,
             use_ort=args.use_ort,
+            value_loss_scale=args.value_loss_scale,
         )
     elif args.command == "battle":
         from zertz.selfplay.battle import run_battle

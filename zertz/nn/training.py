@@ -213,7 +213,7 @@ class Trainer:
     def _current_lr(self) -> float:
         return self.optimizer.param_groups[0]['lr']
 
-    def train_epoch(self, dataset: ZertzDataset, batch_size: int = 256) -> dict:
+    def train_epoch(self, dataset: ZertzDataset, batch_size: int = 256, value_loss_scale: float = 1.0) -> dict:
         """Train one epoch with factorized policy heads. Returns loss dict."""
         self.model.train()
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -323,7 +323,7 @@ class Trainer:
                 total_capture_policy_loss += ((cap_first_loss + mid_cap_loss) / n_cap).item()
                 capture_policy_batches += 1
 
-            loss = policy_loss + 1.0 * value_loss
+            loss = policy_loss + value_loss_scale * value_loss
 
             self.optimizer.zero_grad()
             loss.backward()

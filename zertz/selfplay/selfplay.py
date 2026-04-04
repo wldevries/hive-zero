@@ -127,6 +127,7 @@ class SelfPlayTrainer:
         comment: str = "",
         augment_symmetry: bool = False,
         use_ort: bool = False,
+        value_loss_scale: float = 1.0,
     ):
         from hive_engine import ZertzSelfPlaySession
 
@@ -312,7 +313,7 @@ class SelfPlayTrainer:
 
             losses = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
             for epoch in range(epochs_per_gen):
-                losses = self.trainer.train_epoch(dataset, batch_size=batch_size)
+                losses = self.trainer.train_epoch(dataset, batch_size=batch_size, value_loss_scale=value_loss_scale)
                 lr = self.trainer._current_lr
                 total_s = f"{losses['total_loss']:.4f}"
                 policy_s = f"{losses['policy_loss']:.4f}"
