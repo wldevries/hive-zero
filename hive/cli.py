@@ -83,7 +83,7 @@ def main():
                               help="Learning rate for SGD optimizer (default: 0.02)")
     train_parser.add_argument(
         "--lr-schedule", type=str, default=None,
-        help="Stepped LR schedule as iter:lr pairs, e.g. '0:0.1,20:0.02,40:0.01'. Overrides --lr."
+        help="LR schedule as gen:lr pairs. Linear interpolation by default, prefix 's:' for steps, 'l:' for explicit linear. E.g. '0:0.02,100:0.005' or 's:0:0.02,30:0.01'. Overrides --lr."
     )
     train_parser.add_argument("--value-loss-scale", type=float, default=1.0,
                               help="Scale factor for value loss in combined loss (default: 1.0)")
