@@ -66,8 +66,14 @@ class RustParallelSelfPlay:
                 return (np.ones((n, ps), dtype=np.float32) / ps,
                         np.zeros(n, dtype=np.float32))
             # Data arrives as uint16 (raw bf16 bits) from Rust — reinterpret as bfloat16
-            bt = torch.from_numpy(board_4d).view(torch.bfloat16).pin_memory().to(device, non_blocking=True)
-            rv = torch.from_numpy(reserves).view(torch.bfloat16).pin_memory().to(device, non_blocking=True)
+            use_pinned = str(device).startswith("cuda")
+            bt = torch.from_numpy(board_4d).view(torch.bfloat16)
+            rv = torch.from_numpy(reserves).view(torch.bfloat16)
+            if use_pinned:
+                bt = bt.pin_memory()
+                rv = rv.pin_memory()
+            bt = bt.to(device, non_blocking=use_pinned)
+            rv = rv.to(device, non_blocking=use_pinned)
             with torch.no_grad():
                 policy_logits, values, _ = model(bt, rv)
             policy = torch.softmax(policy_logits.float(), dim=1).cpu().numpy()

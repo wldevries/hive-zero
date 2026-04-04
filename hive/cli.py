@@ -7,6 +7,13 @@ from shared import lr_scheduler
 from shared.lr_scheduler import lr_scheduler_from_string
 
 
+def _resolve_device(device: str) -> str:
+    import torch
+    if device == "cuda" and not torch.cuda.is_available():
+        return "cpu"
+    return device
+
+
 def main():
     parser = argparse.ArgumentParser(description="Hive AI Engine")
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
@@ -187,7 +194,7 @@ def main():
         zip_index = build_zip_index(args.boardspace_dir)
         print(f"  {len(zip_index)} zip files found")
         pretrainer = Pretrainer(
-            model_path=args.model, device=args.device,
+            model_path=args.model, device=_resolve_device(args.device),
             num_blocks=args.blocks, channels=args.channels,
             num_attention_layers=args.attention_layers,
             lr=args.lr, grid_size=args.grid_size,
@@ -206,11 +213,12 @@ def main():
         from hive.nn.model import load_checkpoint
 
         model, _ = load_checkpoint(args.model)
-        model.to(args.device)
+        device = _resolve_device(args.device)
+        model.to(device)
         model.eval()
 
         our_engine = ModelEngine(
-            model=model, device=args.device,
+            model=model, device=device,
             simulations=args.simulations, name="HiveZero",
         )
 
@@ -248,7 +256,7 @@ def main():
 
         trainer = SelfPlayTrainer(
             model_path=args.model,
-            device=args.device,
+            device=_resolve_device(args.device),
             num_blocks=args.blocks,
             channels=args.channels,
             num_attention_layers=args.attention_layers,
@@ -305,10 +313,7 @@ def main():
         simulations = 800
         if hasattr(args, "model") and args.model is not None:
             from hive.nn.model import load_checkpoint
-            import torch
-            device = args.device if hasattr(args, "device") else "cuda"
-            if device == "cuda" and not torch.cuda.is_available():
-                device = "cpu"
+            device = _resolve_device(args.device if hasattr(args, "device") else "cuda")
             model, _ = load_checkpoint(args.model)
             model.to(device)
             model.eval()

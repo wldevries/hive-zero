@@ -163,8 +163,9 @@ def export_onnx(model: HiveNet, path: str):
     g = model.grid_size
     was_training = model.training
     model.eval()
-    dummy_board = torch.zeros(1, NUM_CHANNELS, g, g).cuda()
-    dummy_reserve = torch.zeros(1, RESERVE_SIZE).cuda()    
+    device = next(model.parameters()).device
+    dummy_board = torch.zeros(1, NUM_CHANNELS, g, g, device=device)
+    dummy_reserve = torch.zeros(1, RESERVE_SIZE, device=device)
     input_names = ["board", "reserve"]
     output_names = ["policy", "value", "aux"]
     import logging
