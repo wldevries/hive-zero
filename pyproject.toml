@@ -8,11 +8,11 @@ dependencies = [
     "pytest>=9.0.2",
     "colorama>=0.4.6",
     "mplcursors>=0.7.1",
-    "onnx>=1.21.0",
     "onnxscript>=0.6.2",
     "onnxruntime>=1.24.4",
     "tqdm",
-    "torch>=2.0",
+    # torch must be installed manually — no ARM64 Windows wheels on PyPI.
+    # See CLAUDE.md for install instructions.
 ]
 
 [project.optional-dependencies]
@@ -23,14 +23,6 @@ ort-qnn = ["onnxruntime-qnn"]
 hive = "hive.cli:main"
 zertz = "zertz.cli:main"
 
-[[tool.uv.indexes]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
@@ -39,3 +31,6 @@ build-backend = "maturin"
 manifest-path = "rust/crates/engine-zero/Cargo.toml"
 module-name = "hive_engine"
 python-packages = ["hive", "zertz", "shared"]
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "rust/**/*.toml" }, { file = "rust/**/*.rs" }]
