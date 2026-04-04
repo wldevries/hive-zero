@@ -114,7 +114,8 @@ class SelfPlayTrainer:
             skip_timeout_games: bool = False,
             augment_symmetry: bool = False,
             comment: str = "",
-            use_ort: bool = False):
+            use_ort: bool = False,
+            value_loss_scale: float = 1.0):
         """Run the full training loop.
 
         Args:
@@ -360,7 +361,8 @@ class SelfPlayTrainer:
             train_start = time.time()
             try:
                 for epoch in range(epochs_per_gen):
-                    losses = self.trainer.train_epoch(replay_buffer, batch_size=batch_size)
+                    losses = self.trainer.train_epoch(replay_buffer, batch_size=batch_size,
+                                                       value_loss_scale=value_loss_scale)
                     lr = self.trainer._current_lr
                     total_s = f"{losses['total_loss']:.4f}"
                     policy_s = f"{losses['policy_loss']:.4f}"
