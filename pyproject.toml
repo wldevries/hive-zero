@@ -8,11 +8,28 @@ dependencies = [
     "pytest>=9.0.2",
     "colorama>=0.4.6",
     "mplcursors>=0.7.1",
+    "onnx>=1.21.0",
+    "onnxscript>=0.6.2",
+    "onnxruntime>=1.24.4",
+    "tqdm",
+    "torch>=2.0",
 ]
+
+[project.optional-dependencies]
+ort-gpu = ["onnxruntime-gpu>=1.24.4"]
+ort-qnn = ["onnxruntime-qnn"]
 
 [project.scripts]
 hive = "hive.cli:main"
 zertz = "zertz.cli:main"
+
+[[tool.uv.indexes]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
 
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
