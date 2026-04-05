@@ -614,7 +614,7 @@ impl PySelfPlaySession {
 
             // Check which games have moves (child_count > 0)
             let child_counts: Vec<u16> = mcts_games.iter()
-                .map(|&gi| searches[gi].arena.get(searches[gi].root).child_count)
+                .map(|&gi| searches[gi].root_child_count())
                 .collect();
 
             let mut searching: Vec<usize> = Vec::new();  // indices into mcts_games

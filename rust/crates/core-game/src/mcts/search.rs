@@ -212,9 +212,9 @@ fn expand_with_policy<G: GameEngine>(
 /// Single-game MCTS search engine, generic over any GameEngine.
 /// Game states are reconstructed by replaying moves from root_game.
 pub struct MctsSearch<G: GameEngine> {
-    pub arena: NodeArena<G::Move>,
+    arena: NodeArena<G::Move>,
     pub c_puct: f32,
-    pub root: NodeId,
+    root: NodeId,
     root_game: Option<G>,
     /// Accumulated leaves from select_leaves calls, consumed by expand_and_backprop.
     stashed_leaves: Vec<(NodeId, G)>,
@@ -491,6 +491,21 @@ impl<G: GameEngine> MctsSearch<G> {
         }
 
         result
+    }
+
+    /// Number of legal moves at the root (0 means only a pass is available).
+    pub fn root_child_count(&self) -> u16 {
+        self.arena.get(self.root).child_count
+    }
+
+    /// Total visit count at the root.
+    pub fn root_visit_count(&self) -> u32 {
+        self.arena.get(self.root).visit_count
+    }
+
+    /// Mean value estimate at the root (from current player's perspective).
+    pub fn root_value(&self) -> f32 {
+        self.arena.get(self.root).value()
     }
 
     /// Encode a game state for NN evaluation.

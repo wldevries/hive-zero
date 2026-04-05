@@ -396,7 +396,7 @@ impl PyBatchMCTS {
 
     /// Get root child counts for all trees.
     fn root_child_counts(&self) -> Vec<u16> {
-        self.searches.iter().map(|s| s.arena.get(s.root).child_count).collect()
+        self.searches.iter().map(|s| s.root_child_count()).collect()
     }
 
     /// Run simulation loop with per-game simulation caps.

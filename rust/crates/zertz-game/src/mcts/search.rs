@@ -338,9 +338,9 @@ fn expand_with_flat_policy(arena: &mut NodeArena, node_id: NodeId, policy: &[f32
 
 /// Single-game MCTS search engine.
 pub struct MctsSearch {
-    pub arena: NodeArena,
+    arena: NodeArena,
     pub c_puct: f32,
-    pub root: NodeId,
+    root: NodeId,
     pub use_forced_playouts: bool,
 }
 
@@ -588,6 +588,11 @@ impl MctsSearch {
         let mut reserve_buf = vec![0.0f32; RESERVE_SIZE];
         encode_board(board, &mut board_buf, &mut reserve_buf);
         (board_buf, reserve_buf)
+    }
+
+    /// Total visit count at the root.
+    pub fn root_visit_count(&self) -> u32 {
+        self.arena.get(self.root).visit_count
     }
 
     /// Root value estimate.

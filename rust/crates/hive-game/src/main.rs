@@ -280,11 +280,10 @@ fn run_mcts(simulations: u32, batch_size: usize) {
     }
 
     let elapsed = start.elapsed();
-    let root = search.arena.get(search.root);
-    let sims_per_sec = root.visit_count as f64 / elapsed.as_secs_f64();
+    let sims_per_sec = search.root_visit_count() as f64 / elapsed.as_secs_f64();
 
-    println!("Root visits: {}", root.visit_count);
-    println!("Root value:  {:.4}", root.value());
+    println!("Root visits: {}", search.root_visit_count());
+    println!("Root value:  {:.4}", search.root_value());
     println!("Time:        {:.3}s", elapsed.as_secs_f64());
     println!("Throughput:  {:.0} sims/s", sims_per_sec);
     println!();
