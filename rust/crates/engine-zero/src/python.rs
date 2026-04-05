@@ -218,10 +218,12 @@ impl PyGame {
     }
 
     /// Render the board as ANSI-coloured flat-top hex ASCII art.
-    /// Automatically highlights the destination of the last move (if any).
+    /// Automatically highlights the last move: destination in orange, source in gray.
     fn render_board(&self) -> String {
-        let hl = self.game.move_history().last().and_then(|mv| mv.to);
-        self.game.board.render(hl)
+        let last = self.game.move_history().last();
+        let highlight = last.and_then(|mv| mv.to);
+        let source    = last.and_then(|mv| mv.from);
+        self.game.board.render(highlight, source)
     }
 
     /// Heuristic value for unfinished games.

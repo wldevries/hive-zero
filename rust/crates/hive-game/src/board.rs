@@ -492,36 +492,56 @@ impl Board {
     ///   row sy+1:  `/XY\`  where XY is the 2-char piece label
     ///   row sy+2:  `\__/`  (or `\#N/` for stacked positions)
     ///
-    /// `highlight` draws the edges of that hex in orange (last-move indicator).
-    pub fn render(&self, highlight: Option<Hex>) -> String {
+    /// `highlight` draws the edges of the destination hex in orange.
+    /// `source`    draws the edges of the source hex in gray (ghost outline if now empty).
+    pub fn render(&self, highlight: Option<Hex>, source: Option<Hex>) -> String {
         let tops = self.all_top_pieces();
-        if tops.is_empty() {
+
+        // ANSI colours.
+        const WHITE_FG: &str = "\x1b[97m";
+        const BLACK_FG: &str = "\x1b[93m";
+        const ORANGE:   &str = "\x1b[38;5;214m";
+        const GRAY:     &str = "\x1b[38;5;245m";
+        const DIM:      &str = "\x1b[2m";
+        const RESET:    &str = "\x1b[0m";
+
+        // Helper: axial hex -> raw screen coords.
+        let screen = |(q, r): Hex| -> (i32, i32) { (q as i32 * 3, r as i32 * 2 + q as i32) };
+
+        if tops.is_empty() && source.is_none() {
             return "  (empty board)".to_string();
         }
 
-        // Collect screen positions and identify stacks.
+        // Collect screen positions for all occupied hexes.
         let mut cells: Vec<((i32, i32), Hex, bool)> = Vec::new(); // (sx,sy), hex, has_stack
         let mut min_sx = i32::MAX;
         let mut min_sy = i32::MAX;
         let mut max_sx = i32::MIN;
         let mut max_sy = i32::MIN;
 
-        for (hex, _piece) in &tops {
-            let (q, r) = *hex;
-            let sx = q as i32 * 3;
-            let sy = r as i32 * 2 + q as i32;
-            let has_stack = self.stack_at(*hex).height() > 1;
-            cells.push(((sx, sy), *hex, has_stack));
+        let mut update_bounds = |sx: i32, sy: i32| {
             if sx < min_sx { min_sx = sx; }
             if sy < min_sy { min_sy = sy; }
             if sx > max_sx { max_sx = sx; }
             if sy > max_sy { max_sy = sy; }
+        };
+
+        for (hex, _piece) in &tops {
+            let (sx, sy) = screen(*hex);
+            let has_stack = self.stack_at(*hex).height() > 1;
+            cells.push(((sx, sy), *hex, has_stack));
+            update_bounds(sx, sy);
         }
 
-        // Normalize to 0-based.
-        let width = (max_sx - min_sx + 5) as usize;
-        let height = (max_sy - min_sy + 3) as usize;
+        // Also expand bounds to include the source ghost (may be off the occupied area).
+        if let Some(src) = source {
+            let (sx, sy) = screen(src);
+            update_bounds(sx, sy);
+        }
 
+        // Normalize to 0-based canvas.
+        let width  = (max_sx - min_sx + 5) as usize;
+        let height = (max_sy - min_sy + 3) as usize;
         let mut canvas: Vec<Vec<u8>> = vec![vec![b' '; width]; height];
 
         // Place non-stacked cells first, then stacked (so stacked overwrites).
@@ -545,41 +565,51 @@ impl Board {
             stack_refs.iter().find(|(sh, _)| *sh == h).map(|(_, n)| *n)
         };
 
+        // Draw occupied hexes onto the canvas.
         for ((sx, sy), _hex, has_stack) in &sorted_cells {
             let sx = (sx - min_sx) as usize;
             let sy = (sy - min_sy) as usize;
 
-            // Top: __
             canvas[sy][sx + 1] = b'_';
             canvas[sy][sx + 2] = b'_';
 
-            // Middle: /XY\ — placeholder bytes, replaced below
-            canvas[sy + 1][sx] = b'/';
+            canvas[sy + 1][sx]     = b'/';
             canvas[sy + 1][sx + 1] = b'?'; // label ch0
             canvas[sy + 1][sx + 2] = b'?'; // label ch1
             canvas[sy + 1][sx + 3] = b'\\';
 
-            // Bottom
-            canvas[sy + 2][sx] = b'\\';
+            canvas[sy + 2][sx]     = b'\\';
             canvas[sy + 2][sx + 3] = b'/';
             if *has_stack {
                 canvas[sy + 2][sx + 1] = b'#';
-                canvas[sy + 2][sx + 2] = b'?'; // stack ref digit
+                canvas[sy + 2][sx + 2] = b'?';
             } else {
                 canvas[sy + 2][sx + 1] = b'_';
                 canvas[sy + 2][sx + 2] = b'_';
             }
         }
 
-        // ANSI colours.
-        const WHITE_FG: &str = "\x1b[97m";
-        const BLACK_FG: &str = "\x1b[93m";
-        const ORANGE:   &str = "\x1b[38;5;214m";
-        const DIM:      &str = "\x1b[2m";
-        const RESET:    &str = "\x1b[0m";
+        // Draw ghost outline for an empty source hex.
+        if let Some(src) = source {
+            if self.stack_at(src).is_empty() {
+                let (sx_raw, sy_raw) = screen(src);
+                let sx = (sx_raw - min_sx) as usize;
+                let sy = (sy_raw - min_sy) as usize;
+                canvas[sy][sx + 1]     = b'_';
+                canvas[sy][sx + 2]     = b'_';
+                canvas[sy + 1][sx]     = b'/';
+                canvas[sy + 1][sx + 1] = b' ';
+                canvas[sy + 1][sx + 2] = b' ';
+                canvas[sy + 1][sx + 3] = b'\\';
+                canvas[sy + 2][sx]     = b'\\';
+                canvas[sy + 2][sx + 1] = b'_';
+                canvas[sy + 2][sx + 2] = b'_';
+                canvas[sy + 2][sx + 3] = b'/';
+            }
+        }
 
         // Coloured overrides: (row, col) -> (replacement string, canvas columns consumed).
-        // Labels occupy 2 canvas columns; edges and other single chars occupy 1.
+        // Labels occupy 2 canvas columns; single-char edges occupy 1.
         let mut overrides: std::collections::HashMap<(usize, usize), (String, usize)> =
             std::collections::HashMap::new();
 
@@ -596,36 +626,46 @@ impl Board {
 
             if *has_stack {
                 if let Some(ref_n) = stack_ref_for(*hex) {
-                    let ref_str = format!("#{ref_n}");
-                    overrides.insert((sy + 2, sx + 1), (format!("{DIM}{ref_str}{RESET}"), 2));
+                    overrides.insert((sy + 2, sx + 1), (format!("{DIM}#{ref_n}{RESET}"), 2));
                 }
             }
         }
 
-        // Orange edges for the highlighted hex.
+        // Helper: apply coloured edges to a hex at normalised canvas coords.
+        let mut apply_edges = |overrides: &mut std::collections::HashMap<(usize, usize), (String, usize)>,
+                                sx: usize, sy: usize, color: &str, has_stack: bool| {
+            overrides.insert((sy,     sx + 1), (format!("{color}_{RESET}"), 1));
+            overrides.insert((sy,     sx + 2), (format!("{color}_{RESET}"), 1));
+            overrides.insert((sy + 1, sx),     (format!("{color}/{RESET}"), 1));
+            overrides.insert((sy + 1, sx + 3), (format!("{color}\\{RESET}"), 1));
+            overrides.insert((sy + 2, sx),     (format!("{color}\\{RESET}"), 1));
+            overrides.insert((sy + 2, sx + 3), (format!("{color}/{RESET}"), 1));
+            if !has_stack {
+                overrides.insert((sy + 2, sx + 1), (format!("{color}_{RESET}"), 1));
+                overrides.insert((sy + 2, sx + 2), (format!("{color}_{RESET}"), 1));
+            }
+        };
+
+        // Orange edges for the destination (highlight).
         if let Some(hl) = highlight {
-            let (q, r) = hl;
-            let sx_raw = q as i32 * 3;
-            let sy_raw = r as i32 * 2 + q as i32;
+            let (sx_raw, sy_raw) = screen(hl);
             if sx_raw >= min_sx && sy_raw >= min_sy {
                 let sx = (sx_raw - min_sx) as usize;
                 let sy = (sy_raw - min_sy) as usize;
                 let has_stack = self.stack_at(hl).height() > 1;
+                apply_edges(&mut overrides, sx, sy, ORANGE, has_stack);
+            }
+        }
 
-                // Top row: two `_`
-                overrides.insert((sy,     sx + 1), (format!("{ORANGE}_{RESET}"), 1));
-                overrides.insert((sy,     sx + 2), (format!("{ORANGE}_{RESET}"), 1));
-                // Middle row: `/` and `\`
-                overrides.insert((sy + 1, sx),     (format!("{ORANGE}/{RESET}"), 1));
-                overrides.insert((sy + 1, sx + 3), (format!("{ORANGE}\\{RESET}"), 1));
-                // Bottom row: `\` and `/`
-                overrides.insert((sy + 2, sx),     (format!("{ORANGE}\\{RESET}"), 1));
-                overrides.insert((sy + 2, sx + 3), (format!("{ORANGE}/{RESET}"), 1));
-                // Bottom inner `__` only when not stacked (stacked uses `#N` label override).
-                if !has_stack {
-                    overrides.insert((sy + 2, sx + 1), (format!("{ORANGE}_{RESET}"), 1));
-                    overrides.insert((sy + 2, sx + 2), (format!("{ORANGE}_{RESET}"), 1));
-                }
+        // Gray edges for the source hex (occupied or ghost).
+        if let Some(src) = source {
+            let (sx_raw, sy_raw) = screen(src);
+            if sx_raw >= min_sx && sy_raw >= min_sy {
+                let sx = (sx_raw - min_sx) as usize;
+                let sy = (sy_raw - min_sy) as usize;
+                // Ghost is never stacked; occupied source: check height.
+                let has_stack = !self.stack_at(src).is_empty() && self.stack_at(src).height() > 1;
+                apply_edges(&mut overrides, sx, sy, GRAY, has_stack);
             }
         }
 
@@ -660,8 +700,7 @@ impl Board {
             for (hex, ref_n) in &stack_refs {
                 let slot = self.stack_at(*hex);
                 let mut parts: Vec<String> = Vec::new();
-                let stack_vec: Vec<_> = slot.iter().collect();
-                for piece in stack_vec.iter().rev() {
+                for piece in slot.iter().collect::<Vec<_>>().into_iter().rev() {
                     let color = if piece.color() == crate::piece::PieceColor::White { WHITE_FG } else { BLACK_FG };
                     parts.push(format!("{color}{piece}{RESET}"));
                 }
@@ -675,7 +714,7 @@ impl Board {
 
 impl std::fmt::Display for Board {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.render(None))
+        write!(f, "{}", self.render(None, None))
     }
 }
 
