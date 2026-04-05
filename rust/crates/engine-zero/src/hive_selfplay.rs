@@ -313,8 +313,8 @@ impl PySelfPlayResult {
     fn calibration_false_positives(&self) -> u32 { self.calibration_false_positives }
 
     /// Get final game states as RustGame objects (for board rendering).
-    fn final_games(&self) -> Vec<crate::python::PyGame> {
-        self.final_games.iter().map(|g| crate::python::PyGame { game: g.clone() }).collect()
+    fn final_games(&self) -> Vec<crate::hive_python::PyGame> {
+        self.final_games.iter().map(|g| crate::hive_python::PyGame { game: g.clone() }).collect()
     }
 }
 
