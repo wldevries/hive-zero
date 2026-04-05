@@ -194,22 +194,7 @@ class UHPEngine:
                 return
             self._respond(rust_game.format_move_uhp(piece_str, from_pos, to_pos))
         else:
-            from engine_zero import RustMCTS
-            from ..encoding.move_encoder import POLICY_SIZE
-
-            def uniform_eval(board_batch, reserve_batch):
-                n = np.asarray(board_batch).shape[0]
-                policy = np.ones((n, POLICY_SIZE), dtype=np.float32) / POLICY_SIZE
-                value = np.zeros(n, dtype=np.float32)
-                return policy, value
-
-            mcts = RustMCTS()
-            result = mcts.search(rust_game, uniform_eval, 200)
-            if result is None:
-                self._respond("pass")
-            else:
-                piece_str, from_pos, to_pos = result
-                self._respond(rust_game.format_move_uhp(piece_str, from_pos, to_pos))
+            self._respond("err No model loaded")
 
     def _cmd_undo(self, args: str):
         if self.game is None:

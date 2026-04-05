@@ -24,7 +24,7 @@ rust/
     move_encoding.rs  - Move-to-policy-index encoding (mirrors hive/encoding/)
     mcts/             - Rust MCTS (search, arena allocator, nodes)
     piece.rs          - Piece types and colors
-    python.rs         - PyO3 bindings: RustGame, RustMCTS, RustBatchMCTS
+    python.rs         - PyO3 bindings: RustGame, RustBatchMCTS
     rules.rs          - Movement rules per piece type
 ```
 
