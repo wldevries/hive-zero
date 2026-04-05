@@ -272,11 +272,11 @@ fn run_mcts(simulations: u32, batch_size: usize) {
     let start = std::time::Instant::now();
 
     for _ in 0..rounds {
-        let mut leaves = search.select_leaves(batch_size);
-        if leaves.is_empty() { break; }
-        let policies: Vec<Vec<f32>> = leaves.iter().map(|_| uniform_policy.clone()).collect();
-        let values: Vec<f32> = vec![0.0; leaves.len()];
-        search.expand_and_backprop(&mut leaves, &policies, &values);
+        let leaf_ids = search.select_leaves(batch_size);
+        if leaf_ids.is_empty() { break; }
+        let policies: Vec<Vec<f32>> = leaf_ids.iter().map(|_| uniform_policy.clone()).collect();
+        let values: Vec<f32> = vec![0.0; leaf_ids.len()];
+        search.expand_and_backprop(&policies, &values);
     }
 
     let elapsed = start.elapsed();

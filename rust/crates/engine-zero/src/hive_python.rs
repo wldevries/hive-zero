@@ -6,8 +6,6 @@ use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyRe
 
 use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
 use hive_game::game::{self, Game};
-use core_game::game::NNGame;
-use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::MctsSearch;
 use hive_game::move_encoding;
 use hive_game::piece::{Piece, PieceColor, PieceType};
@@ -303,19 +301,16 @@ impl PyGame {
 
         let mut done = 0usize;
         while done < simulations {
-            let mut leaves = search.select_leaves(batch.min(simulations - done));
-            if leaves.is_empty() { break; }
-            let nl = leaves.len();
+            let leaf_ids = search.select_leaves(batch.min(simulations - done));
+            if leaf_ids.is_empty() { break; }
+            let nl = leaf_ids.len();
 
             let mut boards = vec![0.0f32; nl * board_size];
             let mut reserves = vec![0.0f32; nl * RESERVE_SIZE];
-            for (k, (_, game)) in leaves.iter().enumerate() {
-                hive_game::board_encoding::encode_board(
-                    game,
-                    &mut boards[k * board_size..(k + 1) * board_size],
-                    &mut reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE],
-                    gs,
-                );
+            for (k, &lid) in leaf_ids.iter().enumerate() {
+                let (board, reserve) = search.encode_leaf(lid);
+                boards[k * board_size..(k + 1) * board_size].copy_from_slice(&board);
+                reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve);
             }
 
             let leaf_board = make_array2(py, &boards, nl, board_size);
@@ -335,7 +330,7 @@ impl PyGame {
                 .map(|k| lp_data[k * ps..(k + 1) * ps].to_vec())
                 .collect();
 
-            search.expand_and_backprop(&mut leaves, &policies_vec, &lv_data);
+            search.expand_and_backprop(&policies_vec, &lv_data);
             done += nl;
         }
 
@@ -444,19 +439,15 @@ impl PyBatchMCTS {
                 .par_iter_mut()
                 .zip(per_game_batch.par_iter())
                 .map(|(search, &batch)| {
-                    let leaves = search.select_leaves(batch);
-                    let n = leaves.len();
+                    let leaf_ids = search.select_leaves(batch);
+                    let n = leaf_ids.len();
                     let mut boards = vec![0.0f32; n * board_size];
                     let mut reserves = vec![0.0f32; n * RESERVE_SIZE];
-                    for (j, (_, game)) in leaves.iter().enumerate() {
-                        hive_game::board_encoding::encode_board(
-                            game,
-                            &mut boards[j * board_size..(j + 1) * board_size],
-                            &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
-                            gs,
-                        );
+                    for (j, &lid) in leaf_ids.iter().enumerate() {
+                        let (board, reserve) = search.encode_leaf(lid);
+                        boards[j * board_size..(j + 1) * board_size].copy_from_slice(&board);
+                        reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE].copy_from_slice(&reserve);
                     }
-                    search.stashed_leaves = leaves;
                     (n, boards, reserves)
                 })
                 .collect();
@@ -520,12 +511,11 @@ impl PyBatchMCTS {
             active_searches2.par_iter_mut().enumerate().for_each(|(i, search)| {
                 let off = offsets[i];
                 let n = leaf_counts[i];
-                let mut leaves = std::mem::take(&mut search.stashed_leaves);
                 let policies_vec: Vec<Vec<f32>> = (0..n).map(|j| {
                     policy_data[(off + j) * ps..(off + j + 1) * ps].to_vec()
                 }).collect();
                 let values_vec: Vec<f32> = value_data[off..off + n].to_vec();
-                search.expand_and_backprop(&mut leaves, &policies_vec, &values_vec);
+                search.expand_and_backprop(&policies_vec, &values_vec);
             });
 
             searching.retain(|&si| sims_done[si] < per_game_caps[si]);

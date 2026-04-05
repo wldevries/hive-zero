@@ -11,9 +11,9 @@ use hive_game::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE, f32_to_bf16};
 use crate::inference::HiveInference;
 use hive_game::game::{Game, GameState};
 use hive_game::hex::hex_neighbors;
-use core_game::game::NNGame;
 use core_game::game::PolicyIndex;
 use core_game::mcts::search::MctsSearch;
+use core_game::mcts::arena::NodeId;
 use hive_game::move_encoding::{self, encode_game_move};
 use hive_game::piece::{Piece, PieceColor, PieceType};
 use core_game::symmetry::{Symmetry, D6Symmetry, apply_d6_sym_spatial};
@@ -635,12 +635,69 @@ impl PySelfPlaySession {
                 }
             }
 
-            // Run interleaved simulations
+            // --- Simulation loop ---
             if !searching.is_empty() {
-                run_simulations(
-                    &mut backend, &mut searches, &mcts_games, &searching,
-                    &sim_caps, cfg.leaf_batch_size, cfg.fixed_batch_size, grid_size,
-                );
+                let num_policy_channels = move_encoding::NUM_POLICY_CHANNELS;
+                let mut sims_done: Vec<usize> = vec![0; searching.len()];
+                let mut still_searching: Vec<usize> = (0..searching.len()).collect();
+                // per-game leaf tracking (reused across batches)
+                let mut per_game_leaf_ids: Vec<Vec<NodeId>> = vec![Vec::new(); searching.len()];
+                let mut per_game_syms: Vec<Vec<D6Symmetry>> = vec![Vec::new(); searching.len()];
+
+                while !still_searching.is_empty() {
+                    for k in 0..searching.len() {
+                        per_game_leaf_ids[k].clear();
+                        per_game_syms[k].clear();
+                    }
+                    let mut flat_boards: Vec<f32> = Vec::new();
+                    let mut flat_reserves: Vec<f32> = Vec::new();
+                    let mut any_leaves = false;
+
+                    // leaf_batch_size rounds: select 1 leaf per still-searching game per round
+                    for _round in 0..cfg.leaf_batch_size {
+                        let mut any_this_round = false;
+                        for &k in &still_searching {
+                            let gi = mcts_games[searching[k]];
+                            let leaf_ids = searches[gi].select_leaves(1);
+                            sims_done[k] += leaf_ids.len().max(1);
+                            for &lid in &leaf_ids {
+                                let (board, reserve) = searches[gi].encode_leaf(lid);
+                                let sym = D6Symmetry::random(&mut rng);
+                                let start = flat_boards.len();
+                                flat_boards.extend_from_slice(&board);
+                                apply_d6_sym_spatial(&mut flat_boards[start..], sym, NUM_CHANNELS, grid_size);
+                                flat_reserves.extend_from_slice(&reserve);
+                                per_game_leaf_ids[k].push(lid);
+                                per_game_syms[k].push(sym);
+                                any_this_round = true;
+                                any_leaves = true;
+                            }
+                        }
+                        still_searching.retain(|&k| sims_done[k] < sim_caps[k]);
+                        if !any_this_round { break; }
+                    }
+
+                    if !any_leaves { break; }
+
+                    let total = flat_boards.len() / board_size;
+                    let target = cfg.fixed_batch_size.unwrap_or(total);
+                    let result = infer_padded(&mut backend, flat_boards, flat_reserves, total, target, NUM_CHANNELS, grid_size);
+
+                    let mut offset = 0;
+                    for k in 0..searching.len() {
+                        let n = per_game_leaf_ids[k].len();
+                        if n == 0 { continue; }
+                        let gi = mcts_games[searching[k]];
+                        let policies: Vec<Vec<f32>> = (0..n).map(|j| {
+                            let mut p = result.policy[(offset + j) * policy_size..(offset + j + 1) * policy_size].to_vec();
+                            apply_d6_sym_spatial(&mut p, per_game_syms[k][j].inverse(), num_policy_channels, grid_size);
+                            p
+                        }).collect();
+                        let values: Vec<f32> = result.value[offset..offset + n].to_vec();
+                        searches[gi].expand_and_backprop(&policies, &values);
+                        offset += n;
+                    }
+                }
             }
 
             // --- Collect results and play moves ---
@@ -967,93 +1024,6 @@ fn infer_padded(
     crate::inference::HiveInferenceResult { policy: out_policy, value: out_value }
 }
 
-fn run_simulations(
-    backend: &mut dyn HiveInference,
-    searches: &mut Vec<MctsSearch<Game>>,
-    mcts_games: &[usize],
-    searching: &[usize],
-    per_game_caps: &[usize],
-    rounds_per_flush: usize,
-    fixed_batch_size: Option<usize>,
-    grid_size: usize,
-) {
-    let board_size = NUM_CHANNELS * grid_size * grid_size;
-    let policy_size = move_encoding::policy_size(grid_size);
-    let num_policy_channels = move_encoding::NUM_POLICY_CHANNELS;
-    let mut sims_done: Vec<usize> = vec![0; searching.len()];
-    let mut still_searching: Vec<usize> = (0..searching.len()).collect();
-    let mut round: usize = 0;
-    let mut rng = rand::thread_rng();
-
-    let mut pending_gi: Vec<usize> = Vec::new();
-    let mut pending_syms: Vec<D6Symmetry> = Vec::new();
-    let mut pending_leaves: Vec<(u32, Game)> = Vec::new();
-    let mut pending_boards: Vec<f32> = Vec::new();
-    let mut pending_reserves: Vec<f32> = Vec::new();
-
-    let mut enc_board = vec![0f32; board_size];
-    let mut enc_reserve = vec![0f32; RESERVE_SIZE];
-
-    while !still_searching.is_empty() || !pending_leaves.is_empty() {
-        if !still_searching.is_empty() {
-            for &si in &still_searching {
-                let gi = mcts_games[searching[si]];
-                let search = &mut searches[gi];
-                let leaves = search.select_leaves(1);
-                sims_done[si] += leaves.len().max(1);
-                for (_, game) in &leaves {
-                    let sym = D6Symmetry::random(&mut rng);
-                    board_encoding::encode_board(game, &mut enc_board, &mut enc_reserve, grid_size);
-                    apply_d6_sym_spatial(&mut enc_board, sym, NUM_CHANNELS, grid_size);
-                    pending_gi.push(gi);
-                    pending_syms.push(sym);
-                    pending_boards.extend_from_slice(&enc_board);
-                    pending_reserves.extend_from_slice(&enc_reserve);
-                }
-                pending_leaves.extend(leaves);
-            }
-
-            still_searching.retain(|&si| sims_done[si] < per_game_caps[si]);
-            round += 1;
-        }
-
-        let should_flush = (!pending_leaves.is_empty())
-            && (round % rounds_per_flush == 0 || still_searching.is_empty());
-
-        if should_flush {
-            let total = pending_leaves.len();
-            let boards_data = std::mem::take(&mut pending_boards);
-            let reserves_data = std::mem::take(&mut pending_reserves);
-
-            let target = fixed_batch_size.unwrap_or(total);
-            let result = infer_padded(backend, boards_data, reserves_data, total, target, NUM_CHANNELS, grid_size);
-
-            let policy_data = &result.policy;
-            let value_data = &result.value;
-
-            let mut gi_groups: std::collections::HashMap<
-                usize, (Vec<(u32, Game)>, Vec<Vec<f32>>, Vec<f32>)
-            > = std::collections::HashMap::new();
-            let drained_leaves = std::mem::take(&mut pending_leaves);
-            for (i, &gi) in pending_gi.iter().enumerate() {
-                let entry = gi_groups.entry(gi).or_default();
-                entry.0.push(drained_leaves[i].clone());
-                let mut policy = policy_data[i * policy_size..(i + 1) * policy_size].to_vec();
-                apply_d6_sym_spatial(&mut policy, pending_syms[i].inverse(), num_policy_channels, grid_size);
-                entry.1.push(policy);
-                entry.2.push(value_data[i]);
-            }
-
-            for (&gi, (leaves, policies, values)) in &gi_groups {
-                let mut leaves_clone = leaves.clone();
-                searches[gi].expand_and_backprop(&mut leaves_clone, policies, values);
-            }
-
-            pending_gi.clear();
-            pending_syms.clear();
-        }
-    }
-}
 
 /// Register self-play classes with the Python module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

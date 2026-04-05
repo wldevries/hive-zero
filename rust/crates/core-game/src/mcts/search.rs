@@ -216,8 +216,8 @@ pub struct MctsSearch<G: GameEngine> {
     pub c_puct: f32,
     pub root: NodeId,
     root_game: Option<G>,
-    /// Temporary storage for leaf data between select and expand calls.
-    pub stashed_leaves: Vec<(NodeId, G)>,
+    /// Accumulated leaves from select_leaves calls, consumed by expand_and_backprop.
+    stashed_leaves: Vec<(NodeId, G)>,
     /// Whether to use forced playouts at the root (KataGo-style).
     pub use_forced_playouts: bool,
 }
@@ -237,6 +237,7 @@ impl<G: GameEngine> MctsSearch<G> {
     /// Initialize search for a game position.
     pub fn init(&mut self, game: &G, policy: &[f32]) {
         self.arena.reset();
+        self.stashed_leaves.clear();
         self.root_game = Some(game.clone());
         let root = self.arena.alloc(None, G::pass_move(), 0.0, game.next_player());
         self.root = root;
@@ -263,11 +264,13 @@ impl<G: GameEngine> MctsSearch<G> {
         game
     }
 
-    /// Run one batch of simulations. Returns list of (leaf_id, game) pairs
-    /// that need NN evaluation. Terminal nodes are handled immediately.
-    pub fn select_leaves(&mut self, batch_size: usize) -> Vec<(NodeId, G)> {
+    /// Select leaves for NN evaluation.
+    /// Reconstructed game states are stashed internally.
+    /// Terminal nodes are handled immediately (no stash entry).
+    /// Returns the NodeIds of non-terminal leaves in stash order.
+    pub fn select_leaves(&mut self, batch_size: usize) -> Vec<NodeId> {
         let root_turn = self.arena.get(self.root).turn_player;
-        let mut leaves = Vec::new();
+        let mut leaf_ids = Vec::new();
 
         for _ in 0..batch_size {
             let leaf = select_leaf(&self.arena, self.root, self.c_puct, self.use_forced_playouts);
@@ -281,29 +284,46 @@ impl<G: GameEngine> MctsSearch<G> {
             } else {
                 // Apply virtual loss so subsequent selections in this batch diverge.
                 apply_virtual_loss(&mut self.arena, leaf);
-                leaves.push((leaf, game));
+                self.stashed_leaves.push((leaf, game));
+                leaf_ids.push(leaf);
             }
         }
 
-        leaves
+        leaf_ids
     }
 
-    /// Expand leaf nodes with policies and backpropagate values.
+    /// Encode a stashed leaf's board state for NN evaluation.
+    /// The leaf must have been returned by a prior select_leaves call.
+    pub fn encode_leaf(&self, leaf: NodeId) -> (Vec<f32>, Vec<f32>) {
+        // Fast path: most recent stash entry (common when called right after select_leaves)
+        if let Some((id, game)) = self.stashed_leaves.last() {
+            if *id == leaf {
+                return Self::encode_game(game);
+            }
+        }
+        self.stashed_leaves.iter()
+            .find(|(id, _)| *id == leaf)
+            .map(|(_, g)| Self::encode_game(g))
+            .expect("encode_leaf: leaf not found in stash — call select_leaves first")
+    }
+
+    /// Expand all stashed leaves with NN outputs and backpropagate values.
+    /// Consumes the stash. policies and values must be aligned with stash order
+    /// (i.e. the order leaves were returned across all prior select_leaves calls).
     pub fn expand_and_backprop(
         &mut self,
-        leaves: &mut Vec<(NodeId, G)>,
         policies: &[Vec<f32>],
         values: &[f32],
     ) {
         let root_turn = self.arena.get(self.root).turn_player;
-        for (i, (leaf, game)) in leaves.iter_mut().enumerate() {
-            expand_with_policy::<G>(&mut self.arena, *leaf, game, &policies[i]);
+        let stashed = std::mem::take(&mut self.stashed_leaves);
+        for (i, (leaf, mut game)) in stashed.into_iter().enumerate() {
+            expand_with_policy::<G>(&mut self.arena, leaf, &mut game, &policies[i]);
             let mut value = values[i];
-            if self.arena.get(*leaf).turn_player != root_turn {
+            if self.arena.get(leaf).turn_player != root_turn {
                 value = -value;
             }
-            // Replace virtual loss placeholder with real value (visit_count already correct).
-            correct_virtual_loss(&mut self.arena, *leaf, value);
+            correct_virtual_loss(&mut self.arena, leaf, value);
         }
     }
 
