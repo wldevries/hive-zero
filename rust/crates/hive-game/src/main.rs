@@ -310,36 +310,70 @@ fn run_mcts(simulations: u32, batch_size: usize) {
 
 fn run_random(n: u32) {
     use rand::Rng;
+    use hive_game::uhp::format_move_uhp;
 
-    println!("Playing {n} random games...");
+    let verbose = n == 1;
+    if !verbose {
+        println!("Playing {n} random games...");
+    }
+
     let mut total_moves = 0u64;
     let mut results = HashMap::new();
 
-    for _ in 0..n {
+    for game_idx in 0..n {
         let mut game = Game::new();
         let mut rng = rand::thread_rng();
+        let mut move_num = 0u32;
+
+        let mut last_to: Option<hive_game::hex::Hex> = None;
 
         while !game.is_game_over() {
             let moves = game.valid_moves();
+            if verbose {
+                println!("\n--- Move {} | {} to play ---", move_num + 1, game.turn_color.as_char());
+                if move_num > 0 {
+                    println!("{}", game.board.render(last_to));
+                }
+            }
             if moves.is_empty() {
+                if verbose { println!("  (pass)"); }
                 game.play_pass();
+                last_to = None;
             } else {
                 let idx = rng.gen_range(0..moves.len());
-                game.play_move(&moves[idx]).unwrap();
+                let mv = moves[idx];
+                if verbose {
+                    let uhp = format_move_uhp(&game, &mv);
+                    println!("  -> {uhp}");
+                }
+                last_to = mv.to;
+                game.play_move(&mv).unwrap();
             }
+            move_num += 1;
             total_moves += 1;
+        }
+
+        if verbose {
+            println!("\n--- Final position ({move_num} moves) ---");
+            println!("{}", game.board.render(last_to));
+            println!("\nResult: {}", game.state.as_str());
+        } else {
+            println!("Game {}: {} ({move_num} moves)", game_idx + 1, game.state.as_str());
         }
 
         *results.entry(game.state.as_str().to_string()).or_insert(0u32) += 1;
     }
 
-    println!("Total moves: {total_moves}");
-    println!("Avg moves/game: {:.1}", total_moves as f64 / n as f64);
-    println!("Results:");
-    let mut sorted: Vec<_> = results.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(a.1));
-    for (state, count) in sorted {
-        println!("  {state}: {count}");
+    if !verbose {
+        println!();
+        println!("Total moves: {total_moves}");
+        println!("Avg moves/game: {:.1}", total_moves as f64 / n as f64);
+        println!("Results:");
+        let mut sorted: Vec<_> = results.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        for (state, count) in sorted {
+            println!("  {state}: {count}");
+        }
     }
 }
 
@@ -967,10 +1001,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Play N random games
+    /// Play N random games (default 1 shows board after each move)
     Random {
-        /// Number of games to play
-        #[arg(default_value_t = 100)]
+        /// Number of games to play (1 = turn-by-turn display)
+        #[arg(default_value_t = 1)]
         n: u32,
     },
     /// Replay boardspace games from a path

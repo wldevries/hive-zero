@@ -353,7 +353,6 @@ class SelfPlayTrainer:
 
             # Show boards of decisive games
             decisive_games = []
-            from ..core.render import render_board
             for g in finished_games_all:
                 state = g.state if isinstance(g.state, str) else g.state.value
                 if state in ("WhiteWins", "BlackWins") and len(decisive_games) < 3:
@@ -366,7 +365,7 @@ class SelfPlayTrainer:
                     winner = "White" if state == "WhiteWins" else "Black"
                     move_count = g.move_count if hasattr(g, 'move_count') else len(g.move_history)
                     labels.append(f"{winner} wins ({move_count} moves)")
-                    board_strs.append(render_board(g))
+                    board_strs.append(g.render_board())
                 rendered = _render_boards_horizontally(board_strs, labels=labels)
                 print('\n'.join('    ' + line for line in rendered.split('\n')))
 

@@ -482,6 +482,203 @@ impl Board {
     }
 }
 
+impl Board {
+    /// Render the board as a flat-top hex grid with ANSI colours.
+    ///
+    /// Screen coordinates for piece at axial (q, r):
+    ///   sx = q * 3,  sy = r * 2 + q
+    /// Each hex is 4 chars wide, drawn as:
+    ///   row sy:    `__`  at columns sx+1 .. sx+2
+    ///   row sy+1:  `/XY\`  where XY is the 2-char piece label
+    ///   row sy+2:  `\__/`  (or `\#N/` for stacked positions)
+    ///
+    /// `highlight` draws the edges of that hex in orange (last-move indicator).
+    pub fn render(&self, highlight: Option<Hex>) -> String {
+        let tops = self.all_top_pieces();
+        if tops.is_empty() {
+            return "  (empty board)".to_string();
+        }
+
+        // Collect screen positions and identify stacks.
+        let mut cells: Vec<((i32, i32), Hex, bool)> = Vec::new(); // (sx,sy), hex, has_stack
+        let mut min_sx = i32::MAX;
+        let mut min_sy = i32::MAX;
+        let mut max_sx = i32::MIN;
+        let mut max_sy = i32::MIN;
+
+        for (hex, _piece) in &tops {
+            let (q, r) = *hex;
+            let sx = q as i32 * 3;
+            let sy = r as i32 * 2 + q as i32;
+            let has_stack = self.stack_at(*hex).height() > 1;
+            cells.push(((sx, sy), *hex, has_stack));
+            if sx < min_sx { min_sx = sx; }
+            if sy < min_sy { min_sy = sy; }
+            if sx > max_sx { max_sx = sx; }
+            if sy > max_sy { max_sy = sy; }
+        }
+
+        // Normalize to 0-based.
+        let width = (max_sx - min_sx + 5) as usize;
+        let height = (max_sy - min_sy + 3) as usize;
+
+        let mut canvas: Vec<Vec<u8>> = vec![vec![b' '; width]; height];
+
+        // Place non-stacked cells first, then stacked (so stacked overwrites).
+        let mut sorted_cells = cells.clone();
+        sorted_cells.sort_by_key(|(_, _, has_stack)| *has_stack as u8);
+
+        // Assign reference numbers to stacks.
+        let mut stack_refs: Vec<(Hex, usize)> = Vec::new();
+        {
+            let mut stacked: Vec<Hex> = sorted_cells.iter()
+                .filter(|(_, _, hs)| *hs)
+                .map(|(_, h, _)| *h)
+                .collect();
+            stacked.sort_by_key(|(q, r)| (*r, *q));
+            for (i, h) in stacked.iter().enumerate() {
+                stack_refs.push((*h, i + 1));
+            }
+        }
+
+        let stack_ref_for = |h: Hex| -> Option<usize> {
+            stack_refs.iter().find(|(sh, _)| *sh == h).map(|(_, n)| *n)
+        };
+
+        for ((sx, sy), _hex, has_stack) in &sorted_cells {
+            let sx = (sx - min_sx) as usize;
+            let sy = (sy - min_sy) as usize;
+
+            // Top: __
+            canvas[sy][sx + 1] = b'_';
+            canvas[sy][sx + 2] = b'_';
+
+            // Middle: /XY\ — placeholder bytes, replaced below
+            canvas[sy + 1][sx] = b'/';
+            canvas[sy + 1][sx + 1] = b'?'; // label ch0
+            canvas[sy + 1][sx + 2] = b'?'; // label ch1
+            canvas[sy + 1][sx + 3] = b'\\';
+
+            // Bottom
+            canvas[sy + 2][sx] = b'\\';
+            canvas[sy + 2][sx + 3] = b'/';
+            if *has_stack {
+                canvas[sy + 2][sx + 1] = b'#';
+                canvas[sy + 2][sx + 2] = b'?'; // stack ref digit
+            } else {
+                canvas[sy + 2][sx + 1] = b'_';
+                canvas[sy + 2][sx + 2] = b'_';
+            }
+        }
+
+        // ANSI colours.
+        const WHITE_FG: &str = "\x1b[97m";
+        const BLACK_FG: &str = "\x1b[93m";
+        const ORANGE:   &str = "\x1b[38;5;214m";
+        const DIM:      &str = "\x1b[2m";
+        const RESET:    &str = "\x1b[0m";
+
+        // Coloured overrides: (row, col) -> (replacement string, canvas columns consumed).
+        // Labels occupy 2 canvas columns; edges and other single chars occupy 1.
+        let mut overrides: std::collections::HashMap<(usize, usize), (String, usize)> =
+            std::collections::HashMap::new();
+
+        // Piece labels and stack refs.
+        for ((sx_raw, sy_raw), hex, has_stack) in &sorted_cells {
+            let sx = (sx_raw - min_sx) as usize;
+            let sy = (sy_raw - min_sy) as usize;
+
+            let slot = self.stack_at(*hex);
+            let top = slot.top().unwrap();
+            let label = format!("{}{}", top.color().as_char(), top.piece_type().as_char());
+            let color = if top.color() == crate::piece::PieceColor::White { WHITE_FG } else { BLACK_FG };
+            overrides.insert((sy + 1, sx + 1), (format!("{color}{label}{RESET}"), 2));
+
+            if *has_stack {
+                if let Some(ref_n) = stack_ref_for(*hex) {
+                    let ref_str = format!("#{ref_n}");
+                    overrides.insert((sy + 2, sx + 1), (format!("{DIM}{ref_str}{RESET}"), 2));
+                }
+            }
+        }
+
+        // Orange edges for the highlighted hex.
+        if let Some(hl) = highlight {
+            let (q, r) = hl;
+            let sx_raw = q as i32 * 3;
+            let sy_raw = r as i32 * 2 + q as i32;
+            if sx_raw >= min_sx && sy_raw >= min_sy {
+                let sx = (sx_raw - min_sx) as usize;
+                let sy = (sy_raw - min_sy) as usize;
+                let has_stack = self.stack_at(hl).height() > 1;
+
+                // Top row: two `_`
+                overrides.insert((sy,     sx + 1), (format!("{ORANGE}_{RESET}"), 1));
+                overrides.insert((sy,     sx + 2), (format!("{ORANGE}_{RESET}"), 1));
+                // Middle row: `/` and `\`
+                overrides.insert((sy + 1, sx),     (format!("{ORANGE}/{RESET}"), 1));
+                overrides.insert((sy + 1, sx + 3), (format!("{ORANGE}\\{RESET}"), 1));
+                // Bottom row: `\` and `/`
+                overrides.insert((sy + 2, sx),     (format!("{ORANGE}\\{RESET}"), 1));
+                overrides.insert((sy + 2, sx + 3), (format!("{ORANGE}/{RESET}"), 1));
+                // Bottom inner `__` only when not stacked (stacked uses `#N` label override).
+                if !has_stack {
+                    overrides.insert((sy + 2, sx + 1), (format!("{ORANGE}_{RESET}"), 1));
+                    overrides.insert((sy + 2, sx + 2), (format!("{ORANGE}_{RESET}"), 1));
+                }
+            }
+        }
+
+        // Render canvas rows, injecting coloured overrides.
+        let mut lines: Vec<String> = Vec::new();
+        for (row_idx, row) in canvas.iter().enumerate() {
+            let mut line = String::new();
+            let mut col = 0usize;
+            while col < row.len() {
+                if let Some((colored, skip)) = overrides.get(&(row_idx, col)) {
+                    line.push_str(colored);
+                    col += skip;
+                } else {
+                    line.push(row[col] as char);
+                    col += 1;
+                }
+            }
+            lines.push(line.trim_end().to_string());
+        }
+
+        // Strip leading/trailing blank lines.
+        while lines.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
+            lines.remove(0);
+        }
+        while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+            lines.pop();
+        }
+
+        // Stack legend.
+        if !stack_refs.is_empty() {
+            lines.push(String::new());
+            for (hex, ref_n) in &stack_refs {
+                let slot = self.stack_at(*hex);
+                let mut parts: Vec<String> = Vec::new();
+                let stack_vec: Vec<_> = slot.iter().collect();
+                for piece in stack_vec.iter().rev() {
+                    let color = if piece.color() == crate::piece::PieceColor::White { WHITE_FG } else { BLACK_FG };
+                    parts.push(format!("{color}{piece}{RESET}"));
+                }
+                lines.push(format!("  #{ref_n}: {}", parts.join(" > ")));
+            }
+        }
+
+        lines.join("\n")
+    }
+}
+
+impl std::fmt::Display for Board {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.render(None))
+    }
+}
+
 /// Reconstruct a Piece from its linear index (0..21).
 fn piece_from_linear_index(idx: usize) -> Piece {
     use crate::piece::{ALL_PIECE_TYPES, PIECE_COUNTS};

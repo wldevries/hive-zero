@@ -217,6 +217,13 @@ impl PyGame {
         slot.iter().map(|p| p.to_uhp_string()).collect()
     }
 
+    /// Render the board as ANSI-coloured flat-top hex ASCII art.
+    /// Automatically highlights the destination of the last move (if any).
+    fn render_board(&self) -> String {
+        let hl = self.game.move_history().last().and_then(|mv| mv.to);
+        self.game.board.render(hl)
+    }
+
     /// Heuristic value for unfinished games.
     /// Returns (white_score, black_score) based on queen pressure.
     fn heuristic_value(&self) -> (f32, f32) {
