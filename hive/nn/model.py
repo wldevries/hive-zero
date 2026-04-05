@@ -109,20 +109,20 @@ class HiveNet(nn.Module):
 
         # Factorized policy heads
         p = F.relu(self.policy_bn(self.policy_conv(x)))
-        place = self.policy_place(p).view(p.size(0), -1)  # (B, 5*G*G)
-        src   = self.policy_src(p).view(p.size(0), -1)    # (B, G*G)
-        dst   = self.policy_dst(p).view(p.size(0), -1)    # (B, G*G)
+        place = self.policy_place(p).flatten(1)  # (B, 5*G*G)
+        src   = self.policy_src(p).flatten(1)    # (B, G*G)
+        dst   = self.policy_dst(p).flatten(1)    # (B, G*G)
         policy_logits = torch.cat([place, src, dst], dim=1)  # (B, 7*G*G)
 
         # Value head
         v = F.relu(self.value_bn(self.value_conv(x)))
-        v = v.view(v.size(0), -1)
+        v = v.flatten(1)
         v = F.relu(self.value_fc1(v))
         value = torch.tanh(self.value_fc2(v))
 
         # Auxiliary head (own pathway from trunk)
         qd = F.relu(self.qd_bn(self.qd_conv(x)))
-        qd = qd.view(qd.size(0), -1)
+        qd = qd.flatten(1)
         qd = F.relu(self.qd_fc1(qd))
         aux = torch.sigmoid(self.qd_fc2(qd))
 
@@ -153,35 +153,38 @@ def save_checkpoint(model: HiveNet, path: str, generation: int = 0,
     torch.save(checkpoint, path)
 
 
-def export_onnx(model: HiveNet, path: str):
+def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
     """Export model to ONNX format for Rust-native inference via ort.
 
     Inputs: board_tensor (B, 39, G, G), reserve (B, 10)
     Outputs: policy (B, 11*G*G), value (B, 1), aux (B, 6)
+
+    If batch_size is given the batch dimension is baked in as a static value,
+    which lets QNN/HTP compile the graph once at session creation rather than
+    JIT-compiling per unique batch size at runtime.
     """
     import os
     g = model.grid_size
     was_training = model.training
     model.eval()
     device = next(model.parameters()).device
-    dummy_board = torch.zeros(1, NUM_CHANNELS, g, g, device=device)
-    dummy_reserve = torch.zeros(1, RESERVE_SIZE, device=device)
+    b = batch_size or 1
+    dummy_board = torch.zeros(b, NUM_CHANNELS, g, g, device=device)
+    dummy_reserve = torch.zeros(b, RESERVE_SIZE, device=device)
     input_names = ["board", "reserve"]
     output_names = ["policy", "value", "aux"]
     import logging
     _onnx_logger = logging.getLogger("onnxscript")
     _prev_level = _onnx_logger.level
     _onnx_logger.setLevel(logging.WARNING)
+    dynamic_shapes = None if batch_size else ({0: "batch"}, {0: "batch"})
     torch.onnx.export(
         model,
         (dummy_board, dummy_reserve),
         path,
         input_names=input_names,
         output_names=output_names,
-        dynamic_shapes=(
-            {0: "batch_board"},
-            {0: "batch_reserve"}
-        ),
+        dynamic_shapes=dynamic_shapes,
         dynamo=True,
         verbose=False,
         opset_version=21,
@@ -190,7 +193,8 @@ def export_onnx(model: HiveNet, path: str):
     if was_training:
         model.train()
     size_mb = os.path.getsize(path) / (1024 * 1024)
-    print(f"  ONNX exported: {path} ({size_mb:.1f} MB)")
+    batch_label = f" (batch={batch_size}, static)" if batch_size else ""
+    print(f"  ONNX exported: {path} ({size_mb:.1f} MB){batch_label}")
 
 
 def load_checkpoint(path: str) -> tuple[HiveNet, dict]:

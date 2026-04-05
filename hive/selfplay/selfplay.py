@@ -100,7 +100,8 @@ class SelfPlayTrainer:
             playout_cap_p: float = 0.0,
             fast_cap: int = 20,
             replay_window: int = 8,
-            leaf_batch_size: int = 512,
+            leaf_batch_size: int = 1,
+            fixed_batch_size: int | None = None,
             temperature: float = 1.0,
             temp_threshold: int = 30,
             c_puct: float = 1.5,
@@ -254,6 +255,7 @@ class SelfPlayTrainer:
                 playout_cap_p=playout_cap_p,
                 fast_cap=fast_cap,
                 leaf_batch_size=leaf_batch_size,
+                fixed_batch_size=fixed_batch_size,
                 random_opening_moves=random_opening_moves,
                 skip_timeout_games=skip_timeout_games,
             )
@@ -261,9 +263,20 @@ class SelfPlayTrainer:
             ort_path = None
             if use_ort:
                 ort_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
-                if not os.path.exists(ort_path):
-                    print(f"  ORT requested but {ort_path} not found, exporting...")
-                    export_onnx(self.model, ort_path)
+                # Re-export if missing or if batch size is fixed (static ONNX must match).
+                needs_export = not os.path.exists(ort_path)
+                if not needs_export and fixed_batch_size:
+                    import onnx
+                    try:
+                        m = onnx.load(ort_path)
+                        dim = m.graph.input[0].type.tensor_type.shape.dim[0]
+                        baked = dim.dim_value  # 0 means dynamic
+                        needs_export = (baked != fixed_batch_size)
+                    except Exception:
+                        needs_export = True
+                if needs_export:
+                    print(f"  ORT requested but {ort_path} not found or stale, exporting...")
+                    export_onnx(self.model, ort_path, batch_size=fixed_batch_size)
 
             if not use_ort:
                 self.model.eval()
@@ -399,7 +412,7 @@ class SelfPlayTrainer:
             metadata = {**train_params, "lr": self.trainer._current_lr}
             save_checkpoint(self.model, self.model_path, generation, metadata)
             onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
-            export_onnx(self.model, onnx_path)
+            export_onnx(self.model, onnx_path, batch_size=fixed_batch_size)
 
             # --- Checkpoint ---            
             if generation % checkpoint_every == 0:

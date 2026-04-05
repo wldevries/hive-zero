@@ -79,29 +79,50 @@ impl HiveInference for HiveOrtEngine {
     }
 }
 
+/// Ensure the directory containing QnnHtp.dll is on PATH so ORT can find
+/// onnxruntime_providers_qnn.dll. Needed for the 2.x unbundled layout where
+/// QNN DLLs live in a separate onnxruntime_qnn/ directory.
+fn prepend_qnn_dir_to_path() {
+    let htp = find_qnn_htp_dll();
+    if let Some(dir) = std::path::Path::new(&htp).parent() {
+        let dir_str = dir.to_string_lossy();
+        let current = std::env::var("PATH").unwrap_or_default();
+        if !current.contains(dir_str.as_ref()) {
+            std::env::set_var("PATH", format!("{};{}", dir_str, current));
+        }
+    }
+}
+
 fn find_onnxruntime_dylib() -> PathBuf {
-    // Find our custom ONNX Runtime dylib path somehow (i.e. resolving it from the root of our program's install folder)
-    // The path should point to the `libonnxruntime` binary, which looks like:
-    // - on Windows: C:\Program Files\...\onnxruntime.dll
-    // - on Linux: /etc/.../libonnxruntime.so
-    // - on macOS: /.../libonnxruntime.dylib
     PathBuf::from(r".venv\Lib\site-packages\onnxruntime\capi\onnxruntime.dll")
+}
+
+fn find_qnn_htp_dll() -> String {
+    // onnxruntime-qnn <=1.x bundles DLLs into onnxruntime/capi/ (alongside onnxruntime.dll).
+    // onnxruntime-qnn 2.x+ puts them in a separate onnxruntime_qnn/ directory.
+    let bundled = std::path::Path::new(r".venv\Lib\site-packages\onnxruntime\capi\QnnHtp.dll");
+    let unbundled = std::path::Path::new(r".venv\Lib\site-packages\onnxruntime_qnn\QnnHtp.dll");
+    let p = if bundled.exists() { bundled } else { unbundled };
+    p.canonicalize()
+        .unwrap_or_else(|_| p.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
  
 
 impl HiveOrtEngine {
     pub fn load(onnx_path: &str) -> Result<Self, ort::Error> {
-        let dylib_path = find_onnxruntime_dylib();
- 
-        // Initialize ort with the path to the dylib. This **must** be called before any other usage of `ort`!
-        // `init_from` returns a `Result<EnvironmentBuilder>` which you can use to further configure the environment
-        // before `.commit()`ing; see the Environment docs for more information on what you can configure.
-        // `init_from` will return an `Err` if it fails to load the dylib.
-        ort::init_from(dylib_path)?.commit();
+        prepend_qnn_dir_to_path();
+        ort::init_from(find_onnxruntime_dylib())?.commit();
 
         let session = Session::builder()?
             .with_execution_providers([
-                ort::ep::CUDA::default().build().error_on_failure()
+                ort::ep::CUDA::default().build(),
+                ort::ep::QNN::default()
+                    .with_backend_path(find_qnn_htp_dll())
+                    .with_htp_fp16_precision(true)
+                    .with_htp_graph_finalization_optimization_mode(3)
+                    .build(),
             ])?
             .commit_from_file(onnx_path)?;
         Ok(Self { session })
@@ -168,16 +189,18 @@ impl ZertzInference for ZertzOrtEngine {
 
 impl ZertzOrtEngine {
     pub fn load(onnx_path: &str) -> Result<Self, ort::Error> {
-        let dylib_path = find_onnxruntime_dylib();
- 
-        // Initialize ort with the path to the dylib. This **must** be called before any other usage of `ort`!
-        // `init_from` returns a `Result<EnvironmentBuilder>` which you can use to further configure the environment
-        // before `.commit()`ing; see the Environment docs for more information on what you can configure.
-        // `init_from` will return an `Err` if it fails to load the dylib.
-        ort::init_from(dylib_path)?.commit();
+        prepend_qnn_dir_to_path();
+        ort::init_from(find_onnxruntime_dylib())?.commit();
 
         let session = Session::builder()?
-            .with_execution_providers([ort::ep::CUDA::default().build()])?
+            .with_execution_providers([
+                ort::ep::CUDA::default().build(),
+                ort::ep::QNN::default()
+                    .with_backend_path(find_qnn_htp_dll())
+                    .with_htp_fp16_precision(true)
+                    .with_htp_graph_finalization_optimization_mode(3)
+                    .build(),
+            ])?
             .commit_from_file(onnx_path)?;
         Ok(Self { session })
     }

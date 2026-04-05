@@ -189,6 +189,9 @@ struct SelfPlayConfig {
     random_opening_moves_max: u32,
     skip_timeout_games: bool,
     grid_size: usize,
+    /// If set, every inference call is padded to exactly this many positions.
+    /// Keeps the batch shape constant for QNN/NPU backends that require fixed shapes.
+    fixed_batch_size: Option<usize>,
 }
 
 /// Result of a self-play session, returned to Python.
@@ -335,7 +338,7 @@ impl PySelfPlaySession {
         c_puct = 1.5,
         dir_alpha = 0.3,
         dir_epsilon = 0.25,
-        leaf_batch_size = 512,
+        leaf_batch_size = 1,
         resign_threshold = None,
         resign_moves = 5,
         resign_min_moves = 20,
@@ -344,6 +347,7 @@ impl PySelfPlaySession {
         random_opening_moves_max = 0,
         skip_timeout_games = false,
         grid_size = 23,
+        fixed_batch_size = None,
     ))]
     fn new(
         num_games: usize,
@@ -365,6 +369,7 @@ impl PySelfPlaySession {
         random_opening_moves_max: u32,
         skip_timeout_games: bool,
         grid_size: usize,
+        fixed_batch_size: Option<usize>,
     ) -> Self {
         PySelfPlaySession {
             config: SelfPlayConfig {
@@ -372,7 +377,7 @@ impl PySelfPlaySession {
                 playout_cap_p, fast_cap, c_puct, dir_alpha, dir_epsilon, leaf_batch_size,
                 resign_threshold, resign_moves, resign_min_moves, calibration_frac,
                 random_opening_moves_min, random_opening_moves_max, skip_timeout_games,
-                grid_size,
+                grid_size, fixed_batch_size,
             },
         }
     }
@@ -574,8 +579,8 @@ impl PySelfPlaySession {
                     root_syms[i], NUM_CHANNELS, grid_size,
                 );
             }
-            let r = backend.infer_batch(&flat_boards, &flat_reserves, n, NUM_CHANNELS, grid_size, RESERVE_SIZE)
-                .expect("inference failed");
+            let target = cfg.fixed_batch_size.unwrap_or(n);
+            let r = infer_padded(&mut backend, flat_boards, flat_reserves, n, target, NUM_CHANNELS, grid_size);
             let (mut init_policies, init_values) = (r.policy, r.value);
             // Inverse-transform policy back to original orientation
             let num_policy_channels = move_encoding::NUM_POLICY_CHANNELS;
@@ -634,7 +639,7 @@ impl PySelfPlaySession {
             if !searching.is_empty() {
                 run_simulations(
                     &mut backend, &mut searches, &mcts_games, &searching,
-                    &sim_caps, cfg.leaf_batch_size, grid_size,
+                    &sim_caps, cfg.leaf_batch_size, cfg.fixed_batch_size, grid_size,
                 );
             }
 
@@ -913,6 +918,55 @@ impl PySelfPlaySession {
 /// Simulation loop with per-game caps. Each game selects 1 leaf per round;
 /// leaves are flushed to the inference backend every `rounds_per_flush` rounds
 /// (or when all games finish). Works for any backend via `HiveInference`.
+/// Run inference in chunks of exactly `target` positions, padding the last chunk with zeros.
+/// When `actual <= target`: one call, padded up. When `actual > target`: ceil(actual/target) calls.
+/// The returned policy/value cover exactly `actual` positions in order.
+/// When `target == actual` no allocation overhead occurs.
+fn infer_padded(
+    backend: &mut dyn HiveInference,
+    boards: Vec<f32>,
+    reserves: Vec<f32>,
+    actual: usize,
+    target: usize,
+    num_channels: usize,
+    grid_size: usize,
+) -> crate::inference::HiveInferenceResult {
+    let policy_size = move_encoding::policy_size(grid_size);
+    let board_size = num_channels * grid_size * grid_size;
+
+    let mut out_policy = Vec::with_capacity(actual * policy_size);
+    let mut out_value  = Vec::with_capacity(actual);
+
+    let mut offset = 0;
+    while offset < actual {
+        let chunk = (actual - offset).min(target);
+        let b_slice = &boards[offset * board_size..(offset + chunk) * board_size];
+        let r_slice = &reserves[offset * RESERVE_SIZE..(offset + chunk) * RESERVE_SIZE];
+
+        let result = if chunk == target {
+            backend.infer_batch(b_slice, r_slice, target, num_channels, grid_size, RESERVE_SIZE)
+                .expect("inference failed")
+        } else {
+            // Last partial chunk — pad to target
+            let mut pb = b_slice.to_vec();
+            pb.resize(target * board_size, 0.0);
+            let mut pr = r_slice.to_vec();
+            pr.resize(target * RESERVE_SIZE, 0.0);
+            let mut r = backend.infer_batch(&pb, &pr, target, num_channels, grid_size, RESERVE_SIZE)
+                .expect("inference failed");
+            r.policy.truncate(chunk * policy_size);
+            r.value.truncate(chunk);
+            r
+        };
+
+        out_policy.extend_from_slice(&result.policy);
+        out_value.extend_from_slice(&result.value);
+        offset += chunk;
+    }
+
+    crate::inference::HiveInferenceResult { policy: out_policy, value: out_value }
+}
+
 fn run_simulations(
     backend: &mut dyn HiveInference,
     searches: &mut Vec<MctsSearch<Game>>,
@@ -920,6 +974,7 @@ fn run_simulations(
     searching: &[usize],
     per_game_caps: &[usize],
     rounds_per_flush: usize,
+    fixed_batch_size: Option<usize>,
     grid_size: usize,
 ) {
     let board_size = NUM_CHANNELS * grid_size * grid_size;
@@ -970,10 +1025,8 @@ fn run_simulations(
             let boards_data = std::mem::take(&mut pending_boards);
             let reserves_data = std::mem::take(&mut pending_reserves);
 
-            let result = backend.infer_batch(
-                &boards_data, &reserves_data,
-                total, NUM_CHANNELS, grid_size, RESERVE_SIZE,
-            ).expect("inference failed");
+            let target = fixed_batch_size.unwrap_or(total);
+            let result = infer_padded(backend, boards_data, reserves_data, total, target, NUM_CHANNELS, grid_size);
 
             let policy_data = &result.policy;
             let value_data = &result.value;

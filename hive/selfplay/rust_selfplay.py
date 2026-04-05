@@ -10,6 +10,7 @@ import numpy as np
 from ..encoding.move_encoder import policy_size as compute_policy_size
 
 
+
 class RustParallelSelfPlay:
     """Self-play using Rust game loop with Python NN inference callback.
 
@@ -28,6 +29,7 @@ class RustParallelSelfPlay:
                  playout_cap_p: float = 0.0,
                  fast_cap: int = 20,
                  leaf_batch_size: int = 1,
+                 fixed_batch_size: int | None = None,
                  random_opening_moves: int | tuple[int, int] = 0,
                  skip_timeout_games: bool = False,
                  **kwargs):
@@ -47,6 +49,7 @@ class RustParallelSelfPlay:
         self.playout_cap_p = playout_cap_p
         self.fast_cap = fast_cap
         self.leaf_batch_size = leaf_batch_size
+        self.fixed_batch_size = fixed_batch_size
         self.random_opening_moves = random_opening_moves
         self.skip_timeout_games = skip_timeout_games
 
@@ -105,6 +108,7 @@ class RustParallelSelfPlay:
             dir_alpha=self.dir_alpha,
             dir_epsilon=self.dir_epsilon,
             leaf_batch_size=self.leaf_batch_size,
+            fixed_batch_size=self.fixed_batch_size,
             resign_threshold=self.resign_threshold,
             resign_moves=self.resign_moves,
             resign_min_moves=self.resign_min_moves,

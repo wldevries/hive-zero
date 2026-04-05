@@ -72,10 +72,13 @@ def main():
                               help="MCTS simulations per move during eval")
     train_parser.add_argument("--mzinga-path", type=str, default="mzinga/MzingaEngine.exe",
                               help="Path to MzingaEngine for evaluation")
-    train_parser.add_argument("--play-batch-size", type=int, default=1,
-                              help="Rounds of leaf selection to accumulate before a GPU inference "
-                                   "call during self-play MCTS. 1 (default) = flush every round "
-                                   "(batch ≈ active game count). N > 1 = N × active games per call.")
+    train_parser.add_argument("--play-batch-sims", type=int, default=1,
+                              help="Rounds of sim steps to accumulate before an inference call "
+                                   "(batch ≈ N × active games). Default 1 = flush every round.")
+    train_parser.add_argument("--play-batch-size", type=int, default=None,
+                              help="Fixed inference batch size in positions (for QNN/NPU). "
+                                   "Every inference call uses exactly this many positions, "
+                                   "chunking larger batches and padding the last chunk with zeros.")
     train_parser.add_argument("--temperature", type=float, default=1.0,
                               help="MCTS temperature for move selection (default: 1.0)")
     train_parser.add_argument("--temp-threshold", type=int, default=30,
@@ -287,7 +290,8 @@ def main():
             playout_cap_p=args.playout_cap_p,
             fast_cap=args.fast_cap,
             replay_window=args.replay_window,
-            leaf_batch_size=args.play_batch_size,
+            leaf_batch_size=args.play_batch_sims,
+            fixed_batch_size=args.play_batch_size,
             temperature=args.temperature,
             temp_threshold=args.temp_threshold,
             c_puct=args.c_puct,
