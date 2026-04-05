@@ -1,6 +1,6 @@
 //! Rust-native ONNX inference via the `ort` crate, replacing the Python eval callback.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ort::session::Session;
 use ort::value::Tensor;

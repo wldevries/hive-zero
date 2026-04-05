@@ -10,7 +10,7 @@ use rand::prelude::Distribution;
 use zertz_game::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
 use zertz_game::hex::{is_valid, Hex};
 use zertz_game::mcts::arena::NodeId;
-use zertz_game::mcts::search::{MctsSearch, PolicyHeads, PLACE_HEAD_SIZE, CAP_HEAD_SIZE, POLICY_HEADS_TOTAL};
+use zertz_game::mcts::search::{MctsSearch, PolicyHeads, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
 use zertz_game::move_encoding::{encode_move, POLICY_SIZE};
 use zertz_game::random_play::{classify_win, WinType};
 use zertz_game::zertz::{Marble, ZertzBoard, ZertzMove, MAX_CAPTURE_JUMPS};
@@ -823,7 +823,7 @@ impl PyZertzSelfPlaySession {
             }
 
             // --- Select and apply moves (greedy) ---
-            for (i, &gi) in mcts_games.iter().enumerate() {
+            for (_i, &gi) in mcts_games.iter().enumerate() {
                 let dist = searches[gi].get_pruned_visit_distribution();
                 let mv = if dist.is_empty() {
                     ZertzMove::Pass

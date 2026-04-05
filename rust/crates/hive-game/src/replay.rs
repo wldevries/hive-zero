@@ -178,7 +178,7 @@ fn board_dims(game: &Game) -> BoardDims {
             let (q2, r2) = positions[j];
             let s1 = -q1 - r1;
             let s2 = -q2 - r2;
-            let d = ((q1-q2).abs().max((r1-r2).abs()).max((s1-s2).abs()));
+            let d = (q1-q2).abs().max((r1-r2).abs()).max((s1-s2).abs());
             diameter = diameter.max(d);
         }
     }

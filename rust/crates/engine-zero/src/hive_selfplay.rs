@@ -1,4 +1,3 @@
-use core::panic;
 
 /// Self-play game loop in Rust.
 /// Plays all games to completion, only calling back to Python for GPU NN inference.
@@ -432,7 +431,7 @@ impl PySelfPlaySession {
         let mut reserve_buf: Vec<f32> = Vec::new();
 
         // Per-game random opening move counts (sampled once per game from [min, max])
-        let mut game_random_opening_moves: Vec<u32> = {
+        let game_random_opening_moves: Vec<u32> = {
             let mut rng = rand::thread_rng();
             (0..num_games).map(|_| {
                 if cfg.random_opening_moves_max > cfg.random_opening_moves_min {

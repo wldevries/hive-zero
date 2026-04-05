@@ -252,8 +252,7 @@ fn collect_sgfs(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
 
 fn run_mcts(simulations: u32, batch_size: usize) {
     use core_game::mcts::search::MctsSearch;
-    use core_game::game::NNGame;
-    use hive_game::move_encoding::policy_size;
+    use core_game::game::NNGame;    
     use hive_game::uhp::format_move_uhp;
 
     let mut game = Game::new();
