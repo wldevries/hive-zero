@@ -108,12 +108,32 @@ fn find_qnn_htp_dll() -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+/// onnxruntime-qnn 2.x ships the QNN EP as a standalone plugin library that must be registered
+/// with the ORT environment before sessions can use it.
+fn find_qnn_provider_dll() -> PathBuf {
+    let p = std::path::Path::new(r".venv\Lib\site-packages\onnxruntime_qnn\onnxruntime_providers_qnn.dll");
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Register the QNN plugin EP library with the current ORT environment (onnxruntime-qnn ≥ 2.0).
+/// Silently skips if the plugin DLL is absent or registration fails (e.g. no QNN hardware).
+fn register_qnn_plugin() {
+    let provider_dll = find_qnn_provider_dll();
+    if !provider_dll.exists() {
+        return;
+    }
+    if let Ok(env) = ort::environment::Environment::current() {
+        let _ = env.register_ep_library("QNN", provider_dll);
+    }
+}
  
 
 impl HiveOrtEngine {
     pub fn load(onnx_path: &str) -> Result<Self, ort::Error> {
         prepend_qnn_dir_to_path();
         ort::init_from(find_onnxruntime_dylib())?.commit();
+        register_qnn_plugin();
 
         let session = Session::builder()?
             .with_execution_providers([
@@ -191,6 +211,7 @@ impl ZertzOrtEngine {
     pub fn load(onnx_path: &str) -> Result<Self, ort::Error> {
         prepend_qnn_dir_to_path();
         ort::init_from(find_onnxruntime_dylib())?.commit();
+        register_qnn_plugin();
 
         let session = Session::builder()?
             .with_execution_providers([

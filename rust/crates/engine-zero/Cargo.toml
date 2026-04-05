@@ -16,4 +16,4 @@ numpy = "0.22"
 rand = { workspace = true }
 rand_distr = { workspace = true }
 rayon = "1.10"
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic", "cuda", "qnn"] }
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic", "cuda", "qnn", "api-22"] }
