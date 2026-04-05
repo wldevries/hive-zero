@@ -7,7 +7,7 @@ A Python + Rust AI engine for the [Hive](https://boardgamegeek.com/boardgame/265
 - **Complete Hive rules**: Queen, Beetle, Grasshopper, Spider, Ant with full movement validation including One Hive rule, gate blocking, and beetle stacking
 - **UHP compliant**: stdin/stdout protocol compatible with Mzinga and other UHP viewers
 - **AlphaZero-style AI**: Convolutional neural network with policy and value heads, trained via self-play with SGD + cosine annealing with warm restarts
-- **Rust game engine**: PyO3-based Rust extension (`hive_engine`) for game simulation, MCTS, and board encoding
+- **Rust game engine**: PyO3-based Rust extension (`engine_zero`) for game simulation, MCTS, and board encoding
 - **Rayon-parallel MCTS**: Cross-game batched tree search with parallel CPU ops and batched GPU inference
 - **Dirichlet noise**: Applied to MCTS root during self-play for exploration
 - **Self-play training**: Automated pipeline with MCTS self-play and replay buffer
@@ -129,7 +129,7 @@ hive/
   selfplay/    Self-play training loop (Rust-accelerated)
   eval/        Engine-vs-engine match runner and model evaluation
 rust/
-  src/         Rust game engine exposed via PyO3 as `hive_engine`
+  src/         Rust game engine exposed via PyO3 as `engine_zero`
                (board, game, rules, MCTS, move/board encoding, rayon parallelism)
 ```
 
@@ -144,7 +144,7 @@ Follows UHP MoveString format:
 
 ## Zertz
 
-A separate AlphaZero-style engine for [Zertz](https://boardgamegeek.com/boardgame/596/zertz) is included under `zertz/`. It uses the same Rust game backend (`hive_engine`) and PyTorch training loop.
+A separate AlphaZero-style engine for [Zertz](https://boardgamegeek.com/boardgame/596/zertz) is included under `zertz/`. It uses the same Rust game backend (`engine_zero`) and PyTorch training loop.
 
 ### Train Zertz
 

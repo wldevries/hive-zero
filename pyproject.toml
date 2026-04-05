@@ -29,7 +29,7 @@ build-backend = "maturin"
 
 [tool.maturin]
 manifest-path = "rust/crates/engine-zero/Cargo.toml"
-module-name = "hive_engine"
+module-name = "engine_zero"
 python-packages = ["hive", "zertz", "shared"]
 
 [tool.uv]

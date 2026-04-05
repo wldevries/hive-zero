@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from typing import Optional
 
-from hive_engine import RustGame
+from engine_zero import RustGame
 
 
 ENGINE_NAME = "HiveEngine"
@@ -153,7 +153,7 @@ class UHPEngine:
             return
 
         import numpy as np
-        from hive_engine import RustBatchMCTS
+        from engine_zero import RustBatchMCTS
 
         rust_game = self.game.copy()
 
@@ -194,7 +194,7 @@ class UHPEngine:
                 return
             self._respond(rust_game.format_move_uhp(piece_str, from_pos, to_pos))
         else:
-            from hive_engine import RustMCTS
+            from engine_zero import RustMCTS
             from ..encoding.move_encoder import POLICY_SIZE
 
             def uniform_eval(board_batch, reserve_batch):

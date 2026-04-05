@@ -181,7 +181,7 @@ class ModelEngine:
         return []
 
     def _newgame(self) -> list[str]:
-        from hive_engine import RustGame
+        from engine_zero import RustGame
         gs = getattr(self.model, 'grid_size', 23)
         self._game = RustGame(grid_size=gs)
         return [self._game.game_string]
@@ -300,7 +300,7 @@ class ModelEngine:
 
     def _bestmove(self) -> list[str]:
         import torch
-        from hive_engine import RustBatchMCTS
+        from engine_zero import RustBatchMCTS
         from ..encoding.move_encoder import policy_size as compute_policy_size
 
         gs = getattr(self.model, 'grid_size', 23)
@@ -472,7 +472,7 @@ def run_parallel_match(
     Odd-indexed games: engine2=white, engine1=black.
     """
     import torch
-    from hive_engine import RustGame, RustBatchMCTS
+    from engine_zero import RustGame, RustBatchMCTS
     from ..encoding.move_encoder import POLICY_SIZE
 
     NUM_CH = 23

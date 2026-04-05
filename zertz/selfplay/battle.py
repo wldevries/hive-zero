@@ -48,7 +48,7 @@ def run_battle(
     max_moves: int = 40,
     play_batch_size: int = 2,
 ):
-    from hive_engine import ZertzSelfPlaySession
+    from engine_zero import ZertzSelfPlaySession
 
     model1, ckpt1 = load_checkpoint(model1_path)
     model2, ckpt2 = load_checkpoint(model2_path)

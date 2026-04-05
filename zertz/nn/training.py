@@ -23,7 +23,7 @@ _HEX_PERM_CACHE: list | None = None
 def _load_grid_perms() -> list:
     global _GRID_PERM_CACHE
     if _GRID_PERM_CACHE is None:
-        from hive_engine import zertz_d6_grid_permutations
+        from engine_zero import zertz_d6_grid_permutations
         _GRID_PERM_CACHE = [np.array(p) for p in zertz_d6_grid_permutations()]
     return _GRID_PERM_CACHE
 
@@ -31,7 +31,7 @@ def _load_grid_perms() -> list:
 def _load_hex_perms() -> list:
     global _HEX_PERM_CACHE
     if _HEX_PERM_CACHE is None:
-        from hive_engine import zertz_d6_hex_permutations
+        from engine_zero import zertz_d6_hex_permutations
         _HEX_PERM_CACHE = [np.array(p) for p in zertz_d6_hex_permutations()]
     return _HEX_PERM_CACHE
 

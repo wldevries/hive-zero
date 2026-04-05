@@ -129,7 +129,7 @@ class SelfPlayTrainer:
         use_ort: bool = False,
         value_loss_scale: float = 1.0,
     ):
-        from hive_engine import ZertzSelfPlaySession
+        from engine_zero import ZertzSelfPlaySession
 
         log_path = self.model_name + "_log.csv"
         if not os.path.exists(log_path):

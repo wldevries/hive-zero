@@ -1,6 +1,6 @@
 """Constants for Hive board encoding (tensor layout for neural network input).
 
-Actual encoding is done in Rust (hive_engine). This file only exports the
+Actual encoding is done in Rust (engine_zero). This file only exports the
 constants needed by the Python NN model and training code.
 """
 

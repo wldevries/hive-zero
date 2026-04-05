@@ -54,7 +54,7 @@ failed (all OOB — see board recentering below). 99.7% success rate on non-skip
 **Remaining:**
 
 - Fix remaining 383 OOB failures (games that exceed 23x23 grid — see board recentering below).
-- Migrate `process_games.py` to use `RustGame` from `hive_engine` instead of Python `Game`.
+- Migrate `process_games.py` to use `RustGame` from `engine_zero` instead of Python `Game`.
 - Once no code outside `hive/core/` references Python game logic, delete `hive/core/rules.py`,
   `hive/core/game.py`, `hive/core/board.py`, `hive/core/pieces.py`, `hive/core/hex.py`.
   Keep only what has no Rust equivalent (e.g. `render.py`).

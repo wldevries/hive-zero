@@ -3,7 +3,7 @@
 ## Project Overview
 A Hive AI engine in Python + Rust implementing the Universal Hive Protocol (UHP) over stdin/stdout.
 Uses AlphaZero-style MCTS + neural network for move selection.
-All game logic, MCTS, and encoding run in Rust (`hive_engine` via PyO3) for performance.
+All game logic, MCTS, and encoding run in Rust (`engine_zero` via PyO3) for performance.
 
 ## Architecture
 ```
@@ -16,7 +16,7 @@ hive/
     selfplay.py       - SelfPlayTrainer orchestrator, playout cap randomization
     rust_selfplay.py  - RustParallelSelfPlay (rayon-parallel batched MCTS, playout cap)
 rust/
-  src/         - Rust game engine (PyO3 extension module `hive_engine`)
+  src/         - Rust game engine (PyO3 extension module `engine_zero`)
     board.rs          - Board state, 23x23 grid, hex-to-grid conversion
     board_encoding.rs - Board tensor encoding (mirrors hive/encoding/)
     game.rs           - Game state, move application, undo, heuristic evaluation
@@ -95,7 +95,7 @@ uv run python -m pytest tests/    # Run tests
 
 ## Building the Rust Extension
 The Rust code is built as a PyO3 extension module via maturin. The package name is `hive-zero`
-but the module is imported as `hive_engine` (set via `[lib] name` in Cargo.toml).
+but the module is imported as `engine_zero` (set via `[lib] name` in Cargo.toml).
 
 `uv run` automatically rebuilds when Rust source files change (via `cache-keys` in pyproject.toml).
 Just run `uv run python main.py ...` after editing — no manual rebuild needed.

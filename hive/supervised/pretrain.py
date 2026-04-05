@@ -28,10 +28,10 @@ _cr = lambda v: f"{colorama.Fore.RED}{_B}{v}{_R}"       # total loss
 _cy = lambda v: f"{colorama.Fore.YELLOW}{_B}{v}{_R}"   # policy / value loss
 _cc = lambda v: f"{colorama.Fore.CYAN}{_B}{v}{_R}"     # chunk / epoch labels
 
-from hive_engine import parse_sgf_moves as parse_moves
+from engine_zero import parse_sgf_moves as parse_moves
 from ..uhp import normalize_piece as _normalize_piece
 
-# Heavy imports (torch, hive_engine) are deferred to class/function bodies
+# Heavy imports (torch, engine_zero) are deferred to class/function bodies
 # so that `main.py` can be imported without torch installed or the Rust
 # extension built.
 _NUM_CHANNELS: int | None = None
@@ -49,7 +49,7 @@ def _load_encoding_consts() -> tuple[int, int, int]:
 
 
 # ---------------------------------------------------------------------------
-# UHP move parser (operates on hive_engine.RustGame state)
+# UHP move parser (operates on engine_zero.RustGame state)
 # ---------------------------------------------------------------------------
 
 # Maps (prefix, suffix) direction notation to axial (dq, dr)
@@ -166,7 +166,7 @@ def game_to_samples(
           policy_target : shape (POLICY_SIZE,), float32 one-hot
           value_target  : float, ∈ {-1.0, 0.0, +1.0}
     """
-    import hive_engine
+    import engine_zero
     from ..encoding.move_encoder import NUM_POLICY_CHANNELS
     NUM_CHANNELS, _, _ = _load_encoding_consts()
     POLICY_SIZE = NUM_POLICY_CHANNELS * grid_size * grid_size
@@ -178,7 +178,7 @@ def game_to_samples(
     else:
         outcome = {"w": 0.0, "b": 0.0}
 
-    game = hive_engine.RustGame(grid_size=grid_size)
+    game = engine_zero.RustGame(grid_size=grid_size)
     samples: list[tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
 
     for move_str in parse_moves(sgf_content):

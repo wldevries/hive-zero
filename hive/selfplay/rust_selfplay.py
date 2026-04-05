@@ -93,7 +93,7 @@ class RustParallelSelfPlay:
             Empty inner list (or None) means use random_opening_moves for that game.
         onnx_path: if provided, use Rust-native ORT inference instead of Python eval.
         """
-        from hive_engine import RustSelfPlaySession
+        from engine_zero import RustSelfPlaySession
 
         grid_size = getattr(self.model, 'grid_size', 23) if self.model else 23
         session = RustSelfPlaySession(

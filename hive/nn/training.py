@@ -24,7 +24,7 @@ _SYM_PERMS_CACHE: dict[int, list] = {}
 
 def _load_sym_perms(grid_size: int):
     if grid_size not in _SYM_PERMS_CACHE:
-        from hive_engine import d6_grid_permutations
+        from engine_zero import d6_grid_permutations
         _SYM_PERMS_CACHE[grid_size] = [np.array(p) for p in d6_grid_permutations(grid_size)]
     return _SYM_PERMS_CACHE[grid_size]
 

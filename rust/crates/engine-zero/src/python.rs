@@ -1,4 +1,4 @@
-/// PyO3 Python bindings for hive_engine.
+/// PyO3 Python bindings for engine_zero.
 
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;

@@ -5,9 +5,9 @@ pub mod zertz_python;
 
 use pyo3::prelude::*;
 
-/// Python module: hive_engine
+/// Python module: engine_zero
 #[pymodule]
-fn hive_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn engine_zero(m: &Bound<'_, PyModule>) -> PyResult<()> {
     python::register(m)?;
     hive_selfplay::register(m)?;
     zertz_python::register(m)?;

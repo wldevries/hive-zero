@@ -192,7 +192,7 @@ def parse_placement(s, moves, board_str, current_player):
 
 
 def run(model_path=None, device="cuda", simulations=200, human_color=None):
-    import hive_engine  # the compiled Rust extension
+    import engine_zero  # the compiled Rust extension
 
     # Load model if provided
     eval_fn = None
@@ -203,7 +203,7 @@ def run(model_path=None, device="cuda", simulations=200, human_color=None):
         model = model.to(device)
         eval_fn = make_eval_fn(model, device)
 
-    game = hive_engine.ZertzGame()
+    game = engine_zero.ZertzGame()
 
     # Decide who plays as whom
     if human_color is None:
