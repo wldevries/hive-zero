@@ -49,7 +49,7 @@ def _load_encoding_consts() -> tuple[int, int, int]:
 
 
 # ---------------------------------------------------------------------------
-# UHP move parser (operates on engine_zero.RustGame state)
+# UHP move parser (operates on engine_zero.HiveGame state)
 # ---------------------------------------------------------------------------
 
 # Maps (prefix, suffix) direction notation to axial (dq, dr)
@@ -68,7 +68,7 @@ def parse_uhp_move(
     game,
     move_str: str,
 ) -> tuple[str, Optional[tuple[int, int]], tuple[int, int]]:
-    """Parse a UHP move string given the current RustGame state.
+    """Parse a UHP move string given the current HiveGame state.
 
     Returns (piece_str, from_pos_or_None, to_pos).
     Raises ValueError on any parse failure.
@@ -178,7 +178,7 @@ def game_to_samples(
     else:
         outcome = {"w": 0.0, "b": 0.0}
 
-    game = engine_zero.RustGame(grid_size=grid_size)
+    game = engine_zero.HiveGame(grid_size=grid_size)
     samples: list[tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
 
     for move_str in parse_moves(sgf_content):

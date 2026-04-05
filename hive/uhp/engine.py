@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from typing import Optional
 
-from engine_zero import RustGame
+from engine_zero import HiveGame
 
 
 ENGINE_NAME = "HiveEngine"
@@ -15,7 +15,7 @@ class UHPEngine:
     """UHP-compliant engine communicating over stdin/stdout."""
 
     def __init__(self, model=None, device: str = "cpu", simulations: int = 800):
-        self.game: Optional[RustGame] = None
+        self.game: Optional[HiveGame] = None
         self._running = True
         self.model = model
         self.device = device
@@ -77,7 +77,7 @@ class UHPEngine:
             if "+" in args:
                 self._respond("err Expansions not supported")
                 return
-            self.game = RustGame()
+            self.game = HiveGame()
             self._respond(self.game.game_string)
             return
 
@@ -146,55 +146,30 @@ class UHPEngine:
         if self.game.is_game_over:
             self._respond("err Game is over")
             return
-
-        valid = self.game.valid_moves()
-        if not valid:
+        if not self.game.valid_moves():
             self._respond("pass")
             return
-
-        import numpy as np
-        from engine_zero import RustBatchMCTS
-
-        rust_game = self.game.copy()
-
-        if self.model is not None:
-            import torch
-            from ..encoding.move_encoder import POLICY_SIZE
-
-            model = self.model
-            device = self.device
-
-            def eval_fn(board_batch, reserve_batch):
-                b = torch.tensor(np.asarray(board_batch)).to(device)
-                r = torch.tensor(np.asarray(reserve_batch)).to(device)
-                with torch.no_grad():
-                    policy_logits, values, _ = model(b, r)
-                policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
-                vals = values.cpu().numpy().flatten()
-                return policy.astype(np.float32), vals.astype(np.float32)
-
-            bt, rv = rust_game.encode_board()
-            bt = np.asarray(bt)
-            rv = np.asarray(rv)
-            init_policy, _ = eval_fn(bt.reshape(1, *bt.shape), rv.reshape(1, -1))
-
-            batch_mcts = RustBatchMCTS(num_games=1, c_puct=1.5, leaf_batch_size=16)
-            batch_mcts.init_searches([rust_game], init_policy)
-            batch_mcts.run_simulations([0], [self.simulations], eval_fn)
-
-            moves, probs = batch_mcts.visit_distributions([0])[0]
-            if not moves:
-                self._respond("pass")
-                return
-
-            best_idx = int(np.argmax(probs))
-            piece_str, from_pos, to_pos = moves[best_idx]
-            if piece_str == "pass":
-                self._respond("pass")
-                return
-            self._respond(rust_game.format_move_uhp(piece_str, from_pos, to_pos))
-        else:
+        if self.model is None:
             self._respond("err No model loaded")
+            return
+
+        import torch
+        import numpy as np
+
+        model = self.model
+        device = self.device
+
+        def eval_fn(board_batch, reserve_batch):
+            b = torch.tensor(np.asarray(board_batch)).to(device)
+            r = torch.tensor(np.asarray(reserve_batch)).to(device)
+            with torch.no_grad():
+                policy_logits, values, _ = model(b, r)
+            policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
+            vals = values.cpu().numpy().flatten()
+            return policy.astype(np.float32), vals.astype(np.float32)
+
+        move_str = self.game.best_move(eval_fn, simulations=self.simulations)
+        self._respond(move_str)
 
     def _cmd_undo(self, args: str):
         if self.game is None:
@@ -224,7 +199,7 @@ class UHPEngine:
         else:
             self._respond("err Invalid options command")
 
-    def _parse_game_string(self, game_string: str) -> RustGame:
+    def _parse_game_string(self, game_string: str) -> HiveGame:
         """Parse a UHP GameString and replay to reconstruct the game."""
         parts = game_string.split(";")
         if len(parts) < 3:
@@ -232,7 +207,7 @@ class UHPEngine:
         if parts[0] != "Base":
             raise ValueError(f"Unsupported game type: {parts[0]}")
 
-        game = RustGame()
+        game = HiveGame()
         for move_str in parts[3:]:
             move_str = move_str.strip()
             if not move_str:

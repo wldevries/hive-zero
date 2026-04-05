@@ -31,7 +31,7 @@ fn make_array3<'py>(py: Python<'py>, data: &[f32], d0: usize, d1: usize, d2: usi
 }
 
 /// Rust Game exposed to Python.
-#[pyclass(name = "RustGame")]
+#[pyclass(name = "HiveGame")]
 pub struct PyGame {
     pub game: game::Game,
 }
@@ -255,6 +255,102 @@ impl PyGame {
     /// Returns True if the move was found and played, False if not valid.
     fn play_move_uhp(&mut self, move_str: &str) -> bool {
         hive_game::uhp::parse_and_play_uhp(&mut self.game, move_str)
+    }
+
+    /// Run MCTS for `simulations` sims and return the best move as a UHP string.
+    /// eval_fn(board_4d[N, C, H, W], reserve[N, R]) -> (policy[N, P], value[N])
+    #[pyo3(signature = (eval_fn, simulations=800, c_puct=1.5))]
+    fn best_move(
+        &mut self,
+        py: Python<'_>,
+        eval_fn: &Bound<'_, PyAny>,
+        simulations: usize,
+        c_puct: f32,
+    ) -> PyResult<String> {
+        if self.game.is_game_over() {
+            return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
+        }
+        if self.game.valid_moves().is_empty() {
+            return Ok("pass".to_string());
+        }
+
+        let gs = self.game.nn_grid_size;
+        let board_size = NUM_CHANNELS * gs * gs;
+        let ps = move_encoding::policy_size(gs);
+        let batch = 8usize;
+
+        let mut search = MctsSearch::<Game>::new(simulations + 64);
+        search.c_puct = c_puct;
+
+        // Initial NN eval on root
+        let mut board_buf = vec![0.0f32; board_size];
+        let mut reserve_buf = vec![0.0f32; RESERVE_SIZE];
+        hive_game::board_encoding::encode_board(&self.game, &mut board_buf, &mut reserve_buf, gs);
+
+        let root_board = make_array2(py, &board_buf, 1, board_size);
+        let root_board_4d = root_board.reshape([1usize, NUM_CHANNELS, gs, gs]).unwrap();
+        let root_reserve = make_array2(py, &reserve_buf, 1, RESERVE_SIZE);
+
+        let result = eval_fn.call1((root_board_4d, root_reserve))?;
+        let tuple = result.downcast::<PyTuple>().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value)")
+        })?;
+        let root_policy: PyReadonlyArray2<f32> = tuple.get_item(0)?.extract()?;
+        let root_policy_vec = root_policy.as_slice()?.to_vec();
+
+        search.init(&self.game, &root_policy_vec);
+        search.apply_root_dirichlet(0.3, 0.25);
+
+        let mut done = 0usize;
+        while done < simulations {
+            let mut leaves = search.select_leaves(batch.min(simulations - done));
+            if leaves.is_empty() { break; }
+            let nl = leaves.len();
+
+            let mut boards = vec![0.0f32; nl * board_size];
+            let mut reserves = vec![0.0f32; nl * RESERVE_SIZE];
+            for (k, (_, game)) in leaves.iter().enumerate() {
+                hive_game::board_encoding::encode_board(
+                    game,
+                    &mut boards[k * board_size..(k + 1) * board_size],
+                    &mut reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE],
+                    gs,
+                );
+            }
+
+            let leaf_board = make_array2(py, &boards, nl, board_size);
+            let leaf_board_4d = leaf_board.reshape([nl, NUM_CHANNELS, gs, gs]).unwrap();
+            let leaf_reserve = make_array2(py, &reserves, nl, RESERVE_SIZE);
+
+            let res = eval_fn.call1((leaf_board_4d, leaf_reserve))?;
+            let tup = res.downcast::<PyTuple>().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value)")
+            })?;
+            let lp: PyReadonlyArray2<f32> = tup.get_item(0)?.extract()?;
+            let lv: PyReadonlyArray1<f32> = tup.get_item(1)?.extract()?;
+            let lp_data = lp.as_slice()?.to_vec();
+            let lv_data: Vec<f32> = lv.as_slice()?.to_vec();
+
+            let policies_vec: Vec<Vec<f32>> = (0..nl)
+                .map(|k| lp_data[k * ps..(k + 1) * ps].to_vec())
+                .collect();
+
+            search.expand_and_backprop(&mut leaves, &policies_vec, &lv_data);
+            done += nl;
+        }
+
+        let dist = search.get_pruned_visit_distribution();
+        let best = dist.iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(mv, _)| {
+                if mv.piece.is_none() {
+                    "pass".to_string()
+                } else {
+                    hive_game::uhp::format_move_uhp(&self.game, mv)
+                }
+            })
+            .unwrap_or_else(|| "pass".to_string());
+        Ok(best)
     }
 }
 

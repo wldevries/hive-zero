@@ -181,9 +181,9 @@ class ModelEngine:
         return []
 
     def _newgame(self) -> list[str]:
-        from engine_zero import RustGame
+        from engine_zero import HiveGame
         gs = getattr(self.model, 'grid_size', 23)
-        self._game = RustGame(grid_size=gs)
+        self._game = HiveGame(grid_size=gs)
         return [self._game.game_string]
 
     def _play(self, move_str: str) -> list[str]:
@@ -472,7 +472,7 @@ def run_parallel_match(
     Odd-indexed games: engine2=white, engine1=black.
     """
     import torch
-    from engine_zero import RustGame, RustBatchMCTS
+    from engine_zero import HiveGame, RustBatchMCTS
     from ..encoding.move_encoder import POLICY_SIZE
 
     NUM_CH = 23
@@ -482,7 +482,7 @@ def run_parallel_match(
         print(f"Match: {engine1.name} vs {engine2.name} ({num_games} games parallel)")
 
     # Initialize all games
-    games = [RustGame() for _ in range(num_games)]
+    games = [HiveGame() for _ in range(num_games)]
     move_counts = [0] * num_games
     active = set(range(num_games))
     results: list[Optional[GameResult]] = [None] * num_games
