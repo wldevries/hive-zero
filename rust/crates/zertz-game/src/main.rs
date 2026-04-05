@@ -26,7 +26,7 @@ fn run_mcts_demo(simulations: u32) {
 
     let start = std::time::Instant::now();
     for _ in 0..rounds {
-        let mut leaves = search.select_leaves(batch_size);
+        let leaves = search.select_leaves(batch_size);
         if leaves.is_empty() { break; }
         let heads_list: Vec<PolicyHeads> = leaves.iter().map(|_| PolicyHeads {
             place: &uniform_buf[..PLACE_HEAD_SIZE],
@@ -34,7 +34,7 @@ fn run_mcts_demo(simulations: u32) {
             cap_dest: &uniform_buf[PLACE_HEAD_SIZE + CAP_HEAD_SIZE..],
         }).collect();
         let values: Vec<f32> = vec![0.0; leaves.len()];
-        search.expand_and_backprop(&mut leaves, &heads_list, &values);
+        search.expand_and_backprop(&leaves, &heads_list, &values);
     }
     let elapsed = start.elapsed();
 

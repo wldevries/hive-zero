@@ -592,13 +592,12 @@ impl PySelfPlaySession {
             }
 
             // --- Init MCTS trees ---
-            let game_clones: Vec<Game> = mcts_games.iter().map(|&gi| games[gi].clone()).collect();
             for (i, &gi) in mcts_games.iter().enumerate() {
                 let search = &mut searches[gi];
                 search.c_puct = cfg.c_puct;
                 search.use_forced_playouts = true;
                 let policy = &init_policies[i * policy_size..(i + 1) * policy_size];
-                search.init(&game_clones[i], policy);
+                search.init(&games[gi], policy);
             }
 
             // Apply Dirichlet noise to full-search games only
