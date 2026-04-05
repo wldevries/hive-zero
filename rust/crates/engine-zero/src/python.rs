@@ -380,103 +380,6 @@ impl PyMCTS {
 
         (moves, probs)
     }
-    // --- Low-level API for cross-game batched evaluation ---
-
-    /// Initialize MCTS tree for a game position with a pre-computed initial policy.
-    fn init_search(&mut self, game: &PyGame, initial_policy: PyReadonlyArray1<f32>) {
-        self.search.c_puct = self.c_puct;
-        let policy = initial_policy.as_slice().unwrap();
-        self.search.init(&game.game, policy);
-    }
-
-    /// Number of children at root (0 = no encodable valid moves).
-    fn root_child_count(&self) -> u16 {
-        self.search.arena.get(self.search.root).child_count
-    }
-
-    /// Select leaf nodes needing NN eval. Terminal/duplicate nodes are handled
-    /// internally. Stashes (leaf_id, game) pairs for later expand_and_backprop.
-    /// Returns list of leaf node IDs.
-    #[pyo3(signature = (batch_size))]
-    fn select_leaves_batch(&mut self, batch_size: usize) -> Vec<u32> {
-        let leaves = self.search.select_leaves(batch_size);
-        let ids: Vec<u32> = leaves.iter().map(|(id, _)| *id).collect();
-        self.search.stashed_leaves = leaves;
-        ids
-    }
-
-    /// Encode stashed leaf game states as numpy arrays for NN evaluation.
-    /// Must be called after select_leaves_batch.
-    /// Returns (boards[N, C*H*W], reserves[N, R]).
-    fn encode_leaves<'py>(
-        &self, py: Python<'py>,
-    ) -> (Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>) {
-        let n = self.search.stashed_leaves.len();
-        // Use the grid_size from the first leaf game (all should share the same)
-        let gs = self.search.stashed_leaves.first()
-            .map(|(_, g)| g.nn_grid_size)
-            .unwrap_or(hive_game::board::GRID_SIZE);
-        let board_size = NUM_CHANNELS * gs * gs;
-        let mut all_boards = vec![0.0f32; n * board_size];
-        let mut all_reserves = vec![0.0f32; n * RESERVE_SIZE];
-
-        for (i, (_, game)) in self.search.stashed_leaves.iter().enumerate() {
-            hive_game::board_encoding::encode_board(
-                game,
-                &mut all_boards[i * board_size..(i + 1) * board_size],
-                &mut all_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
-                gs,
-            );
-        }
-
-        (make_array2(py, &all_boards, n, board_size),
-         make_array2(py, &all_reserves, n, RESERVE_SIZE))
-    }
-
-    /// Get the policy size for this MCTS instance.
-    fn policy_size(&self) -> usize {
-        // Derive from stashed leaves or fall back to default
-        self.search.stashed_leaves.first()
-            .map(|(_, g)| g.policy_size())
-            .unwrap_or(move_encoding::policy_size(hive_game::board::GRID_SIZE))
-    }
-
-    /// Expand leaves with NN output and backpropagate values.
-    /// Uses stashed leaves from select_leaves_batch.
-    fn expand_and_backprop_batch(
-        &mut self,
-        policies: PyReadonlyArray2<f32>,
-        values: PyReadonlyArray1<f32>,
-    ) {
-        let policy_data = policies.as_slice().unwrap();
-        let value_data = values.as_slice().unwrap();
-        let mut leaves = std::mem::take(&mut self.search.stashed_leaves);
-        let n = leaves.len();
-
-        let ps = leaves.first()
-            .map(|(_, g)| g.policy_size())
-            .unwrap_or(move_encoding::policy_size(hive_game::board::GRID_SIZE));
-        let policies_vec: Vec<Vec<f32>> = (0..n).map(|i| {
-            policy_data[i * ps..(i + 1) * ps].to_vec()
-        }).collect();
-        let values_vec: Vec<f32> = value_data[..n].to_vec();
-
-        self.search.expand_and_backprop(&mut leaves, &policies_vec, &values_vec);
-    }
-
-    /// Get visit count distribution after search completes.
-    /// Returns (moves, visit_proportions).
-    fn visit_distribution(&self) -> (Vec<(String, Option<(i8, i8)>, (i8, i8))>, Vec<f32>) {
-        let dist = self.search.get_visit_distribution();
-        let moves: Vec<_> = dist.iter().map(|(mv, _)| {
-            match mv.piece {
-                Some(p) => (p.to_uhp_string(), mv.from, mv.to.unwrap()),
-                None => ("pass".to_string(), None, (0, 0)),
-            }
-        }).collect();
-        let probs: Vec<f32> = dist.iter().map(|(_, v)| *v).collect();
-        (moves, probs)
-    }
 }
 
 impl PyMCTS {
@@ -546,7 +449,6 @@ pub struct PyBatchMCTS {
     c_puct: f32,
     leaf_batch_size: usize,
     use_forced_playouts: bool,
-    last_init_values: Vec<f32>,
     grid_size: usize,
 }
 
@@ -563,7 +465,7 @@ impl PyBatchMCTS {
                 s
             })
             .collect();
-        PyBatchMCTS { searches, c_puct, leaf_batch_size, use_forced_playouts, last_init_values: Vec::new(), grid_size }
+        PyBatchMCTS { searches, c_puct, leaf_batch_size, use_forced_playouts, grid_size }
     }
 
     /// Initialize MCTS trees for all games with pre-computed policies.
@@ -588,141 +490,6 @@ impl PyBatchMCTS {
     /// Get root child counts for all trees.
     fn root_child_counts(&self) -> Vec<u16> {
         self.searches.iter().map(|s| s.arena.get(s.root).child_count).collect()
-    }
-
-    /// Select leaves and encode them for all active games in parallel.
-    /// active_indices: which game indices to process.
-    /// Returns (all_boards [N, board_size], all_reserves [N, reserve_size],
-    ///          game_leaf_counts: list of how many leaves per game).
-    fn select_and_encode<'py>(
-        &mut self,
-        py: Python<'py>,
-        active_indices: Vec<usize>,
-    ) -> (Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>, Vec<usize>) {
-        use rayon::prelude::*;
-
-        let gs = self.grid_size;
-        let board_size = NUM_CHANNELS * gs * gs;
-        let leaf_batch_size = self.leaf_batch_size;
-        let searches = &mut self.searches;
-
-        // Collect mutable refs to only the active searches
-        let mut active_searches: Vec<(usize, &mut MctsSearch<Game>)> = Vec::with_capacity(active_indices.len());
-        for (pos, &gi) in active_indices.iter().enumerate() {
-            let ptr = &mut searches[gi] as *mut MctsSearch<Game>;
-            active_searches.push((pos, unsafe { &mut *ptr }));
-        }
-
-        // Parallel: select leaves + encode for each active game
-        let results: Vec<(usize, Vec<f32>, Vec<f32>)> = active_searches
-            .par_iter_mut()
-            .map(|(_pos, search)| {
-                let leaves = search.select_leaves(leaf_batch_size);
-                let n = leaves.len();
-
-                let mut boards = vec![0.0f32; n * board_size];
-                let mut reserves = vec![0.0f32; n * RESERVE_SIZE];
-
-                for (j, (_, game)) in leaves.iter().enumerate() {
-                    hive_game::board_encoding::encode_board(
-                        game,
-                        &mut boards[j * board_size..(j + 1) * board_size],
-                        &mut reserves[j * RESERVE_SIZE..(j + 1) * RESERVE_SIZE],
-                        gs,
-                    );
-                }
-
-                // Stash leaves (with games) for backprop
-                search.stashed_leaves = leaves;
-
-                (n, boards, reserves)
-            })
-            .collect();
-
-        // Flatten boards/reserves into single arrays
-        let mut total_leaves = 0usize;
-        let mut game_leaf_counts = Vec::with_capacity(active_indices.len());
-        for (n, _, _) in &results {
-            game_leaf_counts.push(*n);
-            total_leaves += n;
-        }
-
-        let mut all_boards = vec![0.0f32; total_leaves * board_size];
-        let mut all_reserves = vec![0.0f32; total_leaves * RESERVE_SIZE];
-
-        let mut offset = 0;
-        for (n, boards, reserves) in &results {
-            if *n > 0 {
-                all_boards[offset * board_size..(offset + n) * board_size]
-                    .copy_from_slice(boards);
-                all_reserves[offset * RESERVE_SIZE..(offset + n) * RESERVE_SIZE]
-                    .copy_from_slice(reserves);
-                offset += n;
-            }
-        }
-
-        (
-            make_array2(py, &all_boards, total_leaves, board_size),
-            make_array2(py, &all_reserves, total_leaves, RESERVE_SIZE),
-            game_leaf_counts,
-        )
-    }
-
-    /// Expand leaves and backpropagate NN results, in parallel across games.
-    /// policies shape: [total_leaves, policy_size], values shape: [total_leaves]
-    /// active_indices + game_leaf_counts must match what select_and_encode returned.
-    fn expand_and_backprop_all(
-        &mut self,
-        active_indices: Vec<usize>,
-        game_leaf_counts: Vec<usize>,
-        policies: PyReadonlyArray2<f32>,
-        values: PyReadonlyArray1<f32>,
-    ) {
-        use rayon::prelude::*;
-
-        let ps = move_encoding::policy_size(self.grid_size);
-        let policy_data = policies.as_slice().unwrap();
-        let value_data = values.as_slice().unwrap();
-
-        // Build per-game offsets
-        let mut offsets = Vec::with_capacity(active_indices.len());
-        let mut offset = 0usize;
-        for &count in &game_leaf_counts {
-            offsets.push(offset);
-            offset += count;
-        }
-
-        let searches = &mut self.searches;
-
-        // Collect mutable refs to active searches
-        let mut active_searches: Vec<(usize, &mut MctsSearch<Game>)> = Vec::with_capacity(active_indices.len());
-        for (pos, &gi) in active_indices.iter().enumerate() {
-            let ptr = &mut searches[gi] as *mut MctsSearch<Game>;
-            active_searches.push((pos, unsafe { &mut *ptr }));
-        }
-
-        // Parallel expand + backprop
-        active_searches.par_iter_mut().for_each(|(pos, search)| {
-            let off = offsets[*pos];
-            let n = game_leaf_counts[*pos];
-            let mut leaves = std::mem::take(&mut search.stashed_leaves);
-
-            let policies_vec: Vec<Vec<f32>> = (0..n).map(|j| {
-                policy_data[(off + j) * ps..(off + j + 1) * ps].to_vec()
-            }).collect();
-            let values_vec: Vec<f32> = value_data[off..off + n].to_vec();
-
-            search.expand_and_backprop(&mut leaves, &policies_vec, &values_vec);
-        });
-    }
-
-    /// Apply Dirichlet noise to root priors for the given game indices.
-    /// Call this after init_searches, before run_simulations, during self-play only.
-    #[pyo3(signature = (active_indices, alpha=0.3, epsilon=0.25))]
-    fn apply_root_dirichlet(&mut self, active_indices: Vec<usize>, alpha: f32, epsilon: f32) {
-        for gi in active_indices {
-            self.searches[gi].apply_root_dirichlet(alpha, epsilon);
-        }
     }
 
     /// Run simulation loop with per-game simulation caps.
@@ -851,93 +618,6 @@ impl PyBatchMCTS {
 
             searching.retain(|&si| sims_done[si] < per_game_caps[si]);
         }
-    }
-
-    /// Combined init + dirichlet + simulate in a single call.
-    /// Reduces Python↔Rust round-trips from 5 to 2 per turn.
-    /// dirichlet_indices: batch indices (into active_indices) that get Dirichlet noise.
-    #[pyo3(signature = (active_indices, games, per_game_caps, dirichlet_indices, eval_fn))]
-    fn run_turn(
-        &mut self,
-        py: Python<'_>,
-        active_indices: Vec<usize>,
-        games: Vec<PyRef<PyGame>>,
-        per_game_caps: Vec<usize>,
-        dirichlet_indices: Vec<usize>,
-        eval_fn: &Bound<'_, PyAny>,
-    ) {
-        use rayon::prelude::*;
-
-        let gs = self.grid_size;
-        let ps = move_encoding::policy_size(gs);
-        let board_size = NUM_CHANNELS * gs * gs;
-
-        // --- Encode all positions (rayon-parallel) ---
-        let game_clones: Vec<Game> = games.iter().map(|g| g.game.clone()).collect();
-        let num = active_indices.len();
-
-        let encoded: Vec<(Vec<f32>, Vec<f32>)> = game_clones.par_iter().map(|game| {
-            let mut board = vec![0.0f32; board_size];
-            let mut reserve = vec![0.0f32; RESERVE_SIZE];
-            hive_game::board_encoding::encode_board(game, &mut board, &mut reserve, gs);
-            (board, reserve)
-        }).collect();
-
-        // Flatten into contiguous arrays for GPU
-        let mut all_boards = vec![0.0f32; num * board_size];
-        let mut all_reserves = vec![0.0f32; num * RESERVE_SIZE];
-        for (i, (board, reserve)) in encoded.iter().enumerate() {
-            all_boards[i * board_size..(i + 1) * board_size].copy_from_slice(board);
-            all_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE].copy_from_slice(reserve);
-        }
-
-        // --- GPU: initial policy eval ---
-        let board_arr = make_array2(py, &all_boards, num, board_size);
-        let board_4d = board_arr.reshape([num, NUM_CHANNELS, gs, gs]).unwrap();
-        let reserve_arr = make_array2(py, &all_reserves, num, RESERVE_SIZE);
-
-        let result = eval_fn.call1((board_4d, reserve_arr)).expect("eval_fn call failed");
-        let tuple = result.downcast::<PyTuple>().expect("eval_fn must return tuple");
-        let policy_arr: PyReadonlyArray2<f32> = tuple.get_item(0).unwrap().extract().unwrap();
-        let init_values: PyReadonlyArray1<f32> = tuple.get_item(1).unwrap().extract().unwrap();
-
-        let policy_data = policy_arr.as_slice().unwrap();
-        // Store init values for Python to retrieve later
-        self.last_init_values = init_values.as_slice().unwrap().to_vec();
-
-        // --- Init MCTS trees (rayon-parallel) ---
-        let use_forced = self.use_forced_playouts;
-        let c_puct = self.c_puct;
-        let searches = &mut self.searches;
-
-        // Only reinit the active searches
-        let mut active_searches: Vec<(usize, &mut MctsSearch<Game>)> = Vec::with_capacity(num);
-        for (pos, &gi) in active_indices.iter().enumerate() {
-            let ptr = &mut searches[gi] as *mut MctsSearch<Game>;
-            active_searches.push((pos, unsafe { &mut *ptr }));
-        }
-
-        active_searches.par_iter_mut().for_each(|(pos, search)| {
-            search.c_puct = c_puct;
-            search.use_forced_playouts = use_forced;
-            let policy = &policy_data[*pos * ps..(*pos + 1) * ps];
-            search.init(&game_clones[*pos], policy);
-        });
-
-        // --- Apply Dirichlet noise to full-search games ---
-        for &bi in &dirichlet_indices {
-            let gi = active_indices[bi];
-            self.searches[gi].apply_root_dirichlet(0.3, 0.25);
-        }
-
-        // --- Run simulations with per-game caps ---
-        self.run_simulations(py, active_indices, per_game_caps, eval_fn);
-    }
-
-    /// Get the initial values from the last run_turn call.
-    /// Returns values in the same order as the active_indices passed to run_turn.
-    fn last_init_values(&self) -> Vec<f32> {
-        self.last_init_values.clone()
     }
 
     /// Get visit distributions for specified games.
