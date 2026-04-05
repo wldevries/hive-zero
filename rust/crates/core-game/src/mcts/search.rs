@@ -307,6 +307,20 @@ impl<G: GameEngine> MctsSearch<G> {
             .expect("encode_leaf: leaf not found in stash — call select_leaves first")
     }
 
+    /// Get the player whose turn it is at a stashed leaf.
+    /// The leaf must have been returned by a prior select_leaves call.
+    pub fn get_leaf_player(&self, leaf: NodeId) -> Player {
+        if let Some((id, game)) = self.stashed_leaves.last() {
+            if *id == leaf {
+                return game.next_player();
+            }
+        }
+        self.stashed_leaves.iter()
+            .find(|(id, _)| *id == leaf)
+            .map(|(_, g)| g.next_player())
+            .expect("get_leaf_player: leaf not found in stash")
+    }
+
     /// Expand all stashed leaves with NN outputs and backpropagate values.
     /// Consumes the stash. policies and values must be aligned with stash order
     /// (i.e. the order leaves were returned across all prior select_leaves calls).

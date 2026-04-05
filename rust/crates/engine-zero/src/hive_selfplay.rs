@@ -11,7 +11,7 @@ use hive_game::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE, f32_to_bf16};
 use crate::inference::HiveInference;
 use hive_game::game::{Game, GameState};
 use hive_game::hex::hex_neighbors;
-use core_game::game::PolicyIndex;
+use core_game::game::{Game as GameTrait, PolicyIndex, Outcome, Player};
 use core_game::mcts::search::MctsSearch;
 use core_game::mcts::arena::NodeId;
 use hive_game::move_encoding::{self, encode_game_move};
@@ -969,6 +969,254 @@ impl PySelfPlaySession {
             final_games: games,
         })
     }
+
+    /// Play a battle between two models. Games 0..N/2 have model1 as White, N/2..N reversed.
+    /// Each model is called with the same bfloat16-encoded batch as `play_games` uses.
+    /// eval_fn(boards[N,C,H,W], reserves[N,R]) -> (policy[N,P], value[N])
+    /// progress_fn(finished, total, active, total_moves) called after each round.
+    #[pyo3(signature = (eval_fn1, eval_fn2, progress_fn=None))]
+    fn play_battle(
+        &self,
+        py: Python<'_>,
+        eval_fn1: &Bound<'_, PyAny>,
+        eval_fn2: &Bound<'_, PyAny>,
+        progress_fn: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyHiveBattleResult> {
+        let cfg = &self.config;
+        let num_games = cfg.num_games;
+        let half = num_games / 2;
+        let grid_size = cfg.grid_size;
+        let board_size = NUM_CHANNELS * grid_size * grid_size;
+        let policy_size = move_encoding::policy_size(grid_size);
+        let num_policy_channels = move_encoding::NUM_POLICY_CHANNELS;
+
+        let mut games: Vec<Game> = (0..num_games)
+            .map(|_| Game::new_with_grid_size(grid_size))
+            .collect();
+        let mut searches: Vec<MctsSearch<Game>> = (0..num_games).map(|_| {
+            let mut s = MctsSearch::<Game>::new(cfg.simulations + 64);
+            s.c_puct = cfg.c_puct;
+            s
+        }).collect();
+        let mut move_counts = vec![0u32; num_games];
+        let mut active = vec![true; num_games];
+        let mut finished_count = 0u32;
+        let mut total_moves = 0u32;
+        let mut wins_model1 = 0u32;
+        let mut wins_model2 = 0u32;
+        let mut draws = 0u32;
+        let mut game_lengths: Vec<u32> = Vec::new();
+        let mut rng = rand::thread_rng();
+
+        // model1 = White (Player1) for games 0..half; model1 = Black (Player2) for half..num_games.
+        let use_fn1 = |gi: usize, player: Player| -> bool {
+            (gi < half) == (player == Player::Player1)
+        };
+
+        // Call a single eval_fn on a bfloat16-encoded batch, return (policies, values).
+        let call_eval = |ef: &Bound<'_, PyAny>, b_bf16: &[u16], r_bf16: &[u16], n: usize|
+            -> PyResult<(Vec<f32>, Vec<f32>)>
+        {
+            let ba = numpy::ndarray::Array2::from_shape_vec(
+                (n, board_size), b_bf16.to_vec()
+            ).unwrap();
+            let bnp = PyArray2::from_owned_array_bound(py, ba);
+            let b4d = bnp.reshape([n, NUM_CHANNELS, grid_size, grid_size])
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            let ra = numpy::ndarray::Array2::from_shape_vec(
+                (n, RESERVE_SIZE), r_bf16.to_vec()
+            ).unwrap();
+            let rnp = PyArray2::from_owned_array_bound(py, ra);
+            let result = ef.call1((b4d, rnp))?;
+            let tup = result.downcast::<PyTuple>()
+                .map_err(|_| pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value)"))?;
+            let p: PyReadonlyArray2<f32> = tup.get_item(0)?.extract()?;
+            let v: PyReadonlyArray1<f32> = tup.get_item(1)?.extract()?;
+            Ok((p.as_slice()?.to_vec(), v.as_slice()?.to_vec()))
+        };
+
+        while active.iter().any(|&a| a) {
+            // Collect games needing MCTS; handle passes inline.
+            let active_games: Vec<usize> = (0..num_games).filter(|&gi| active[gi]).collect();
+            let mut mcts_games: Vec<usize> = Vec::new();
+            for gi in active_games {
+                if games[gi].valid_moves().is_empty() {
+                    games[gi].play_pass();
+                    move_counts[gi] += 1;
+                    total_moves += 1;
+                    if games[gi].is_game_over() || move_counts[gi] >= cfg.max_moves {
+                        active[gi] = false;
+                        finished_count += 1;
+                        game_lengths.push(move_counts[gi]);
+                        match games[gi].outcome() {
+                            Outcome::WonBy(winner) => {
+                                if use_fn1(gi, winner) { wins_model1 += 1; } else { wins_model2 += 1; }
+                            }
+                            _ => { draws += 1; }
+                        }
+                    }
+                } else {
+                    mcts_games.push(gi);
+                }
+            }
+            if mcts_games.is_empty() { continue; }
+            let n = mcts_games.len();
+
+            // Encode root positions with random D6 symmetry.
+            let root_syms: Vec<D6Symmetry> = (0..n).map(|_| D6Symmetry::random(&mut rng)).collect();
+            let mut flat_boards = vec![0f32; n * board_size];
+            let mut flat_reserves = vec![0f32; n * RESERVE_SIZE];
+            let mut fn1_flags: Vec<bool> = Vec::with_capacity(n);
+            for (i, &gi) in mcts_games.iter().enumerate() {
+                board_encoding::encode_board(
+                    &games[gi],
+                    &mut flat_boards[i * board_size..(i + 1) * board_size],
+                    &mut flat_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
+                    grid_size,
+                );
+                apply_d6_sym_spatial(&mut flat_boards[i * board_size..(i + 1) * board_size], root_syms[i], NUM_CHANNELS, grid_size);
+                fn1_flags.push(use_fn1(gi, games[gi].next_player()));
+            }
+
+            // Call both eval_fns and merge per-game.
+            let b_bf16: Vec<u16> = flat_boards.iter().map(|&x| f32_to_bf16(x)).collect();
+            let r_bf16: Vec<u16> = flat_reserves.iter().map(|&x| f32_to_bf16(x)).collect();
+            let (p1, _v1) = call_eval(eval_fn1, &b_bf16, &r_bf16, n)?;
+            let (p2, _v2) = call_eval(eval_fn2, &b_bf16, &r_bf16, n)?;
+
+            let mut init_policies = vec![0f32; n * policy_size];
+            for i in 0..n {
+                let src = if fn1_flags[i] { &p1 } else { &p2 };
+                init_policies[i * policy_size..(i + 1) * policy_size]
+                    .copy_from_slice(&src[i * policy_size..(i + 1) * policy_size]);
+                apply_d6_sym_spatial(
+                    &mut init_policies[i * policy_size..(i + 1) * policy_size],
+                    root_syms[i].inverse(), num_policy_channels, grid_size,
+                );
+            }
+
+            // Init MCTS trees (no Dirichlet for eval).
+            for (i, &gi) in mcts_games.iter().enumerate() {
+                searches[gi].init(&games[gi], &init_policies[i * policy_size..(i + 1) * policy_size]);
+            }
+
+            // Simulation rounds.
+            let mut game_sims = vec![0usize; n];
+            loop {
+                let mut leaf_ids: Vec<NodeId> = Vec::new();
+                let mut leaf_game_idx: Vec<usize> = Vec::new();
+                for _round in 0..cfg.leaf_batch_size {
+                    let mut any = false;
+                    for (i, &gi) in mcts_games.iter().enumerate() {
+                        if game_sims[i] >= cfg.simulations { continue; }
+                        let leaves = searches[gi].select_leaves(1);
+                        let count = leaves.len();
+                        if count > 0 { any = true; }
+                        for leaf in leaves { leaf_ids.push(leaf); leaf_game_idx.push(i); }
+                        game_sims[i] += count;
+                    }
+                    if !any { break; }
+                }
+                if leaf_ids.is_empty() { break; }
+
+                let nl = leaf_ids.len();
+                let mut leaf_boards = vec![0f32; nl * board_size];
+                let mut leaf_reserves = vec![0f32; nl * RESERVE_SIZE];
+                let mut leaf_syms: Vec<D6Symmetry> = Vec::with_capacity(nl);
+                let mut leaf_fn1_flags: Vec<bool> = Vec::with_capacity(nl);
+
+                for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
+                    let gi = mcts_games[i];
+                    let (board_enc, reserve_enc) = searches[gi].encode_leaf(leaf);
+                    leaf_boards[k * board_size..(k + 1) * board_size].copy_from_slice(&board_enc);
+                    leaf_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
+                    let sym = D6Symmetry::random(&mut rng);
+                    apply_d6_sym_spatial(&mut leaf_boards[k * board_size..(k + 1) * board_size], sym, NUM_CHANNELS, grid_size);
+                    leaf_syms.push(sym);
+                    let leaf_player = searches[gi].get_leaf_player(leaf);
+                    leaf_fn1_flags.push(use_fn1(gi, leaf_player));
+                }
+
+                let lb_bf16: Vec<u16> = leaf_boards.iter().map(|&x| f32_to_bf16(x)).collect();
+                let lr_bf16: Vec<u16> = leaf_reserves.iter().map(|&x| f32_to_bf16(x)).collect();
+                let (lp1, lv1) = call_eval(eval_fn1, &lb_bf16, &lr_bf16, nl)?;
+                let (lp2, lv2) = call_eval(eval_fn2, &lb_bf16, &lr_bf16, nl)?;
+
+                struct LeafData { policy: Vec<f32>, value: f32 }
+                let mut per_game_leaves: Vec<Vec<NodeId>> = vec![Vec::new(); n];
+                let mut per_game_data: Vec<Vec<LeafData>> = (0..n).map(|_| Vec::new()).collect();
+
+                for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
+                    let use1 = leaf_fn1_flags[k];
+                    let p_src = if use1 { &lp1 } else { &lp2 };
+                    let v = if use1 { lv1[k] } else { lv2[k] };
+                    let mut policy = p_src[k * policy_size..(k + 1) * policy_size].to_vec();
+                    apply_d6_sym_spatial(&mut policy, leaf_syms[k].inverse(), num_policy_channels, grid_size);
+                    per_game_leaves[i].push(leaf);
+                    per_game_data[i].push(LeafData { policy, value: v });
+                }
+
+                for (i, &gi) in mcts_games.iter().enumerate() {
+                    if per_game_leaves[i].is_empty() { continue; }
+                    let policies: Vec<Vec<f32>> = per_game_data[i].iter().map(|d| d.policy.clone()).collect();
+                    let values: Vec<f32> = per_game_data[i].iter().map(|d| d.value).collect();
+                    searches[gi].expand_and_backprop(&policies, &values);
+                }
+
+                if game_sims.iter().all(|&s| s >= cfg.simulations) { break; }
+            }
+
+            // Select best move greedy.
+            for (_, &gi) in mcts_games.iter().enumerate() {
+                let dist = searches[gi].get_pruned_visit_distribution();
+                let mv = if dist.is_empty() {
+                    hive_game::game::Move::pass()
+                } else {
+                    dist.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).map(|(mv, _)| *mv).unwrap()
+                };
+                let _ = games[gi].play_move(&mv);
+                move_counts[gi] += 1;
+                total_moves += 1;
+
+                if games[gi].is_game_over() || move_counts[gi] >= cfg.max_moves {
+                    active[gi] = false;
+                    finished_count += 1;
+                    game_lengths.push(move_counts[gi]);
+                    match games[gi].outcome() {
+                        Outcome::WonBy(winner) => {
+                            if use_fn1(gi, winner) { wins_model1 += 1; } else { wins_model2 += 1; }
+                        }
+                        _ => { draws += 1; }
+                    }
+                }
+            }
+
+            if let Some(pfn) = progress_fn {
+                let active_count = active.iter().filter(|&&a| a).count() as u32;
+                pfn.call1((finished_count, num_games as u32, active_count, total_moves)).ok();
+            }
+            py.check_signals()?;
+        }
+
+        Ok(PyHiveBattleResult { wins_model1, wins_model2, draws, game_lengths })
+    }
+}
+
+/// Result of a battle (eval match) between two models.
+#[pyclass(name = "HiveBattleResult")]
+pub struct PyHiveBattleResult {
+    wins_model1: u32,
+    wins_model2: u32,
+    draws: u32,
+    game_lengths: Vec<u32>,
+}
+
+#[pymethods]
+impl PyHiveBattleResult {
+    #[getter] fn wins_model1(&self) -> u32 { self.wins_model1 }
+    #[getter] fn wins_model2(&self) -> u32 { self.wins_model2 }
+    #[getter] fn draws(&self) -> u32 { self.draws }
+    #[getter] fn game_lengths(&self) -> Vec<u32> { self.game_lengths.clone() }
 }
 
 /// Simulation loop with per-game caps. Each game selects 1 leaf per round;
@@ -1028,5 +1276,6 @@ fn infer_padded(
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySelfPlaySession>()?;
     m.add_class::<PySelfPlayResult>()?;
+    m.add_class::<PyHiveBattleResult>()?;
     Ok(())
 }
