@@ -1,6 +1,6 @@
 pub mod inference;
 pub mod python;
-pub mod selfplay;
+pub mod hive_selfplay;
 pub mod zertz_python;
 
 use pyo3::prelude::*;
@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 #[pymodule]
 fn hive_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     python::register(m)?;
-    selfplay::register(m)?;
+    hive_selfplay::register(m)?;
     zertz_python::register(m)?;
     Ok(())
 }
