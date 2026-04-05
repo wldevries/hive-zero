@@ -10,6 +10,7 @@ members = [
 [workspace.dependencies]
 rand = "0.8"
 rand_distr = "0.4"
+clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 opt-level = 3

@@ -8,6 +8,7 @@ core-game = { path = "../core-game" }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 zip = "2"
+clap = { workspace = true }
 
 [lib]
 name = "zertz_game"

@@ -1,4 +1,5 @@
-use zertz_game::{mcts, move_encoding, random_play, replay, zertz};
+use clap::{Parser, Subcommand};
+use zertz_game::{mcts, random_play, replay};
 
 // ---------------------------------------------------------------------------
 // MCTS demo
@@ -6,8 +7,9 @@ use zertz_game::{mcts, move_encoding, random_play, replay, zertz};
 
 fn run_mcts_demo(simulations: u32) {
     use mcts::search::{PolicyHeads, POLICY_HEADS_TOTAL, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
+    use zertz_game::zertz::ZertzBoard;
 
-    let board = zertz::ZertzBoard::default();
+    let board = ZertzBoard::default();
     let uniform_buf = vec![0.0f32; POLICY_HEADS_TOTAL];
     let heads = PolicyHeads {
         place: &uniform_buf[..PLACE_HEAD_SIZE],
@@ -44,61 +46,79 @@ fn run_mcts_demo(simulations: u32) {
 }
 
 // ---------------------------------------------------------------------------
-// Entry point
+// CLI
 // ---------------------------------------------------------------------------
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("random");
+#[derive(Parser)]
+#[command(name = "zertz-tools", about = "Zertz game tools")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
 
-    match mode {
-        "random" => {
-            let n: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
-            random_play::run_random_games(n);
-        }
-        "replay" => {
-            let path = args.get(2).map(|s| s.as_str()).unwrap_or("../games/zertz");
-            replay::run_replay(path);
-        }
-        "debug" => {
-            let zip_path = args.get(2).expect("need zip path");
-            let sgf_name = args.get(3).expect("need sgf name");
-            replay::run_debug(zip_path, sgf_name);
-        }
-        "process" => {
-            let path = args.get(2).map(|s| s.as_str()).unwrap_or("../games/zertz");
-            let skip_timeout = args.iter().any(|a| a == "--skip-timeout-games");
-            replay::run_process(path, skip_timeout);
-        }
-        "mcts" => {
-            let sims: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(800);
-            run_mcts_demo(sims);
-        }
-        "stats" => {
-            let path = args.get(2).map(|s| s.as_str()).unwrap_or("../games/zertz");
-            replay::run_stats(path);
-        }
-        "playback" => {
-            // playback [path] [--auto <ms>]
-            // Randomly picks a game from the boardspace library and plays through it.
-            // Without --auto: press Enter to advance each turn (interactive).
-            // With --auto <ms>: advance automatically every <ms> milliseconds.
-            let path = args.get(2).map(|s| s.as_str()).unwrap_or("../games/zertz");
-            let auto_ms = args.windows(2).find(|w| w[0] == "--auto")
-                .and_then(|w| w[1].parse::<u64>().ok());
-            replay::run_playback(path, auto_ms);
-        }
-        _ => {
-            eprintln!("Usage: zertz-zero <random [N]|replay [path]|process [path]|stats [path]|debug <zip> <sgf>|mcts [sims]|playback [path] [--auto <ms>]>");
-            eprintln!("  random [N]              - play N random games (default 100)");
-            eprintln!("  replay [path]           - replay boardspace games from zip dir/file");
-            eprintln!("  process [path]          - compute ELO rankings, write CSVs");
-            eprintln!("  stats [path]            - aggregate game statistics, write game_stats.txt");
-            eprintln!("  debug <zip> <sgf>       - verbose replay of a single game from zip");
-            eprintln!("  mcts [sims]             - run MCTS demo with uniform policy (default 800)");
-            eprintln!("  playback [path]         - interactively step through a random boardspace game");
-            eprintln!("    --auto <ms>           - auto-advance every <ms> milliseconds");
-            std::process::exit(1);
-        }
+#[derive(Subcommand)]
+enum Command {
+    /// Play N random games
+    Random {
+        /// Number of games to play
+        #[arg(default_value_t = 100)]
+        n: u32,
+    },
+    /// Replay boardspace games from a zip dir/file
+    Replay {
+        /// Path to zip dir or file
+        #[arg(default_value = "../games/zertz")]
+        path: String,
+    },
+    /// Verbose replay of a single game from a zip
+    Debug {
+        /// Path to the zip file
+        zip_path: String,
+        /// Name of the SGF file inside the zip
+        sgf_name: String,
+    },
+    /// Compute ELO rankings, write CSVs
+    Process {
+        /// Path to zip dir or file
+        #[arg(default_value = "../games/zertz")]
+        path: String,
+        /// Discard training data from games that hit the move cap
+        #[arg(long)]
+        skip_timeout_games: bool,
+    },
+    /// Aggregate game statistics, write game_stats.txt
+    Stats {
+        /// Path to zip dir or file
+        #[arg(default_value = "../games/zertz")]
+        path: String,
+    },
+    /// Run MCTS demo with uniform policy
+    Mcts {
+        /// Number of simulations
+        #[arg(default_value_t = 800)]
+        simulations: u32,
+    },
+    /// Interactively step through a random boardspace game
+    Playback {
+        /// Path to zip dir or file
+        #[arg(default_value = "../games/zertz")]
+        path: String,
+        /// Auto-advance every N milliseconds
+        #[arg(long)]
+        auto: Option<u64>,
+    },
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Random { n } => random_play::run_random_games(n),
+        Command::Replay { path } => replay::run_replay(&path),
+        Command::Debug { zip_path, sgf_name } => replay::run_debug(&zip_path, &sgf_name),
+        Command::Process { path, skip_timeout_games } => replay::run_process(&path, skip_timeout_games),
+        Command::Stats { path } => replay::run_stats(&path),
+        Command::Mcts { simulations } => run_mcts_demo(simulations),
+        Command::Playback { path, auto } => replay::run_playback(&path, auto),
     }
 }

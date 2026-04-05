@@ -1,5 +1,6 @@
 mod replay;
 
+use clap::{Parser, Subcommand};
 use hive_game::sgf;
 use hive_game::game::Game;
 use hive_game::piece::{PieceColor, PieceType, player_pieces};
@@ -954,54 +955,80 @@ fn run_stats(games_path: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+#[derive(Parser)]
+#[command(name = "hive-tools", about = "Hive game tools")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Play N random games
+    Random {
+        /// Number of games to play
+        #[arg(default_value_t = 100)]
+        n: u32,
+    },
+    /// Replay boardspace games from a path
+    Replay {
+        /// Path to zip dir or file
+        #[arg(default_value = "games/hive/boardspace")]
+        path: String,
+    },
+    /// Verbose replay of one game (SGF file, or zip + SGF name)
+    Debug {
+        /// SGF file or zip archive
+        path: String,
+        /// Name of the SGF inside the zip (required when path is a zip)
+        sgf_name: Option<String>,
+    },
+    /// Replay all games, compute ELO, write CSVs
+    Process {
+        /// Path to zip dir or file
+        #[arg(default_value = "games/hive/boardspace")]
+        path: String,
+        /// Discard training data from games that hit the move cap
+        #[arg(long)]
+        skip_timeout_games: bool,
+    },
+    /// Aggregate game statistics, write game_stats.txt
+    Stats {
+        /// Path to zip dir or file
+        #[arg(default_value = "games/hive/boardspace")]
+        path: String,
+    },
+    /// Run MCTS benchmark with uniform policy
+    Mcts {
+        /// Number of simulations
+        #[arg(default_value_t = 800)]
+        simulations: u32,
+        /// Batch size
+        #[arg(default_value_t = 8)]
+        batch_size: usize,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("help");
+    let cli = Cli::parse();
 
-    match mode {
-        "random" => {
-            let n: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
-            run_random(n);
+    match cli.command {
+        Command::Random { n } => run_random(n),
+        Command::Replay { path } => replay::run_replay(&path),
+        Command::Debug { path, sgf_name } => {
+            let mut args = vec![path];
+            if let Some(name) = sgf_name { args.push(name); }
+            replay::run_debug(&args);
         }
-        "replay" => {
-            let path = args.get(2).map(|s| s.as_str()).unwrap_or("games/hive/boardspace");
-            replay::run_replay(path);
-        }
-        "debug" => {
-            if args.len() < 3 {
-                eprintln!("Usage: hive-zero debug <sgf-file> OR hive-zero debug <zip> <sgf-name>");
-                std::process::exit(1);
-            }
-            replay::run_debug(&args[2..]);
-        }
-        "process" => {
-            let path = args.get(2).map(|s| s.as_str()).unwrap_or("games/hive/boardspace");
-            let skip_timeout = args.iter().any(|a| a == "--skip-timeout-games");
-            run_process(path, skip_timeout);
-        }
-        "stats" => {
-            let path = args.get(2).map(|s| s.as_str()).unwrap_or("games/hive/boardspace");
-            run_stats(path);
-        }
-        "mcts" => {
-            let sims: u32  = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(800);
-            let batch: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
-            run_mcts(sims, batch);
-        }
-        _ => {
-            eprintln!("Usage: hive-zero <command> [args]");
-            eprintln!();
-            eprintln!("Commands:");
-            eprintln!("  random [N]               play N random games (default 100)");
-            eprintln!("  replay [path]            replay boardspace games");
-            eprintln!("  debug <sgf|zip> [name]   verbose replay of one game");
-            eprintln!("  process [path]           replay all games, compute ELO, write CSVs");
-            eprintln!("  stats [path]             aggregate game statistics, write game_stats.txt");
-            eprintln!("  mcts [sims] [batch]      MCTS benchmark");
-            std::process::exit(1);
-        }
+        Command::Process { path, skip_timeout_games } => run_process(&path, skip_timeout_games),
+        Command::Stats { path } => run_stats(&path),
+        Command::Mcts { simulations, batch_size } => run_mcts(simulations, batch_size),
     }
 }
