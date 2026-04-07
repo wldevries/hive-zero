@@ -22,6 +22,7 @@ ort-qnn = ["onnxruntime-qnn"]
 [project.scripts]
 hive = "hive.cli:main"
 zertz = "zertz.cli:main"
+tictactoe = "tictactoe.cli:main"
 
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
@@ -30,7 +31,7 @@ build-backend = "maturin"
 [tool.maturin]
 manifest-path = "rust/crates/engine-zero/Cargo.toml"
 module-name = "engine_zero"
-python-packages = ["hive", "zertz", "shared"]
+python-packages = ["hive", "zertz", "tictactoe", "shared"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "rust/**/*.toml" }, { file = "rust/**/*.rs" }]

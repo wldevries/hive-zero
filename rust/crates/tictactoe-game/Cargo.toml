@@ -1,0 +1,9 @@
+[package]
+name = "tictactoe-game"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-game = { path = "../core-game" }
+rand = { workspace = true }
+rand_distr = { workspace = true }

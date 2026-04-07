@@ -403,6 +403,7 @@ dependencies = [
  "rand",
  "rand_distr",
  "rayon",
+ "tictactoe-game",
  "zertz-game",
 ]
 
@@ -1373,6 +1374,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tictactoe-game"
+version = "0.1.0"
+dependencies = [
+ "core-game",
+ "rand",
+ "rand_distr",
 ]
 
 [[package]]

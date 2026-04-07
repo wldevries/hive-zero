@@ -5,6 +5,7 @@ members = [
     "rust/crates/hive-game",
     "rust/crates/engine-zero",
     "rust/crates/zertz-game",
+    "rust/crates/tictactoe-game",
 ]
 
 [workspace.dependencies]
