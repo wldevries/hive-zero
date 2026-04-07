@@ -128,8 +128,8 @@ enum RawAction {
     RtoB { color: Color, at: Coord },
     RemoveRing(Coord),
     BtoB { from: Coord, to: Coord },
-    Pick(Color),
-    Pickb(Coord),
+    Pick(#[allow(dead_code)] Color),
+    Pickb(#[allow(dead_code)] Coord),
     BtoR(Coord),
     RtoR,
     Done,
@@ -301,6 +301,7 @@ fn extract_actions(text: &str) -> Vec<(u8, RawAction)> {
 /// Check if two hex coordinates are adjacent (1 step apart).
 /// On our hex grid with columns of varying lengths, adjacent means
 /// same column ±1 row, or neighboring column with row offset 0 or ±1.
+#[allow(dead_code)]
 fn is_hex_adjacent(a: Coord, b: Coord) -> bool {
     let dc = (a.col as i8 - b.col as i8).unsigned_abs();
     let dr = (a.row as i8 - b.row as i8).unsigned_abs();

@@ -628,6 +628,7 @@ impl PyZertzSelfPlaySession {
 
     /// Run a battle between two models. Games 0..N/2 have model1 as P1, model2 as P2.
     /// Games N/2..N are reversed. Returns win/draw counts from model1's perspective.
+    #[pyo3(signature = (eval_fn1, eval_fn2, progress_fn=None))]
     fn play_battle(
         &self,
         py: Python,

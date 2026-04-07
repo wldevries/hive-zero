@@ -16,7 +16,6 @@ import os
 import random
 import time
 import zipfile
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -302,6 +301,7 @@ class Pretrainer:
         self.model_path = model_path
         self.device = device
         self._save_checkpoint = save_checkpoint
+        self._export_onnx = export_onnx
 
         if os.path.exists(model_path):
             self.model, ckpt = load_checkpoint(model_path)
@@ -472,7 +472,7 @@ class Pretrainer:
             }
             self._save_checkpoint(self.model, self.model_path, epoch, epoch_losses)
             onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
-            export_onnx(self.model, onnx_path)
+            self._export_onnx(self.model, onnx_path)
             ckpt_path = os.path.join(checkpoint_dir, f"{model_name}_epoch{epoch}.pt")
             self._save_checkpoint(self.model, ckpt_path, epoch, epoch_losses)
             print(f"  Model saved → {self.model_path}  |  Checkpoint → {ckpt_path}")

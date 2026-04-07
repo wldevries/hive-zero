@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from shared.nn.attention import SpatialAttention
 from shared.nn.resblock import ResBlock
 from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
-from ..encoding.move_encoder import NUM_POLICY_CHANNELS, NUM_PLACE_CHANNELS, policy_size
+from ..encoding.move_encoder import NUM_POLICY_CHANNELS, NUM_PLACE_CHANNELS
 
 
 class HiveNet(nn.Module):

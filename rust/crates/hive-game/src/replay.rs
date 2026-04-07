@@ -14,6 +14,7 @@ use hive_game::sgf;
 pub struct ReplayResult {
     pub turns_played: usize,
     pub total_turns: usize,
+    #[allow(dead_code)]
     pub final_state: String,
     pub error: Option<String>,
     /// The game at the point replay stopped (for stats collection).

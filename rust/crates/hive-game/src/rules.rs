@@ -245,6 +245,7 @@ fn walk_any(start: Hex, board: &Board) -> Vec<Hex> {
 }
 
 #[cfg(test)]
+#[allow(unused_must_use)]
 mod tests {
     use super::*;
 

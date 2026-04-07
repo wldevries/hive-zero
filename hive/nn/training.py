@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from typing import Optional
 from tqdm import tqdm
 
-from .model import HiveNet, create_model, save_model
+from .model import HiveNet, create_model
 from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
 from ..encoding.move_encoder import (
     NUM_POLICY_CHANNELS, NUM_PLACE_CHANNELS,
     policy_size as compute_policy_size,
-    src_section_offset, dst_section_offset,
 )
 
 # ---------------------------------------------------------------------------

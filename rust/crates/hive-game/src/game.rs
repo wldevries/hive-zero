@@ -90,6 +90,7 @@ impl Reserves {
         }
     }
 
+    #[allow(dead_code)]
     fn add(&mut self, piece: Piece) {
         let (_, bit) = self.piece_bit(piece);
         match piece.color() {
@@ -549,6 +550,7 @@ impl NNGame for Game {
 }
 
 #[cfg(test)]
+#[allow(unused_must_use)]
 mod tests {
     use super::*;
 

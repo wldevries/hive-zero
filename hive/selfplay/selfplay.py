@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import torch
-import numpy as np
 import os
 import time
 from typing import Optional
@@ -31,10 +30,7 @@ _cy = lambda v: _c(v, colorama.Fore.YELLOW)   # draws / secondary losses
 _cr = lambda v: _c(v, colorama.Fore.RED)      # total loss / losses in eval
 _cc = lambda v: _c(v, colorama.Fore.CYAN)     # scores / percentages
 
-from ..encoding.move_encoder import policy_size as compute_policy_size
-
-
-from ..nn.model import HiveNet, create_model, save_checkpoint, load_checkpoint, export_onnx
+from ..nn.model import create_model, save_checkpoint, load_checkpoint, export_onnx
 from ..nn.training import HiveDataset, Trainer
 
 
@@ -496,7 +492,7 @@ class SelfPlayTrainer:
             # Bootstrap: pit model.pt against the previous checkpoint to find the best.
             prev_ckpt = self._find_prev_checkpoint(generation)
             if prev_ckpt is None:
-                print(f"  No best_model.pt and no prior checkpoint — current model is now best")
+                print("  No best_model.pt and no prior checkpoint — current model is now best")
                 save_checkpoint(self.model, best_model_path, generation)
                 shutil.copy2(best_model_path, self.model_path)
                 return
@@ -557,7 +553,7 @@ class SelfPlayTrainer:
             save_checkpoint(self.model, best_model_path, generation)
             print(f" → NEW BEST (gen {generation})")
         else:
-            print(f" → no improvement (defender holds)")
+            print(" → no improvement (defender holds)")
 
         # model.pt always mirrors best_model.pt so fresh restarts use the best known weights
         shutil.copy2(best_model_path, self.model_path)

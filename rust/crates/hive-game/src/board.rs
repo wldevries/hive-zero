@@ -116,6 +116,7 @@ impl Board {
 
     /// Get mutable stack at a hex position.
     #[inline]
+    #[allow(dead_code)]
     fn stack_at_mut(&mut self, h: Hex) -> &mut StackSlot {
         let (r, c) = hex_to_grid(h).expect("hex out of grid bounds");
         &mut self.grid[r][c]
@@ -632,7 +633,7 @@ impl Board {
         }
 
         // Helper: apply coloured edges to a hex at normalised canvas coords.
-        let mut apply_edges = |overrides: &mut std::collections::HashMap<(usize, usize), (String, usize)>,
+        let apply_edges = |overrides: &mut std::collections::HashMap<(usize, usize), (String, usize)>,
                                 sx: usize, sy: usize, color: &str, has_stack: bool| {
             overrides.insert((sy,     sx + 1), (format!("{color}_{RESET}"), 1));
             overrides.insert((sy,     sx + 2), (format!("{color}_{RESET}"), 1));
@@ -751,6 +752,7 @@ impl Piece {
 // We need the struct to be the same - it already is since we re-export
 
 #[cfg(test)]
+#[allow(unused_must_use)]
 mod tests {
     use super::*;
     use crate::piece::*;

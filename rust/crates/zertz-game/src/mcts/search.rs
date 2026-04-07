@@ -11,8 +11,6 @@ use super::node::{Edge, MctsNode};
 use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
 use crate::hex::hex_to_grid;
 use crate::move_encoding::get_legal_move_mask;
-#[cfg(test)]
-use crate::move_encoding::POLICY_SIZE;
 use crate::zertz::{ZertzBoard, ZertzMove};
 
 const DEFAULT_C_PUCT: f32 = 1.5;
@@ -303,6 +301,7 @@ fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, heads: &PolicyHead
 
 /// Legacy flat-policy expansion for test compatibility.
 #[cfg(test)]
+#[allow(dead_code)]
 fn expand_with_flat_policy(arena: &mut NodeArena, node_id: NodeId, policy: &[f32]) {
     let board = &arena.get(node_id).board;
     let (_mask, indexed_moves) = get_legal_move_mask(board);
@@ -610,7 +609,7 @@ mod tests {
         vec![0.0f32; POLICY_HEADS_TOTAL]
     }
 
-    fn heads_from_buf(buf: &[f32]) -> PolicyHeads {
+    fn heads_from_buf(buf: &[f32]) -> PolicyHeads<'_> {
         PolicyHeads {
             place: &buf[..PLACE_HEAD_SIZE],
             cap_source: &buf[PLACE_HEAD_SIZE..PLACE_HEAD_SIZE + CAP_HEAD_SIZE],

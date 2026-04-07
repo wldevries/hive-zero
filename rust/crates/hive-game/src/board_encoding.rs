@@ -293,6 +293,7 @@ pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32],
 }
 
 #[cfg(test)]
+#[allow(unused_must_use)]
 mod tests {
     use super::*;
     use crate::board::GRID_SIZE;

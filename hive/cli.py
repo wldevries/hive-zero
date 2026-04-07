@@ -1,9 +1,7 @@
 """CLI entry point for the Hive AI engine."""
 
 import argparse
-import sys
 
-from shared import lr_scheduler
 from shared.lr_scheduler import lr_scheduler_from_string
 
 
