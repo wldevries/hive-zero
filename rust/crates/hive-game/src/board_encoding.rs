@@ -1,7 +1,7 @@
 /// Encode Hive board state as a fixed-size tensor for neural network input.
 /// Must produce bitwise-identical output to Python board_encoder.py.
 
-use crate::hex::{Hex, hex_distance};
+use crate::hex::{Hex, hex_distance, hex_neighbors};
 use crate::game::Game;
 use crate::piece::{Piece, PieceColor, PieceType, ALL_PIECE_TYPES, PIECE_COUNTS};
 
@@ -20,7 +20,7 @@ pub const RESERVE_SIZE: usize = 10;
 ///   10-13: Current player's stacker at depths 1-4
 ///   14-17: Opponent's stacker at depths 1-4
 ///
-/// 18: Stack height (normalized /7)
+/// 18: Hive edge (binary: 1 for empty cells adjacent to at least one occupied cell)
 ///
 /// Queen geometry channels:
 ///   19: Hex distance to my queen (normalized by grid_size; 1.0 if queen not placed)
@@ -39,7 +39,7 @@ const MY_PIECES_BASE: usize = 0;
 const OPP_PIECES_BASE: usize = 5;
 const MY_STACKER_BASE: usize = 10;
 const OPP_STACKER_BASE: usize = 14;
-const STACK_HEIGHT_CH: usize = 18;
+const HIVE_EDGE_CH: usize = 18;
 const MY_QUEEN_DIST_CH: usize = 19;
 const OPP_QUEEN_DIST_CH: usize = 20;
 const MY_QUEEN_ADJ_CH: usize = 21;
@@ -93,9 +93,6 @@ pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [
         };
         let cell = row * grid_size + col;
 
-        board_out[STACK_HEIGHT_CH * gs2 + cell] =
-            f32_to_bf16(stack.height() as f32 / 7.0);
-
         for (depth, piece) in stack.iter().enumerate() {
             let mine = is_mine(piece.color());
             let type_idx = piece_type_idx(piece);
@@ -108,6 +105,15 @@ pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [
                 let depth_offset = (depth - 1).min(3);
                 let ch = stacker_base + depth_offset;
                 board_out[ch * gs2 + cell] = bf16_one;
+            }
+        }
+
+        // Hive edge: mark empty neighbors of occupied cells
+        for nb in hex_neighbors(pos) {
+            if !game.board.is_occupied(nb) {
+                if let Some((nr, nc)) = hex_to_encoding_grid(nb, grid_size) {
+                    board_out[HIVE_EDGE_CH * gs2 + nr * grid_size + nc] = bf16_one;
+                }
             }
         }
     }
@@ -195,10 +201,6 @@ pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32],
         };
         let cell = row * grid_size + col;
 
-        // Stack height
-        board_out[STACK_HEIGHT_CH * gs2 + cell] =
-            stack.height() as f32 / 7.0;
-
         // stack.iter() goes bottom-to-top; depth 0 = base piece
         for (depth, piece) in stack.iter().enumerate() {
             let mine = is_mine(piece.color());
@@ -214,6 +216,15 @@ pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32],
                 let depth_offset = (depth - 1).min(3);
                 let ch = stacker_base + depth_offset;
                 board_out[ch * gs2 + cell] = 1.0;
+            }
+        }
+
+        // Hive edge: mark empty neighbors of occupied cells
+        for nb in hex_neighbors(pos) {
+            if !game.board.is_occupied(nb) {
+                if let Some((nr, nc)) = hex_to_encoding_grid(nb, grid_size) {
+                    board_out[HIVE_EDGE_CH * gs2 + nr * grid_size + nc] = 1.0;
+                }
             }
         }
     }
@@ -367,9 +378,8 @@ mod tests {
         assert_eq!(at(&bt, 5, 11, 11), 1.0);
         // opponent's stacker at depth 1 → channel 14
         assert_eq!(at(&bt, 14, 11, 11), 1.0);
-        // stack height = 2/7
-        let h = at(&bt, STACK_HEIGHT_CH, 11, 11);
-        assert!((h - 2.0 / 7.0).abs() < 1e-6);
+        // Hive edge: occupied cell (0,0) is NOT on the edge channel (it's occupied)
+        assert_eq!(at(&bt, HIVE_EDGE_CH, 11, 11), 0.0);
     }
 
     #[test]
