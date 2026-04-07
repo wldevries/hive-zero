@@ -299,8 +299,12 @@ def _print_boards_grid(boards_with_outcome, cols=9):
 
     boards_with_outcome: list of (board[9], outcome) where outcome is 0=draw, 1=X, 2=O.
     """
-    CELL = {0: '\u00b7', 1: 'X', 2: 'O'}
-    OUTCOME_LABEL = {0: ' =', 1: ' X', 2: ' O'}
+    _x = f"{colorama.Fore.MAGENTA}{_BRIGHT}X{_RESET}"
+    _o = f"{colorama.Fore.CYAN}{_BRIGHT}O{_RESET}"
+    CELL = {0: '\u00b7', 1: _x, 2: _o}
+    _xl = f"{colorama.Fore.MAGENTA}{_BRIGHT} X{_RESET}"
+    _ol = f"{colorama.Fore.CYAN}{_BRIGHT} O{_RESET}"
+    OUTCOME_LABEL = {0: ' =', 1: _xl, 2: _ol}
     SEP = "  "
 
     for start in range(0, len(boards_with_outcome), cols):
