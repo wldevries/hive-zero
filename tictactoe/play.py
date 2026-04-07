@@ -35,7 +35,8 @@ def run(model_path=None, device="cuda", simulations=800, human_color=None):
     gen = ckpt.get("generation", "?")
     blocks = len(model.res_blocks)
     ch = model.input_conv.out_channels
-    print(f"Loaded model: {model_path} (gen {gen}, {blocks}b/{ch}ch, {simulations} sims)")
+    history_length = model.history_length
+    print(f"Loaded model: {model_path} (gen {gen}, {blocks}b/{ch}ch, history={history_length}, {simulations} sims)")
 
     def eval_fn(board_tensor_np):
         bt = torch.from_numpy(np.array(board_tensor_np)).to(device, dtype=torch.float32)
@@ -60,7 +61,7 @@ def run(model_path=None, device="cuda", simulations=800, human_color=None):
     print(f"You are {human_mark}, AI is {ai_mark}")
     print(f"Enter moves as 'row col' (1-3 each), e.g. '1 1' for top-left\n")
 
-    game = TTTGame()
+    game = TTTGame(history_length=history_length)
 
     while True:
         board = game.board()

@@ -23,6 +23,8 @@ def main():
     train_parser.add_argument("--training-batch-size", type=int, default=64)
     train_parser.add_argument("--blocks", type=int, default=2)
     train_parser.add_argument("--channels", type=int, default=32)
+    train_parser.add_argument("--history", type=int, default=1,
+                              help="Number of board history steps to encode (1=current only, up to 8)")
     train_parser.add_argument("--lr", type=float, default=0.005)
     train_parser.add_argument(
         "--lr-schedule", type=str, default=None,
@@ -77,6 +79,7 @@ def main():
             lr=args.lr,
             lr_scheduler=lr_scheduler,
             checkpoint_dir=args.checkpoint_dir,
+            history_length=args.history,
         )
         trainer.run(
             num_generations=args.generations,

@@ -52,28 +52,31 @@ class SelfPlayTrainer:
         lr: float = 0.02,
         lr_scheduler: Optional[LRScheduler] = None,
         checkpoint_dir: str = "checkpoints/tictactoe",
+        history_length: int = 1,
     ):
         self.model_path = model_path
         self.model_name = os.path.splitext(os.path.basename(model_path))[0]
         self.checkpoint_dir = checkpoint_dir
         self.device = device
         self.start_generation = 0
+        self.history_length = history_length
 
         if os.path.exists(model_path):
             self.model, ckpt = load_checkpoint(model_path)
             self.start_generation = ckpt.get("generation", 0)
+            self.history_length = self.model.history_length
             blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
             params = sum(p.numel() for p in self.model.parameters())
             print(
                 f"Resumed from {model_path} (gen {self.start_generation}, "
-                f"{blocks} blocks, {ch} channels, {params / 1e6:.2f}M params)"
+                f"{blocks} blocks, {ch} channels, history={self.history_length}, {params / 1e6:.2f}M params)"
             )
         else:
-            self.model = create_model(num_blocks=num_blocks, channels=channels)
+            self.model = create_model(num_blocks=num_blocks, channels=channels, history_length=history_length)
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"New model: {num_blocks} blocks, {channels} channels, {params / 1e6:.2f}M params"
+                f"New model: {num_blocks} blocks, {channels} channels, history={history_length}, {params / 1e6:.2f}M params"
             )
 
         self.model.to(device)
@@ -122,7 +125,7 @@ class SelfPlayTrainer:
                 f.write(LOG_HEADER)
 
         max_buffer = games_per_gen * max_moves * replay_window * 8  # 8 symmetries
-        dataset = TicTacToeDataset(max_size=max_buffer)
+        dataset = TicTacToeDataset(max_size=max_buffer, history_length=self.history_length)
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
         train_params = {
@@ -187,6 +190,7 @@ class SelfPlayTrainer:
                 dir_epsilon=dir_epsilon,
                 playout_cap_p=playout_cap_p,
                 fast_cap=fast_cap,
+                history_length=self.history_length,
             )
 
             pbar = tqdm(total=games_per_gen, unit="game", desc="  Self-play", leave=False)

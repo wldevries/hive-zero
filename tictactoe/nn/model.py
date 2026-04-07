@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from shared.nn.resblock import ResBlock
 
-NUM_CHANNELS = 2
+CHANNELS_PER_STEP = 2
 GRID_SIZE = 3
 POLICY_SIZE = 9
 RESERVE_SIZE = 0
@@ -16,15 +16,17 @@ RESERVE_SIZE = 0
 class TicTacToeNet(nn.Module):
     """AlphaZero-style network for tic-tac-toe.
 
-    Input:  (batch, 2, 3, 3) board tensor
+    Input:  (batch, in_channels, 3, 3) board tensor
     Output: policy_logits (batch, 9), value (batch, 1) in [-1, 1]
     """
 
-    def __init__(self, num_blocks: int = 2, channels: int = 32):
+    def __init__(self, num_blocks: int = 2, channels: int = 32, history_length: int = 1):
         super().__init__()
         self.game = "tictactoe"
+        self.history_length = history_length
+        in_channels = CHANNELS_PER_STEP * history_length
 
-        self.input_conv = nn.Conv2d(NUM_CHANNELS, channels, 3, padding=1, bias=False)
+        self.input_conv = nn.Conv2d(in_channels, channels, 3, padding=1, bias=False)
         self.input_bn = nn.BatchNorm2d(channels)
 
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
@@ -55,8 +57,8 @@ class TicTacToeNet(nn.Module):
         return policy_logits, v
 
 
-def create_model(num_blocks: int = 2, channels: int = 32) -> TicTacToeNet:
-    return TicTacToeNet(num_blocks=num_blocks, channels=channels)
+def create_model(num_blocks: int = 2, channels: int = 32, history_length: int = 1) -> TicTacToeNet:
+    return TicTacToeNet(num_blocks=num_blocks, channels=channels, history_length=history_length)
 
 
 def save_checkpoint(model: TicTacToeNet, path: str, generation: int = 0, metadata: dict | None = None):
@@ -65,6 +67,7 @@ def save_checkpoint(model: TicTacToeNet, path: str, generation: int = 0, metadat
         "game": "tictactoe",
         "num_blocks": len(model.res_blocks),
         "channels": model.input_conv.out_channels,
+        "history_length": model.history_length,
         "generation": generation,
         "metadata": metadata or {},
     }, path)
@@ -75,6 +78,7 @@ def load_checkpoint(path: str) -> tuple[TicTacToeNet, dict]:
     model = create_model(
         num_blocks=ckpt["num_blocks"],
         channels=ckpt["channels"],
+        history_length=ckpt.get("history_length", 1),
     )
     model.load_state_dict(ckpt["model_state_dict"])
     return model, ckpt
@@ -82,7 +86,8 @@ def load_checkpoint(path: str) -> tuple[TicTacToeNet, dict]:
 
 def export_onnx(model: TicTacToeNet, path: str):
     model.eval()
-    dummy_board = torch.zeros(1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
+    in_channels = CHANNELS_PER_STEP * model.history_length
+    dummy_board = torch.zeros(1, in_channels, GRID_SIZE, GRID_SIZE)
     torch.onnx.export(
         model,
         (dummy_board,),

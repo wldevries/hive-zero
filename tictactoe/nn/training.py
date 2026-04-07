@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from tqdm import tqdm
 
-from .model import NUM_CHANNELS, GRID_SIZE, POLICY_SIZE
+from .model import CHANNELS_PER_STEP, GRID_SIZE, POLICY_SIZE
 
 
 def _build_symmetry_index_maps():
@@ -39,11 +39,12 @@ _SYMMETRY_MAPS = _build_symmetry_index_maps()
 class TicTacToeDataset(Dataset):
     """Ring-buffer replay dataset for tic-tac-toe self-play positions."""
 
-    def __init__(self, max_size: int = 50_000):
+    def __init__(self, max_size: int = 50_000, history_length: int = 1):
         self.max_size = max_size
         self._count = 0
         self._size = 0
-        self.board_tensors = np.zeros((max_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
+        self.num_channels = CHANNELS_PER_STEP * history_length
+        self.board_tensors = np.zeros((max_size, self.num_channels, GRID_SIZE, GRID_SIZE), dtype=np.float32)
         self.policy_targets = np.zeros((max_size, POLICY_SIZE), dtype=np.float32)
         self.value_targets = np.zeros(max_size, dtype=np.float32)
         self.weights = np.ones(max_size, dtype=np.float32)
@@ -53,12 +54,12 @@ class TicTacToeDataset(Dataset):
                   value_targets: np.ndarray, weights: np.ndarray,
                   value_only: list[bool]):
         n = board_tensors.shape[0]
-        boards = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
+        boards = board_tensors.reshape(n, self.num_channels, GRID_SIZE, GRID_SIZE)
         for i in range(n):
             for perm in _SYMMETRY_MAPS:
                 idx = self._count % self.max_size
                 # Apply symmetry to board (each channel is a 3x3 grid)
-                for ch in range(NUM_CHANNELS):
+                for ch in range(self.num_channels):
                     flat = boards[i, ch].ravel()
                     for src, dst in enumerate(perm):
                         r, c = divmod(dst, 3)

@@ -8,12 +8,15 @@ use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
 
 use tictactoe_game::game::{
-    TicTacToe, GRID_SIZE, NUM_CHANNELS, POLICY_SIZE,
+    TicTacToe, GRID_SIZE, CHANNELS_PER_STEP, POLICY_SIZE,
 };
 use core_game::game::{Game, NNGame, Outcome, Player};
 use core_game::mcts::search::MctsSearch;
 
-const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE; // 18
+/// Board flat size for a given history length.
+fn board_flat(history_length: usize) -> usize {
+    CHANNELS_PER_STEP * history_length * GRID_SIZE * GRID_SIZE
+}
 
 // ---------------------------------------------------------------------------
 // Result
@@ -27,6 +30,9 @@ pub struct PyTTTSelfPlayResult {
     weights: Vec<f32>,
     value_only_flags: Vec<bool>,
     num_samples: usize,
+    board_flat: usize,
+    #[allow(dead_code)]
+    board_channels: usize,
     wins_p1: u32,
     wins_p2: u32,
     draws: u32,
@@ -48,8 +54,9 @@ impl PyTTTSelfPlayResult {
         Vec<bool>,
     ) {
         let n = self.num_samples;
+        let bf = self.board_flat;
         let boards = numpy::ndarray::Array2::from_shape_vec(
-            (n, BOARD_FLAT), self.board_data.clone(),
+            (n, bf), self.board_data.clone(),
         ).unwrap();
         let policies = numpy::ndarray::Array2::from_shape_vec(
             (n, POLICY_SIZE), self.policy_data.clone(),
@@ -93,6 +100,7 @@ pub struct PyTTTSelfPlaySession {
     dir_epsilon: f32,
     playout_cap_p: f32,
     fast_cap: usize,
+    history_length: usize,
 }
 
 #[pymethods]
@@ -109,6 +117,7 @@ impl PyTTTSelfPlaySession {
         dir_epsilon = 0.25,
         playout_cap_p = 0.0,
         fast_cap = 20,
+        history_length = 1,
     ))]
     fn new(
         num_games: usize,
@@ -121,10 +130,12 @@ impl PyTTTSelfPlaySession {
         dir_epsilon: f32,
         playout_cap_p: f32,
         fast_cap: usize,
+        history_length: usize,
     ) -> Self {
         PyTTTSelfPlaySession {
             num_games, simulations, max_moves, temperature, temp_threshold,
             c_puct, dir_alpha, dir_epsilon, playout_cap_p, fast_cap,
+            history_length,
         }
     }
 
@@ -137,8 +148,13 @@ impl PyTTTSelfPlaySession {
     ) -> PyResult<PyTTTSelfPlayResult> {
         let num_games = self.num_games;
         let use_playout_cap = self.playout_cap_p > 0.0;
+        let history_length = self.history_length;
+        let bf = board_flat(history_length);
+        let num_ch = CHANNELS_PER_STEP * history_length;
 
-        let mut games: Vec<TicTacToe> = (0..num_games).map(|_| TicTacToe::new()).collect();
+        let mut games: Vec<TicTacToe> = (0..num_games)
+            .map(|_| TicTacToe::with_history(history_length))
+            .collect();
         let mut searches: Vec<MctsSearch<TicTacToe>> = (0..num_games).map(|_| {
             let mut s = MctsSearch::<TicTacToe>::new(4096);
             s.c_puct = self.c_puct;
@@ -191,18 +207,18 @@ impl PyTTTSelfPlaySession {
 
             // Encode current positions
             let mut turn_board_offsets: Vec<usize> = Vec::with_capacity(n);
-            let mut flat_boards = vec![0f32; n * BOARD_FLAT];
+            let mut flat_boards = vec![0f32; n * bf];
             for (i, &gi) in mcts_games.iter().enumerate() {
                 let boff = board_buf.len();
-                board_buf.resize(boff + BOARD_FLAT, 0.0);
-                games[gi].encode_board(&mut board_buf[boff..boff + BOARD_FLAT], &mut []);
-                flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT]
-                    .copy_from_slice(&board_buf[boff..boff + BOARD_FLAT]);
+                board_buf.resize(boff + bf, 0.0);
+                games[gi].encode_board(&mut board_buf[boff..boff + bf], &mut []);
+                flat_boards[i * bf..(i + 1) * bf]
+                    .copy_from_slice(&board_buf[boff..boff + bf]);
                 turn_board_offsets.push(boff);
             }
 
             // Initial NN eval for root policy
-            let (init_policies, _init_values) = infer_batch(py, eval_fn, &flat_boards, n)?;
+            let (init_policies, _init_values) = infer_batch(py, eval_fn, &flat_boards, n, num_ch)?;
 
             // Init MCTS trees
             for (i, &gi) in mcts_games.iter().enumerate() {
@@ -234,13 +250,13 @@ impl PyTTTSelfPlaySession {
                 if leaf_data.is_empty() { break; }
 
                 let nl = leaf_data.len();
-                let mut leaf_boards_flat = vec![0f32; nl * BOARD_FLAT];
+                let mut leaf_boards_flat = vec![0f32; nl * bf];
                 for (k, (_, ref board_enc)) in leaf_data.iter().enumerate() {
-                    leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT]
+                    leaf_boards_flat[k * bf..(k + 1) * bf]
                         .copy_from_slice(board_enc);
                 }
 
-                let (leaf_policies_flat, leaf_values) = infer_batch(py, eval_fn, &leaf_boards_flat, nl)?;
+                let (leaf_policies_flat, leaf_values) = infer_batch(py, eval_fn, &leaf_boards_flat, nl, num_ch)?;
 
                 // Group leaves by game and expand
                 let mut per_game_policies: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n];
@@ -372,7 +388,7 @@ impl PyTTTSelfPlaySession {
                 };
 
                 result_board_data.extend_from_slice(
-                    &board_buf[record.board_offset..record.board_offset + BOARD_FLAT]
+                    &board_buf[record.board_offset..record.board_offset + bf]
                 );
                 result_policy_data.extend_from_slice(&record.policy_vector);
                 result_value_targets.push(value);
@@ -389,6 +405,8 @@ impl PyTTTSelfPlaySession {
             weights: result_weights,
             value_only_flags: result_value_only,
             num_samples,
+            board_flat: bf,
+            board_channels: num_ch,
             wins_p1,
             wins_p2,
             draws,
@@ -406,12 +424,14 @@ fn infer_batch(
     eval_fn: &Bound<'_, PyAny>,
     boards_flat: &[f32],
     batch_size: usize,
+    num_channels: usize,
 ) -> PyResult<(Vec<f32>, Vec<f32>)> {
+    let bf = num_channels * GRID_SIZE * GRID_SIZE;
     let board_arr = numpy::ndarray::Array2::from_shape_vec(
-        (batch_size, BOARD_FLAT), boards_flat.to_vec(),
+        (batch_size, bf), boards_flat.to_vec(),
     ).unwrap();
     let board_np = PyArray2::from_owned_array_bound(py, board_arr);
-    let board_4d = board_np.reshape([batch_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE])?;
+    let board_4d = board_np.reshape([batch_size, num_channels, GRID_SIZE, GRID_SIZE])?;
 
     let result = eval_fn.call1((board_4d,))?;
     let tuple = result.downcast::<PyTuple>().map_err(|_|
@@ -437,8 +457,9 @@ pub struct PyTTTGame {
 #[pymethods]
 impl PyTTTGame {
     #[new]
-    fn new() -> Self {
-        PyTTTGame { game: TicTacToe::new() }
+    #[pyo3(signature = (history_length = 1))]
+    fn new(history_length: usize) -> Self {
+        PyTTTGame { game: TicTacToe::with_history(history_length) }
     }
 
     /// Play a move at the given cell index (0-8).
@@ -488,13 +509,16 @@ impl PyTTTGame {
             return Err(pyo3::exceptions::PyRuntimeError::new_err("Game is already over"));
         }
 
+        let num_ch = self.game.num_channels();
+        let bf = board_flat(self.game.history_length);
+
         let mut search = MctsSearch::<TicTacToe>::new(4096);
         search.c_puct = c_puct;
 
         // Initial eval
-        let mut board_enc = vec![0.0f32; BOARD_FLAT];
+        let mut board_enc = vec![0.0f32; bf];
         self.game.encode_board(&mut board_enc, &mut []);
-        let (init_policy, _init_value) = infer_batch(py, eval_fn, &board_enc, 1)?;
+        let (init_policy, _init_value) = infer_batch(py, eval_fn, &board_enc, 1, num_ch)?;
         search.init(&self.game, &init_policy);
 
         // Run simulations
@@ -507,13 +531,13 @@ impl PyTTTGame {
                 continue;
             }
 
-            let mut leaf_boards = vec![0f32; count * BOARD_FLAT];
+            let mut leaf_boards = vec![0f32; count * bf];
             for (k, &leaf) in leaves.iter().enumerate() {
                 let (enc, _) = search.encode_leaf(leaf);
-                leaf_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&enc);
+                leaf_boards[k * bf..(k + 1) * bf].copy_from_slice(&enc);
             }
 
-            let (policies_flat, values) = infer_batch(py, eval_fn, &leaf_boards, count)?;
+            let (policies_flat, values) = infer_batch(py, eval_fn, &leaf_boards, count, num_ch)?;
             let policies: Vec<Vec<f32>> = (0..count)
                 .map(|i| policies_flat[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].to_vec())
                 .collect();

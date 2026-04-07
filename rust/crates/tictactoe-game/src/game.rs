@@ -2,7 +2,9 @@ use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex};
 use core_game::symmetry::UnitSymmetry;
 
 pub const GRID_SIZE: usize = 3;
-pub const NUM_CHANNELS: usize = 2;
+pub const CHANNELS_PER_STEP: usize = 2; // my pieces, opponent pieces
+pub const MAX_HISTORY: usize = 8;
+pub const NUM_CHANNELS: usize = CHANNELS_PER_STEP * MAX_HISTORY; // 16
 pub const RESERVE_SIZE: usize = 0;
 pub const NUM_POLICY_CHANNELS: usize = 1;
 pub const POLICY_SIZE: usize = NUM_POLICY_CHANNELS * GRID_SIZE * GRID_SIZE; // 9
@@ -36,16 +38,32 @@ pub struct TicTacToe {
     pub next_player: Player,
     pub outcome: Outcome,
     pub move_count: u8,
+    /// Number of board history steps to encode (1 = current only, up to MAX_HISTORY).
+    pub history_length: usize,
+    /// Previous board states (most recent last).
+    history: Vec<[Cell; 9]>,
 }
 
 impl TicTacToe {
     pub fn new() -> Self {
+        Self::with_history(1)
+    }
+
+    pub fn with_history(history_length: usize) -> Self {
+        let history_length = history_length.clamp(1, MAX_HISTORY);
         TicTacToe {
             board: [Cell::Empty; 9],
             next_player: Player::Player1,
             outcome: Outcome::Ongoing,
             move_count: 0,
+            history_length,
+            history: Vec::new(),
         }
+    }
+
+    /// Number of board channels for encoding.
+    pub fn num_channels(&self) -> usize {
+        CHANNELS_PER_STEP * self.history_length
     }
 
     fn player_cell(player: Player) -> Cell {
@@ -80,7 +98,7 @@ impl TicTacToe {
 
 impl Default for TicTacToe {
     fn default() -> Self {
-        Self::new()
+        Self::with_history(1)
     }
 }
 
@@ -118,6 +136,15 @@ impl Game for TicTacToe {
             return Err("Game is already over".into());
         }
 
+        // Save current board to history before applying move
+        if self.history_length > 1 {
+            self.history.push(self.board);
+            // Keep at most history_length - 1 previous boards
+            if self.history.len() > self.history_length - 1 {
+                self.history.remove(0);
+            }
+        }
+
         let cell = Self::player_cell(self.next_player);
         self.board[idx] = cell;
         self.move_count += 1;
@@ -150,15 +177,35 @@ impl NNGame for TicTacToe {
         GRID_SIZE
     }
 
+    fn board_tensor_size(&self) -> usize {
+        self.num_channels() * GRID_SIZE * GRID_SIZE
+    }
+
     fn encode_board(&self, board_out: &mut [f32], _reserve_out: &mut [f32]) {
-        // Current-player-relative encoding:
-        // Channel 0: current player's pieces
-        // Channel 1: opponent's pieces
+        // Current-player-relative encoding per time step:
+        //   Channel 2*t:   current player's pieces at step t
+        //   Channel 2*t+1: opponent's pieces at step t
+        // Step 0 = current position, step 1 = one move ago, etc.
+        // Missing history steps are left as zeros.
         let my_cell = Self::player_cell(self.next_player);
         let opp_cell = Self::player_cell(self.next_player.opposite());
+
+        // Step 0: current board
         for i in 0..9 {
             board_out[i] = if self.board[i] == my_cell { 1.0 } else { 0.0 };
             board_out[9 + i] = if self.board[i] == opp_cell { 1.0 } else { 0.0 };
+        }
+
+        // Steps 1..history_length-1: previous boards (most recent first)
+        for step in 1..self.history_length {
+            let offset = step * CHANNELS_PER_STEP * 9;
+            if let Some(prev_board) = self.history.len().checked_sub(step).and_then(|idx| self.history.get(idx)) {
+                for i in 0..9 {
+                    board_out[offset + i] = if prev_board[i] == my_cell { 1.0 } else { 0.0 };
+                    board_out[offset + 9 + i] = if prev_board[i] == opp_cell { 1.0 } else { 0.0 };
+                }
+            }
+            // else: already zero-filled
         }
     }
 
