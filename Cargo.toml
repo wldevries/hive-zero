@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/core-game",
-    "crates/hive-game",
-    "crates/engine-zero",
-    "crates/zertz-game",
+    "rust/crates/core-game",
+    "rust/crates/hive-game",
+    "rust/crates/engine-zero",
+    "rust/crates/zertz-game",
 ]
 
 [workspace.dependencies]
