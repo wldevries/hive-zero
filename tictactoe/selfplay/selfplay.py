@@ -302,16 +302,14 @@ def _print_boards_grid(boards_with_outcome, cols=9):
     _x = f"{colorama.Fore.MAGENTA}{_BRIGHT}X{_RESET}"
     _o = f"{colorama.Fore.CYAN}{_BRIGHT}O{_RESET}"
     CELL = {0: '\u00b7', 1: _x, 2: _o}
-    _xl = f"{colorama.Fore.MAGENTA}{_BRIGHT} X{_RESET}"
-    _ol = f"{colorama.Fore.CYAN}{_BRIGHT} O{_RESET}"
-    OUTCOME_LABEL = {0: ' =', 1: _xl, 2: _ol}
+    # Pre-padded to 5 visible chars to avoid ANSI breaking format specs
+    OUTCOME_LABEL = {0: '  =  ', 1: f'  {_x}  ', 2: f'  {_o}  '}
     SEP = "  "
 
     for start in range(0, len(boards_with_outcome), cols):
         chunk = boards_with_outcome[start:start + cols]
-        # Header: outcome labels, same width as board row ("X O X" = 5 chars)
-        labels = [OUTCOME_LABEL.get(oc, ' ?') for _, oc in chunk]
-        print("    " + SEP.join(f"{lbl:^5}" for lbl in labels))
+        labels = [OUTCOME_LABEL.get(oc, '  ?  ') for _, oc in chunk]
+        print("    " + SEP.join(labels))
         # Board rows
         for row in range(3):
             parts = []
