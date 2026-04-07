@@ -10,6 +10,32 @@ from tqdm import tqdm
 from .model import NUM_CHANNELS, GRID_SIZE, POLICY_SIZE
 
 
+def _build_symmetry_index_maps():
+    """Build the 8 symmetry transformations for a 3x3 grid.
+
+    Returns a list of 8 index permutations. Each permutation maps
+    cell index i to the cell index it lands on after the transformation.
+    The 3x3 board is indexed row-major: 0,1,2 / 3,4,5 / 6,7,8.
+    """
+    perms = []
+    for rot in range(4):          # 0°, 90°, 180°, 270°
+        for flip in (False, True):  # optional horizontal reflection
+            mapping = [0] * 9
+            for r in range(3):
+                for c in range(3):
+                    nr, nc = r, c
+                    # Rotate 90° clockwise rot times
+                    for _ in range(rot):
+                        nr, nc = nc, 2 - nr
+                    if flip:
+                        nc = 2 - nc
+                    mapping[r * 3 + c] = nr * 3 + nc
+            perms.append(mapping)
+    return perms
+
+_SYMMETRY_MAPS = _build_symmetry_index_maps()
+
+
 class TicTacToeDataset(Dataset):
     """Ring-buffer replay dataset for tic-tac-toe self-play positions."""
 
@@ -29,14 +55,22 @@ class TicTacToeDataset(Dataset):
         n = board_tensors.shape[0]
         boards = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
         for i in range(n):
-            idx = self._count % self.max_size
-            self.board_tensors[idx] = boards[i]
-            self.policy_targets[idx] = policy_targets[i]
-            self.value_targets[idx] = value_targets[i]
-            self.weights[idx] = weights[i]
-            self.value_only[idx] = value_only[i]
-            self._count += 1
-            self._size = min(self._size + 1, self.max_size)
+            for perm in _SYMMETRY_MAPS:
+                idx = self._count % self.max_size
+                # Apply symmetry to board (each channel is a 3x3 grid)
+                for ch in range(NUM_CHANNELS):
+                    flat = boards[i, ch].ravel()
+                    for src, dst in enumerate(perm):
+                        r, c = divmod(dst, 3)
+                        self.board_tensors[idx, ch, r, c] = flat[src]
+                # Apply same symmetry to policy target (flat 9-vector = 3x3 grid)
+                for src, dst in enumerate(perm):
+                    self.policy_targets[idx, dst] = policy_targets[i, src]
+                self.value_targets[idx] = value_targets[i]
+                self.weights[idx] = weights[i]
+                self.value_only[idx] = value_only[i]
+                self._count += 1
+                self._size = min(self._size + 1, self.max_size)
 
     def clear(self):
         self._count = 0

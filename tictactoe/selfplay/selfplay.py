@@ -121,7 +121,7 @@ class SelfPlayTrainer:
             with open(log_path, "w") as f:
                 f.write(LOG_HEADER)
 
-        max_buffer = games_per_gen * max_moves * replay_window
+        max_buffer = games_per_gen * max_moves * replay_window * 8  # 8 symmetries
         dataset = TicTacToeDataset(max_size=max_buffer)
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
