@@ -2,6 +2,15 @@
 /// Game states are NOT stored in nodes — they are reconstructed by replaying
 /// moves from the root game during selection. This reduces per-node memory
 /// from ~4KB+ to ~60 bytes.
+///
+/// # Value convention (Convention B — parent's perspective)
+/// `value_sum` stores the sum of values from the perspective of the *parent's*
+/// player (the one who chose the move that led to this node). Concretely:
+/// - A child's `value()` is positive when the move was good for the parent.
+/// - UCB selection at a parent uses `node.value() + exploration` directly,
+///   with no sign adjustment (see `ucb_score` in search.rs).
+/// - The root node has no parent, so `root_value()` negates the stored value
+///   to recover the root player's own expected return.
 
 use crate::game::Player;
 use super::arena::NodeId;
@@ -11,11 +20,18 @@ pub struct MctsNode<M: Copy> {
     pub parent: Option<NodeId>,
     pub first_child: Option<NodeId>,
     pub next_sibling: Option<NodeId>,
+    /// Number of times this node has been selected (includes virtual-loss visits).
     pub visit_count: u32,
+    /// Sum of backed-up values from the *parent's* player's perspective.
+    /// Positive means the move that led here was good for whoever chose it.
     pub value_sum: f32,
+    /// Neural network prior probability for the move that leads to this node.
     pub prior: f32,
+    /// Whether this node's children have been added to the arena.
     pub is_expanded: bool,
+    /// The move played from the parent to reach this node.
     pub move_from_parent: M,
+    /// The player to move at this node (not the player who moved here).
     pub turn_player: Player,
     pub child_count: u16,
 }
@@ -36,6 +52,10 @@ impl<M: Copy> MctsNode<M> {
         }
     }
 
+    /// Mean backed-up value from the *parent's* player's perspective.
+    /// Positive means this was a good move for whoever chose it.
+    /// Returns 0 for unvisited nodes.
+    /// For the root's own perspective, use `MctsSearch::root_value()` instead.
     #[inline]
     pub fn value(&self) -> f32 {
         if self.visit_count == 0 {

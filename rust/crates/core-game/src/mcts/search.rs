@@ -6,8 +6,11 @@ use super::node::MctsNode;
 use crate::game::{GameEngine, Outcome, Player, PolicyIndex};
 
 const DEFAULT_C_PUCT: f32 = 1.5;
+const VIRTUAL_LOSS: f32 = -1.0f32;
 
 /// UCB score for child selection.
+/// `node.value()` is stored from the *parent's* player's perspective (Convention B),
+/// so it can be added directly without sign adjustment.
 fn ucb_score<M: Copy>(node: &MctsNode<M>, parent_visits: u32, c_puct: f32) -> f32 {
     let exploration = c_puct * node.prior * (parent_visits as f32).sqrt()
         / (1.0 + node.visit_count as f32);
@@ -95,7 +98,12 @@ fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_visits: u32, c_p
 }
 
 /// Backpropagate a value up the tree.
-fn backpropagate<M: Copy>(arena: &mut NodeArena<M>, mut node_id: NodeId, mut value: f32) {
+/// `value` is from the perspective of the player to move at `node_id`.
+/// Convention B: each node stores the value from its *parent's* player's perspective,
+/// so the initial value is negated before accumulation and the sign flips at each level.
+fn backpropagate<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, value: f32) {
+    let mut value = -value; // negate: leaf stores from parent's perspective
+    let mut node_id = node_id;
     loop {
         let node = arena.get_mut(node_id);
         node.visit_count += 1;
@@ -108,15 +116,16 @@ fn backpropagate<M: Copy>(arena: &mut NodeArena<M>, mut node_id: NodeId, mut val
     }
 }
 
-/// Apply virtual loss: increment visit_count and subtract 1 from value_sum up the tree.
-/// This deters subsequent selections from taking the same path within a batch.
+/// Apply virtual loss: increment visit_count and add a pessimistic placeholder to
+/// value_sum up the tree. This deters subsequent selections from taking the same
+/// path within a batch. The placeholder is corrected by correct_virtual_loss.
 fn apply_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, mut node_id: NodeId) {
-    let mut value = -1.0f32;
+    let mut virtual_loss = VIRTUAL_LOSS;
     loop {
         let node = arena.get_mut(node_id);
         node.visit_count += 1;
-        node.value_sum += value;
-        value = -value;
+        node.value_sum += virtual_loss;
+        virtual_loss = -virtual_loss;
         match node.parent {
             Some(parent) => node_id = parent,
             None => break,
@@ -124,16 +133,19 @@ fn apply_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, mut node_id: NodeId) {
     }
 }
 
-/// Correct virtual loss by replacing the -1 placeholder with the real value.
+/// Correct virtual loss by replacing the placeholder with the real value.
 /// Does NOT increment visit_count (already done by apply_virtual_loss).
-fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, mut node_id: NodeId, mut real_value: f32) {
-    let mut virtual_value = -1.0f32;
+/// `real_value` is from the perspective of the player to move at `node_id`.
+fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real_value: f32) {
+    let mut real_value = -real_value; // negate: Convention B, same as backpropagate
+    let mut virtual_loss = VIRTUAL_LOSS;
+    let mut node_id = node_id;
     loop {
         let node = arena.get_mut(node_id);
         // Subtract the virtual placeholder and add the real value.
-        node.value_sum += real_value - virtual_value;
+        node.value_sum += real_value - virtual_loss;
         real_value = -real_value;
-        virtual_value = -virtual_value;
+        virtual_loss = -virtual_loss;
         match node.parent {
             Some(parent) => node_id = parent,
             None => break,
@@ -269,7 +281,6 @@ impl<G: GameEngine> MctsSearch<G> {
     /// Terminal nodes are handled immediately (no stash entry).
     /// Returns the NodeIds of non-terminal leaves in stash order.
     pub fn select_leaves(&mut self, batch_size: usize) -> Vec<NodeId> {
-        let root_turn = self.arena.get(self.root).turn_player;
         let mut leaf_ids = Vec::new();
 
         for _ in 0..batch_size {
@@ -279,7 +290,7 @@ impl<G: GameEngine> MctsSearch<G> {
             let game = self.reconstruct_game(leaf);
 
             if game.is_game_over() {
-                let value = terminal_value(game.outcome(), root_turn);
+                let value = terminal_value(game.outcome(), game.next_player());
                 backpropagate(&mut self.arena, leaf, value);
             } else {
                 // Apply virtual loss so subsequent selections in this batch diverge.
@@ -329,14 +340,10 @@ impl<G: GameEngine> MctsSearch<G> {
         policies: &[Vec<f32>],
         values: &[f32],
     ) {
-        let root_turn = self.arena.get(self.root).turn_player;
         let stashed = std::mem::take(&mut self.stashed_leaves);
         for (i, (leaf, mut game)) in stashed.into_iter().enumerate() {
             expand_with_policy::<G>(&mut self.arena, leaf, &mut game, &policies[i]);
-            let mut value = values[i];
-            if self.arena.get(leaf).turn_player != root_turn {
-                value = -value;
-            }
+            let value = values[i];
             correct_virtual_loss(&mut self.arena, leaf, value);
         }
     }
@@ -517,9 +524,11 @@ impl<G: GameEngine> MctsSearch<G> {
         self.arena.get(self.root).visit_count
     }
 
-    /// Mean value estimate at the root (from current player's perspective).
+    /// Mean value estimate at the root, from the root's current player's perspective.
+    /// Negated relative to the stored value because the root has no parent —
+    /// its value_sum accumulates contributions from the opposite sign (Convention B).
     pub fn root_value(&self) -> f32 {
-        self.arena.get(self.root).value()
+        -self.arena.get(self.root).value()
     }
 
     /// Encode a game state for NN evaluation.
