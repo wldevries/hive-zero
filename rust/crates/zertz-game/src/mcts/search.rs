@@ -14,6 +14,7 @@ use crate::move_encoding::get_legal_move_mask;
 use crate::zertz::{ZertzBoard, ZertzMove};
 
 const DEFAULT_C_PUCT: f32 = 1.5;
+const VIRTUAL_LOSS: f32 = -1.0;
 
 // ---------------------------------------------------------------------------
 // Edge selection (UCB)
@@ -120,7 +121,9 @@ fn select_leaf(
 /// Negates the value when traversing to a parent with a different player
 /// (standard alpha-zero), but keeps it when parent has the same player
 /// (mid-capture continuation).
-fn backpropagate(arena: &mut NodeArena, mut node_id: NodeId, mut value: f32) {
+fn backpropagate(arena: &mut NodeArena, node_id: NodeId, value: f32) {
+    let mut value = value;
+    let mut node_id = node_id;
     loop {
         let node = arena.get_mut(node_id);
         node.visit_count += 1;
@@ -141,17 +144,17 @@ fn backpropagate(arena: &mut NodeArena, mut node_id: NodeId, mut value: f32) {
 
 /// Apply virtual loss up the tree to deter batch re-selection of the same path.
 fn apply_virtual_loss(arena: &mut NodeArena, mut node_id: NodeId) {
-    let mut value = -1.0f32;
+    let mut virtual_loss = VIRTUAL_LOSS;
     loop {
         let node = arena.get_mut(node_id);
         node.visit_count += 1;
-        node.value_sum += value;
+        node.value_sum += virtual_loss;
         match node.parent {
             Some(parent) => {
                 let child_player = node.board.next_player();
                 let parent_player = arena.get(parent).board.next_player();
                 if child_player != parent_player {
-                    value = -value;
+                    virtual_loss = -virtual_loss;
                 }
                 node_id = parent;
             }
@@ -160,19 +163,22 @@ fn apply_virtual_loss(arena: &mut NodeArena, mut node_id: NodeId) {
     }
 }
 
+
 /// Replace virtual loss placeholder with the real NN value.
-fn correct_virtual_loss(arena: &mut NodeArena, mut node_id: NodeId, mut real_value: f32) {
-    let mut virtual_value = -1.0f32;
+fn correct_virtual_loss(arena: &mut NodeArena, node_id: NodeId, real_value: f32) {
+    let mut real_value = -real_value;
+    let mut virtual_loss = VIRTUAL_LOSS;
+    let mut node_id = node_id;
     loop {
         let node = arena.get_mut(node_id);
-        node.value_sum += real_value - virtual_value;
+        node.value_sum += real_value - virtual_loss;
         match node.parent {
             Some(parent) => {
                 let child_player = node.board.next_player();
                 let parent_player = arena.get(parent).board.next_player();
                 if child_player != parent_player {
                     real_value = -real_value;
-                    virtual_value = -virtual_value;
+                    virtual_loss = -virtual_loss;
                 }
                 node_id = parent;
             }
@@ -182,16 +188,12 @@ fn correct_virtual_loss(arena: &mut NodeArena, mut node_id: NodeId, mut real_val
 }
 
 /// Terminal game value from a player's perspective.
-fn terminal_value(board: &ZertzBoard, perspective: Player) -> f32 {
-    match board.outcome() {
-        Outcome::WonBy(p) => {
-            if p == perspective {
-                1.0
-            } else {
-                -1.0
-            }
-        }
+fn terminal_value(outcome: Outcome, perspective: Player) -> f32 {
+    match outcome {
         Outcome::Draw | Outcome::Ongoing => 0.0,
+        Outcome::WonBy(winner) => {
+            if winner == perspective { 1.0 } else { -1.0 }
+        }
     }
 }
 
@@ -372,15 +374,15 @@ impl MctsSearch {
 
     /// Select leaves for batch evaluation. Terminal nodes are handled immediately.
     pub fn select_leaves(&mut self, batch_size: usize) -> Vec<NodeId> {
-        let root_player = self.arena.get(self.root).board.next_player();
         let mut leaves = Vec::new();
 
         for _ in 0..batch_size {
             let leaf =
                 select_leaf(&mut self.arena, self.root, self.c_puct, self.use_forced_playouts);
 
-            if self.arena.get(leaf).board.is_game_over() {
-                let value = terminal_value(&self.arena.get(leaf).board, root_player);
+            let board = &self.arena.get(leaf).board;
+            if board.is_game_over() {
+                let value = terminal_value(board.outcome(), board.next_player());
                 backpropagate(&mut self.arena, leaf, value);
             } else if self.arena.get(leaf).is_expanded() {
                 // Expanded but no legal moves (shouldn't happen if outcome is None, but be safe)
