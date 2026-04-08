@@ -50,7 +50,6 @@ class HiveDataset(Dataset):
         self.reserve_vectors = np.zeros((max_size, RESERVE_SIZE), dtype=np.float32)
         self.policy_targets = np.zeros((max_size, self._ps), dtype=np.float32)
         self.value_targets = np.zeros(max_size, dtype=np.float32)
-        self.weights = np.ones(max_size, dtype=np.float32)
         self.value_only = np.zeros(max_size, dtype=np.bool_)
         self.policy_only = np.zeros(max_size, dtype=np.bool_)
         self.my_queen_danger = np.zeros(max_size, dtype=np.float32)
@@ -62,7 +61,7 @@ class HiveDataset(Dataset):
 
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
                    policy_target: np.ndarray, value_target: float,
-                   weight: float = 1.0, value_only: bool = False, policy_only: bool = False,
+                   value_only: bool = False, policy_only: bool = False,
                    my_queen_danger: float = 0.0, opp_queen_danger: float = 0.0,
                    my_queen_escape: float = 0.0, opp_queen_escape: float = 0.0,
                    my_mobility: float = 0.0, opp_mobility: float = 0.0):
@@ -71,7 +70,6 @@ class HiveDataset(Dataset):
         self.reserve_vectors[idx] = reserve_vector
         self.policy_targets[idx] = policy_target
         self.value_targets[idx] = value_target
-        self.weights[idx] = weight
         self.value_only[idx] = value_only
         self.policy_only[idx] = policy_only
         self.my_queen_danger[idx] = my_queen_danger
@@ -85,7 +83,7 @@ class HiveDataset(Dataset):
 
     def add_batch(self, board_tensors: np.ndarray, reserve_vectors: np.ndarray,
                   policy_targets: np.ndarray, value_targets: np.ndarray,
-                  weights: np.ndarray, value_only: list[bool], policy_only: list[bool],
+                  value_only: list[bool], policy_only: list[bool],
                   my_queen_danger: np.ndarray | None = None,
                   opp_queen_danger: np.ndarray | None = None,
                   my_queen_escape: np.ndarray | None = None,
@@ -101,7 +99,6 @@ class HiveDataset(Dataset):
             self.reserve_vectors[idx] = reserve_vectors[i]
             self.policy_targets[idx] = policy_targets[i]
             self.value_targets[idx] = value_targets[i]
-            self.weights[idx] = weights[i]
             self.value_only[idx] = value_only[i]
             self.policy_only[idx] = policy_only[i]
             self.my_queen_danger[idx] = my_queen_danger[i] if my_queen_danger is not None else 0.0
@@ -159,7 +156,6 @@ class HiveDataset(Dataset):
             torch.from_numpy(self.reserve_vectors[base_idx].copy()),
             torch.from_numpy(policy),
             torch.tensor(self.value_targets[base_idx], dtype=torch.float32),
-            torch.tensor(self.weights[base_idx], dtype=torch.float32),
             torch.tensor(self.value_only[base_idx], dtype=torch.bool),
             torch.tensor(self.policy_only[base_idx], dtype=torch.bool),
             torch.from_numpy(aux_targets),
@@ -199,12 +195,11 @@ class Trainer:
         num_batches = 0
 
         device_type = self.device.type
-        for board, reserve, policy_target, value_target, weight, vo_mask, po_mask, aux_target in tqdm(loader, desc="  Training", leave=False, unit="batch"):
+        for board, reserve, policy_target, value_target, vo_mask, po_mask, aux_target in tqdm(loader, desc="  Training", leave=False, unit="batch"):
             board = board.to(self.device)
             reserve = reserve.to(self.device)
             policy_target = policy_target.to(self.device)
             value_target = value_target.to(self.device).unsqueeze(1)
-            weight = weight.to(self.device)
             vo_mask = vo_mask.to(self.device)
             po_mask = po_mask.to(self.device)
             aux_target = aux_target.to(self.device)  # (batch, 6)
@@ -235,12 +230,12 @@ class Trainer:
             per_sample_policy = soft_ce(place_logits, place_target) \
                                + soft_ce(src_logits, src_target) \
                                + soft_ce(dst_logits, dst_target)
-            policy_weight = weight * (~vo_mask).float()
+            policy_weight = (~vo_mask).float()
             policy_loss = (per_sample_policy * policy_weight).mean()
 
-            # Value loss: weighted MSE, masked for policy-only samples (zero-heuristic draws)
+            # Value loss: MSE, masked for policy-only samples (zero-heuristic draws)
             per_sample_value = (value.squeeze(1) - value_target.squeeze(1)) ** 2
-            value_weight = weight * (~po_mask).float()
+            value_weight = (~po_mask).float()
             value_loss = (per_sample_value * value_weight).mean()
 
             # Auxiliary losses: MSE on all 6 outputs, always active

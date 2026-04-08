@@ -27,7 +27,6 @@ pub struct PyTTTSelfPlayResult {
     board_data: Vec<f32>,
     policy_data: Vec<f32>,
     value_targets: Vec<f32>,
-    weights: Vec<f32>,
     value_only_flags: Vec<bool>,
     num_samples: usize,
     board_flat: usize,
@@ -45,11 +44,10 @@ pub struct PyTTTSelfPlayResult {
 
 #[pymethods]
 impl PyTTTSelfPlayResult {
-    /// Returns (boards, policies, values, weights, value_only)
+    /// Returns (boards, policies, values, value_only)
     fn training_data<'py>(&self, py: Python<'py>) -> (
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
-        Bound<'py, PyArray1<f32>>,
         Bound<'py, PyArray1<f32>>,
         Vec<bool>,
     ) {
@@ -62,12 +60,10 @@ impl PyTTTSelfPlayResult {
             (n, POLICY_SIZE), self.policy_data.clone(),
         ).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
-        let weights = numpy::ndarray::Array1::from(self.weights.clone());
         (
             PyArray2::from_owned_array_bound(py, boards),
             PyArray2::from_owned_array_bound(py, policies),
             PyArray1::from_owned_array_bound(py, values),
-            PyArray1::from_owned_array_bound(py, weights),
             self.value_only_flags.clone(),
         )
     }
@@ -343,7 +339,6 @@ impl PyTTTSelfPlaySession {
         let mut result_board_data: Vec<f32> = Vec::new();
         let mut result_policy_data: Vec<f32> = Vec::new();
         let mut result_value_targets: Vec<f32> = Vec::new();
-        let mut result_weights: Vec<f32> = Vec::new();
         let mut result_value_only: Vec<bool> = Vec::new();
         let mut num_samples = 0usize;
 
@@ -392,7 +387,6 @@ impl PyTTTSelfPlaySession {
                 );
                 result_policy_data.extend_from_slice(&record.policy_vector);
                 result_value_targets.push(value);
-                result_weights.push(1.0);
                 result_value_only.push(record.is_value_only);
                 num_samples += 1;
             }
@@ -402,7 +396,6 @@ impl PyTTTSelfPlaySession {
             board_data: result_board_data,
             policy_data: result_policy_data,
             value_targets: result_value_targets,
-            weights: result_weights,
             value_only_flags: result_value_only,
             num_samples,
             board_flat: bf,

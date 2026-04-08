@@ -273,13 +273,12 @@ class SelfPlayTrainer:
                 print(f"  Playout cap: {fs}/{tt} full-search turns ({pct:.0f}%)")
 
             buf_start = time.time()
-            boards, reserves, policies, values, weights, value_only, capture_turn, mid_capture_turn = result.training_data()
+            boards, reserves, policies, values, value_only, capture_turn, mid_capture_turn = result.training_data()
             dataset.add_batch(
                 board_tensors=np.array(boards),
                 reserve_vectors=np.array(reserves),
                 policy_targets=np.array(policies),
                 value_targets=np.array(values),
-                weights=np.array(weights),
                 value_only=list(value_only),
                 capture_turn=list(capture_turn),
                 mid_capture_turn=list(mid_capture_turn),

@@ -294,10 +294,10 @@ class SelfPlayTrainer:
 
             # Insert training data into replay buffer
             buf_start = time.time()
-            (boards, reserves, policies, values, weights, value_only_flags, policy_only_flags,
+            (boards, reserves, policies, values, value_only_flags, policy_only_flags,
              aux_targets) = result.training_data()
             # aux_targets is [N, 6]: [my_qd, opp_qd, my_qe, opp_qe, my_mob, opp_mob]
-            replay_buffer.add_batch(boards, reserves, policies, values, weights,
+            replay_buffer.add_batch(boards, reserves, policies, values,
                                     value_only_flags, policy_only_flags,
                                     my_queen_danger=aux_targets[:, 0],
                                     opp_queen_danger=aux_targets[:, 1],

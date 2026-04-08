@@ -48,12 +48,10 @@ class TicTacToeDataset(Dataset):
         self.board_tensors = np.zeros((max_size, self.num_channels, GRID_SIZE, GRID_SIZE), dtype=np.float32)
         self.policy_targets = np.zeros((max_size, POLICY_SIZE), dtype=np.float32)
         self.value_targets = np.zeros(max_size, dtype=np.float32)
-        self.weights = np.ones(max_size, dtype=np.float32)
         self.value_only = np.zeros(max_size, dtype=np.bool_)
 
     def add_batch(self, board_tensors: np.ndarray, policy_targets: np.ndarray,
-                  value_targets: np.ndarray, weights: np.ndarray,
-                  value_only: list[bool]):
+                  value_targets: np.ndarray, value_only: list[bool]):
         n = board_tensors.shape[0]
         boards = board_tensors.reshape(n, self.num_channels, GRID_SIZE, GRID_SIZE)
         perms = _SYMMETRY_MAPS if self.augment_symmetry else [_SYMMETRY_MAPS[0]]  # identity only
@@ -70,7 +68,6 @@ class TicTacToeDataset(Dataset):
                 for src, dst in enumerate(perm):
                     self.policy_targets[idx, dst] = policy_targets[i, src]
                 self.value_targets[idx] = value_targets[i]
-                self.weights[idx] = weights[i]
                 self.value_only[idx] = value_only[i]
                 self._count += 1
                 self._size = min(self._size + 1, self.max_size)
@@ -86,9 +83,8 @@ class TicTacToeDataset(Dataset):
         board = torch.from_numpy(self.board_tensors[idx].copy())
         policy = torch.from_numpy(self.policy_targets[idx].copy())
         value = torch.tensor(self.value_targets[idx], dtype=torch.float32)
-        weight = torch.tensor(self.weights[idx], dtype=torch.float32)
         vo = self.value_only[idx]
-        return board, policy, value, weight, vo
+        return board, policy, value, vo
 
 
 class Trainer:
@@ -117,11 +113,10 @@ class Trainer:
         total_value_loss = 0.0
         total_samples = 0
 
-        for board, policy_target, value_target, weight, value_only in loader:
+        for board, policy_target, value_target, value_only in loader:
             board = board.to(self.device)
             policy_target = policy_target.to(self.device)
             value_target = value_target.to(self.device)
-            weight = weight.to(self.device)
             value_only_mask = torch.as_tensor(value_only, dtype=torch.bool).to(self.device)
 
             policy_logits, value = self.model(board)
@@ -132,12 +127,12 @@ class Trainer:
             policy_loss_per = -(policy_target * log_probs).sum(dim=1)
             policy_mask = ~value_only_mask
             if policy_mask.any():
-                policy_loss = (policy_loss_per * weight * policy_mask.float()).sum() / (weight * policy_mask.float()).sum()
+                policy_loss = policy_loss_per[policy_mask].mean()
             else:
                 policy_loss = torch.tensor(0.0, device=self.device)
 
             # Value loss: MSE
-            value_loss = (weight * (value - value_target) ** 2).mean()
+            value_loss = ((value - value_target) ** 2).mean()
 
             loss = policy_loss + value_loss_scale * value_loss
 

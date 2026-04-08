@@ -65,7 +65,6 @@ class ZertzDataset(Dataset):
         self.reserve_vectors = np.zeros((max_size, RESERVE_SIZE), dtype=np.float32)
         self.policy_targets = np.zeros((max_size, POLICY_SIZE), dtype=np.float32)
         self.value_targets = np.zeros(max_size, dtype=np.float32)
-        self.weights = np.ones(max_size, dtype=np.float32)
         self.value_only = np.zeros(max_size, dtype=np.bool_)
         self.capture_turn = np.zeros(max_size, dtype=np.bool_)
         self.mid_capture_turn = np.zeros(max_size, dtype=np.bool_)
@@ -73,7 +72,7 @@ class ZertzDataset(Dataset):
 
     def add_batch(self, board_tensors: np.ndarray, reserve_vectors: np.ndarray,
                   policy_targets: np.ndarray, value_targets: np.ndarray,
-                  weights: np.ndarray, value_only: list[bool],
+                  value_only: list[bool],
                   capture_turn: list[bool] | None = None,
                   mid_capture_turn: list[bool] | None = None):
         n = board_tensors.shape[0]
@@ -84,7 +83,6 @@ class ZertzDataset(Dataset):
             self.reserve_vectors[idx] = reserve_vectors[i]
             self.policy_targets[idx] = policy_targets[i]
             self.value_targets[idx] = value_targets[i]
-            self.weights[idx] = weights[i]
             self.value_only[idx] = value_only[i]
             self.capture_turn[idx] = capture_turn[i] if capture_turn is not None else False
             self.mid_capture_turn[idx] = mid_capture_turn[i] if mid_capture_turn is not None else False
@@ -137,7 +135,6 @@ class ZertzDataset(Dataset):
             torch.from_numpy(self.reserve_vectors[base_idx].copy()),
             torch.from_numpy(policy),
             torch.tensor(self.value_targets[base_idx], dtype=torch.float32),
-            torch.tensor(self.weights[base_idx], dtype=torch.float32),
             torch.tensor(self.value_only[base_idx], dtype=torch.bool),
             torch.tensor(self.capture_turn[base_idx], dtype=torch.bool),
             torch.tensor(self.mid_capture_turn[base_idx], dtype=torch.bool),
@@ -237,13 +234,12 @@ class Trainer:
 
         gi = self._hex_to_grid
         device_type = self.device.type
-        for board, reserve, policy_target, value_target, weight, vo_mask, cap_mask, mid_cap_mask in tqdm(
+        for board, reserve, policy_target, value_target, vo_mask, cap_mask, mid_cap_mask in tqdm(
                 loader, desc="  Training", leave=False, unit="batch"):
             board = board.to(self.device)
             reserve = reserve.to(self.device)
             policy_target = policy_target.to(self.device)
             value_target = value_target.to(self.device).unsqueeze(1)
-            weight = weight.to(self.device)
             vo_mask = vo_mask.to(self.device)
             cap_mask = cap_mask.to(self.device)
             mid_cap_mask = mid_cap_mask.to(self.device)
@@ -255,7 +251,7 @@ class Trainer:
             place_cp_t, place_rm_t, src_t, dst_t = _marginalize_policy(policy_target, gi)
 
             # --- Policy loss ---
-            policy_mask = (~vo_mask).float() * weight
+            policy_mask = (~vo_mask).float()
             policy_loss = torch.tensor(0.0, device=self.device)
 
             # Place turns: train place color/position (ch 0-2) and remove (ch 3) heads
@@ -299,15 +295,15 @@ class Trainer:
 
             # --- Value loss ---
             per_sample_value = (value.squeeze(1) - value_target.squeeze(1)) ** 2
-            value_loss = (per_sample_value * weight).mean()
+            value_loss = per_sample_value.mean()
 
             # --- Split logging ---
             place_mask = ~cap_mask
             if place_mask.any():
-                total_place_value_loss += (per_sample_value[place_mask] * weight[place_mask]).mean().item()
+                total_place_value_loss += per_sample_value[place_mask].mean().item()
                 place_value_batches += 1
             if cap_mask.any():
-                total_capture_value_loss += (per_sample_value[cap_mask] * weight[cap_mask]).mean().item()
+                total_capture_value_loss += per_sample_value[cap_mask].mean().item()
                 capture_value_batches += 1
 
             # Track per-type policy loss for logging

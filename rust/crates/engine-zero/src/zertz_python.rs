@@ -92,7 +92,6 @@ pub struct PyZertzSelfPlayResult {
     reserve_data: Vec<f32>,
     policy_data: Vec<f32>,
     value_targets: Vec<f32>,
-    weights: Vec<f32>,
     value_only_flags: Vec<bool>,
     capture_turn_flags: Vec<bool>,
     mid_capture_turn_flags: Vec<bool>,
@@ -117,12 +116,11 @@ pub struct PyZertzSelfPlayResult {
 
 #[pymethods]
 impl PyZertzSelfPlayResult {
-    /// Returns (boards, reserves, policies, values, weights, value_only, capture_turn, mid_capture_turn)
+    /// Returns (boards, reserves, policies, values, value_only, capture_turn, mid_capture_turn)
     fn training_data<'py>(&self, py: Python<'py>) -> (
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
-        Bound<'py, PyArray1<f32>>,
         Bound<'py, PyArray1<f32>>,
         Vec<bool>,
         Vec<bool>,
@@ -139,13 +137,11 @@ impl PyZertzSelfPlayResult {
             (n, POLICY_SIZE), self.policy_data.clone(),
         ).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
-        let weights = numpy::ndarray::Array1::from(self.weights.clone());
         (
             PyArray2::from_owned_array_bound(py, boards),
             PyArray2::from_owned_array_bound(py, reserves),
             PyArray2::from_owned_array_bound(py, policies),
             PyArray1::from_owned_array_bound(py, values),
-            PyArray1::from_owned_array_bound(py, weights),
             self.value_only_flags.clone(),
             self.capture_turn_flags.clone(),
             self.mid_capture_turn_flags.clone(),
@@ -569,7 +565,6 @@ impl PyZertzSelfPlaySession {
         let mut reserve_data = Vec::with_capacity(total_samples * RESERVE_SIZE);
         let mut policy_data = Vec::with_capacity(total_samples * POLICY_SIZE);
         let mut value_targets = Vec::with_capacity(total_samples);
-        let mut weights = Vec::with_capacity(total_samples);
         let mut value_only_flags = Vec::with_capacity(total_samples);
         let mut capture_turn_flags = Vec::with_capacity(total_samples);
         let mut mid_capture_turn_flags = Vec::with_capacity(total_samples);
@@ -591,7 +586,6 @@ impl PyZertzSelfPlaySession {
                     _ => 0.0f32,
                 };
                 value_targets.push(value);
-                weights.push(1.0f32);
                 value_only_flags.push(record.is_value_only);
                 capture_turn_flags.push(record.is_capture_turn);
                 mid_capture_turn_flags.push(record.is_mid_capture_turn);
@@ -603,7 +597,6 @@ impl PyZertzSelfPlaySession {
             reserve_data,
             policy_data,
             value_targets,
-            weights,
             value_only_flags,
             capture_turn_flags,
             mid_capture_turn_flags,

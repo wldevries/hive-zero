@@ -229,12 +229,11 @@ class SelfPlayTrainer:
                 print(f"  Game length:  min={mn}  avg={avg:.1f}  med={med}  max={mx}")
 
             # Add to replay buffer
-            boards, policies, values, weights, value_only = result.training_data()
+            boards, policies, values, value_only = result.training_data()
             dataset.add_batch(
                 board_tensors=np.array(boards),
                 policy_targets=np.array(policies),
                 value_targets=np.array(values),
-                weights=np.array(weights),
                 value_only=list(value_only),
             )
 

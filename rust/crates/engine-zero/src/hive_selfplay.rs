@@ -21,8 +21,6 @@ use rand::Rng;
 use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
 
-const DECISIVE_WEIGHT: f32 = 10.0;
-
 
 /// Wraps either a Python eval callback or a native engine (ORT, tract, …).
 enum InferenceBackend<'py> {
@@ -202,7 +200,6 @@ pub struct PySelfPlayResult {
     reserve_data: Vec<f32>, // [total_samples * RESERVE_SIZE]
     policy_data: Vec<f32>,  // [total_samples * policy_size]
     value_targets: Vec<f32>,
-    weights: Vec<f32>,
     value_only_flags: Vec<bool>,
     policy_only_flags: Vec<bool>,
     my_queen_danger: Vec<f32>,   // [total_samples] auxiliary target
@@ -234,14 +231,12 @@ pub struct PySelfPlayResult {
 impl PySelfPlayResult {
     /// Get training data as numpy arrays.
     /// Returns (boards[N,C,H,W], reserves[N,10], policies[N,5819],
-    ///          values[N], weights[N], value_only[N], policy_only[N],
-    ///          aux_targets[N,6])
+    ///          values[N], value_only[N], policy_only[N], aux_targets[N,6])
     /// aux_targets columns: [my_qd, opp_qd, my_qe, opp_qe, my_mob, opp_mob]
     fn training_data<'py>(&self, py: Python<'py>) -> (
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
-        Bound<'py, PyArray1<f32>>,
         Bound<'py, PyArray1<f32>>,
         Vec<bool>,
         Vec<bool>,
@@ -260,7 +255,6 @@ impl PySelfPlayResult {
             (n, ps), self.policy_data.clone(),
         ).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
-        let weights = numpy::ndarray::Array1::from(self.weights.clone());
 
         // Pack all auxiliary targets into a single [N, 6] array
         let mut aux_data = Vec::with_capacity(n * 6);
@@ -279,7 +273,6 @@ impl PySelfPlayResult {
             PyArray2::from_owned_array_bound(py, reserves),
             PyArray2::from_owned_array_bound(py, policies),
             PyArray1::from_owned_array_bound(py, values),
-            PyArray1::from_owned_array_bound(py, weights),
             self.value_only_flags.clone(),
             self.policy_only_flags.clone(),
             PyArray2::from_owned_array_bound(py, aux),
@@ -855,7 +848,6 @@ impl PySelfPlaySession {
         let mut result_reserve_data: Vec<f32> = Vec::new();
         let mut result_policy_data: Vec<f32> = Vec::new();
         let mut result_value_targets: Vec<f32> = Vec::new();
-        let mut result_weights: Vec<f32> = Vec::new();
         let mut result_value_only: Vec<bool> = Vec::new();
         let mut result_policy_only: Vec<bool> = Vec::new();
         let mut result_my_queen_danger: Vec<f32> = Vec::new();
@@ -896,7 +888,6 @@ impl PySelfPlaySession {
                 continue;
             }
 
-            let weight = if decisive { DECISIVE_WEIGHT } else { 1.0 };
             // Skip value training for timeout games with zero heuristic (balanced position,
             // no meaningful signal for the value head).
             let policy_only = !decisive && outcome_w == 0.0;
@@ -913,7 +904,6 @@ impl PySelfPlaySession {
                 result_reserve_data.extend_from_slice(reserve);
                 result_policy_data.extend_from_slice(&record.policy_vector);
                 result_value_targets.push(value);
-                result_weights.push(weight);
                 result_value_only.push(record.is_value_only);
                 result_policy_only.push(policy_only);
                 result_my_queen_danger.push(record.my_queen_danger);
@@ -947,7 +937,6 @@ impl PySelfPlaySession {
             reserve_data: result_reserve_data,
             policy_data: result_policy_data,
             value_targets: result_value_targets,
-            weights: result_weights,
             value_only_flags: result_value_only,
             policy_only_flags: result_policy_only,
             my_queen_danger: result_my_queen_danger,
