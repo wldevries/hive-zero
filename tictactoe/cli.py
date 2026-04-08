@@ -25,7 +25,8 @@ def main():
     train_parser.add_argument("--channels", type=int, default=32)
     train_parser.add_argument("--history", type=int, default=1,
                               help="Number of board history steps to encode (1=current only, up to 8)")
-    train_parser.add_argument("--lr", type=float, default=0.005)
+    train_parser.add_argument("--lr", type=float, default=0.001)
+    train_parser.add_argument("--optimizer", type=str, default="sgd", choices=["adam", "sgd"])
     train_parser.add_argument(
         "--lr-schedule", type=str, default=None,
         help="Stepped LR schedule as iter:lr pairs, e.g. '0:0.1,20:0.02,40:0.01'. Overrides --lr."
@@ -45,6 +46,8 @@ def main():
     train_parser.add_argument("--dir-epsilon", type=float, default=0.25)
     train_parser.add_argument("--comment", type=str, default="")
     train_parser.add_argument("--value-loss-scale", type=float, default=1.0)
+    train_parser.add_argument("--augment-symmetry", action="store_true",
+                              help="Apply 8-fold symmetry augmentation during training")
 
     # Play mode
     play_parser = subparsers.add_parser("play", help="Play against the AI")
@@ -80,6 +83,7 @@ def main():
             lr_scheduler=lr_scheduler,
             checkpoint_dir=args.checkpoint_dir,
             history_length=args.history,
+            optimizer=args.optimizer,
         )
         trainer.run(
             num_generations=args.generations,
@@ -100,6 +104,7 @@ def main():
             time_limit_minutes=args.time_limit,
             comment=args.comment,
             value_loss_scale=args.value_loss_scale,
+            augment_symmetry=args.augment_symmetry,
         )
     else:
         parser.print_help()

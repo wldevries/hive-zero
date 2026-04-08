@@ -53,6 +53,7 @@ class SelfPlayTrainer:
         lr_scheduler: Optional[LRScheduler] = None,
         checkpoint_dir: str = "checkpoints/tictactoe",
         history_length: int = 1,
+        optimizer: str = "adam",
     ):
         self.model_path = model_path
         self.model_name = os.path.splitext(os.path.basename(model_path))[0]
@@ -81,7 +82,7 @@ class SelfPlayTrainer:
 
         self.model.to(device)
         self.lr_scheduler = lr_scheduler
-        self.trainer = Trainer(model=self.model, device=device, lr=lr)
+        self.trainer = Trainer(model=self.model, device=device, lr=lr, optimizer=optimizer)
 
     def _eval_fn(self, board_tensor_np):
         """NN inference callback for Rust self-play.
@@ -116,6 +117,7 @@ class SelfPlayTrainer:
         time_limit_minutes: Optional[float] = None,
         comment: str = "",
         value_loss_scale: float = 1.0,
+        augment_symmetry: bool = False,
     ):
         from engine_zero import TTTSelfPlaySession
 
@@ -124,8 +126,10 @@ class SelfPlayTrainer:
             with open(log_path, "w") as f:
                 f.write(LOG_HEADER)
 
-        max_buffer = games_per_gen * max_moves * replay_window * 8  # 8 symmetries
+        sym_factor = 8 if augment_symmetry else 1
+        max_buffer = games_per_gen * max_moves * replay_window * sym_factor
         dataset = TicTacToeDataset(max_size=max_buffer, history_length=self.history_length)
+        dataset.augment_symmetry = augment_symmetry
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
         train_params = {

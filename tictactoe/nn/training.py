@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from tqdm import tqdm
 
-from .model import CHANNELS_PER_STEP, GRID_SIZE, POLICY_SIZE
+from .model import CHANNELS_PER_STEP, GRID_SIZE, POLICY_SIZE, TicTacToeNet
 
 
 def _build_symmetry_index_maps():
@@ -43,6 +43,7 @@ class TicTacToeDataset(Dataset):
         self.max_size = max_size
         self._count = 0
         self._size = 0
+        self.augment_symmetry = False
         self.num_channels = CHANNELS_PER_STEP * history_length
         self.board_tensors = np.zeros((max_size, self.num_channels, GRID_SIZE, GRID_SIZE), dtype=np.float32)
         self.policy_targets = np.zeros((max_size, POLICY_SIZE), dtype=np.float32)
@@ -55,8 +56,9 @@ class TicTacToeDataset(Dataset):
                   value_only: list[bool]):
         n = board_tensors.shape[0]
         boards = board_tensors.reshape(n, self.num_channels, GRID_SIZE, GRID_SIZE)
+        perms = _SYMMETRY_MAPS if self.augment_symmetry else [_SYMMETRY_MAPS[0]]  # identity only
         for i in range(n):
-            for perm in _SYMMETRY_MAPS:
+            for perm in perms:
                 idx = self._count % self.max_size
                 # Apply symmetry to board (each channel is a 3x3 grid)
                 for ch in range(self.num_channels):
@@ -90,12 +92,15 @@ class TicTacToeDataset(Dataset):
 
 
 class Trainer:
-    """SGD trainer for TicTacToeNet."""
+    """Trainer for TicTacToeNet."""
 
-    def __init__(self, model, device: str = "cpu", lr: float = 0.02):
+    def __init__(self, model: TicTacToeNet, device: str = "cpu", lr: float = 0.02, optimizer: str = "sgd"):
         self.model = model
         self.device = torch.device(device)
-        self.optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
+        if optimizer == "sgd":
+            self.optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
+        else:
+            self.optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
 
     @property
     def _current_lr(self):
