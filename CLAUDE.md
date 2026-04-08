@@ -15,17 +15,35 @@ hive/
   selfplay/    - Self-play training loop (Rust-only, no Python MCTS)
     selfplay.py       - SelfPlayTrainer orchestrator, playout cap randomization
     rust_selfplay.py  - RustParallelSelfPlay (rayon-parallel batched MCTS, playout cap)
-rust/
-  src/         - Rust game engine (PyO3 extension module `engine_zero`)
-    board.rs          - Board state, 23x23 grid, hex-to-grid conversion
-    board_encoding.rs - Board tensor encoding (mirrors hive/encoding/)
-    game.rs           - Game state, move application, undo, heuristic evaluation
-    hex.rs            - Axial hex coordinates, directions
-    move_encoding.rs  - Move-to-policy-index encoding (mirrors hive/encoding/)
-    mcts/             - Rust MCTS (search, arena allocator, nodes)
-    piece.rs          - Piece types and colors
-    python.rs         - PyO3 bindings: RustGame, RustBatchMCTS
-    rules.rs          - Movement rules per piece type
+rust/crates/
+  core-game/src/       - Game abstractions and shared Rust logic
+    game.rs            - Game/NNGame/Outcome traits
+    hex.rs             - Axial hex coordinates, directions
+    mcts/              - MCTS (search, arena allocator, nodes)
+    symmetry.rs        - D6 symmetry transforms
+    sgf.rs             - SGF parsing utilities
+  hive-game/src/       - Hive-specific game logic
+    board.rs           - Board state, 23x23 grid, hex-to-grid conversion
+    board_encoding.rs  - Board tensor encoding (mirrors hive/encoding/)
+    game.rs            - Game state, move application, undo, heuristic evaluation
+    move_encoding.rs   - Move-to-policy-index encoding (mirrors hive/encoding/)
+    piece.rs           - Piece types and colors
+    rules.rs           - Movement rules per piece type
+    uhp.rs             - UHP move formatting/parsing
+    sgf.rs             - SGF replay
+  tictactoe-game/src/  - TicTacToe game logic (AlphaZero pipeline validation)
+    game.rs            - TicTacToe board, encoding, move types
+  zertz-game/src/      - Zertz game logic
+    zertz.rs           - Board, rules, move types
+    board_encoding.rs  - Board tensor encoding
+    move_encoding.rs   - Factorized policy encoding
+  engine-zero/src/     - PyO3 extension module `engine_zero`
+    hive_python.rs     - PyO3 bindings: HiveGame (includes best_move MCTS loop)
+    hive_selfplay.rs   - Hive self-play session (parallel MCTS, Python inference callback)
+    tictactoe_python.rs - PyO3 bindings: TTTSelfPlaySession, TTTGame
+    zertz_python.rs    - PyO3 bindings: ZertzGame
+    inference.rs       - Shared inference helpers
+    lib.rs             - Module registration
 ```
 
 ## Key Design Decisions
