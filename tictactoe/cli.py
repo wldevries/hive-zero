@@ -41,8 +41,8 @@ def main():
     train_parser.add_argument("--temp-threshold", type=int, default=5,
                               help="Move number after which temperature drops to 0 (default: 5)")
     train_parser.add_argument("--c-puct", type=float, default=1.5)
-    train_parser.add_argument("--dir-alpha", type=float, default=0.5,
-                              help="Dirichlet noise alpha (default: 0.5)")
+    train_parser.add_argument("--dir-alpha", type=float, default=0.3,
+                              help="Dirichlet noise alpha (default: 0.3)")
     train_parser.add_argument("--dir-epsilon", type=float, default=0.25)
     train_parser.add_argument("--comment", type=str, default="")
     train_parser.add_argument("--value-loss-scale", type=float, default=1.0)
