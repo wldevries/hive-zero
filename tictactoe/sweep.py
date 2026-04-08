@@ -21,13 +21,14 @@ import numpy as np
 @dataclass
 class Experiment:
     """A single hyperparameter configuration to test."""
+
     name: str
     simulations: int = 100
     games: int = 200
     lr: float = 0.001
     optimizer: str = "sgd"
     temperature: float = 1.0
-    temp_threshold: int = 9
+    temp_threshold: int = 4
     c_puct: float = 1.5
     dir_alpha: float = 0.5
     dir_epsilon: float = 0.25
@@ -35,7 +36,7 @@ class Experiment:
     value_loss_scale: float = 1.0
     blocks: int = 2
     channels: int = 32
-    augment_symmetry: bool = False
+    augment_symmetry: bool = True
 
 
 def build_sweep() -> list[Experiment]:
@@ -44,27 +45,22 @@ def build_sweep() -> list[Experiment]:
     Full grid over the axes most likely to matter.
     No fixed baseline — every combination is tested so the best
     combo becomes the new default.
-
-    2 × 2 × 2 × 2 = 16 experiments.
     """
     experiments: list[Experiment] = []
 
     for sims in [200, 800]:
         for blocks, channels in [(2, 32), (4, 64)]:
             for replay in [1, 3]:
-                for dir_eps in [0.0, 0.25]:
-                    name = (
-                        f"s{sims}_b{blocks}c{channels}"
-                        f"_r{replay}_d{dir_eps}"
-                    )
-                    experiments.append(Experiment(
+                name = f"s{sims}_b{blocks}c{channels}_r{replay}"
+                experiments.append(
+                    Experiment(
                         name=name,
                         simulations=sims,
                         blocks=blocks,
                         channels=channels,
                         replay_window=replay,
-                        dir_epsilon=dir_eps,
-                    ))
+                    )
+                )
 
     return experiments
 
@@ -146,7 +142,7 @@ def summarize_sweep(sweep_dir: str):
         # Check stability: draw rate over windows of 5 gens
         draw_rates_over_time = []
         for i in range(0, len(gens), 5):
-            chunk = gens[i:i+5]
+            chunk = gens[i : i + 5]
             if chunk:
                 cg = sum(int(g["games"]) for g in chunk)
                 cd = sum(int(g["draws"]) for g in chunk)
@@ -155,16 +151,18 @@ def summarize_sweep(sweep_dir: str):
         # Stability = std of draw rates over 5-gen windows
         stability = np.std(draw_rates_over_time) if len(draw_rates_over_time) > 1 else 0
 
-        results.append({
-            "name": name,
-            "draw_pct": draw_pct,
-            "p1_pct": p1_pct,
-            "p2_pct": p2_pct,
-            "vloss": avg_vloss,
-            "ploss": avg_ploss,
-            "stability": stability,
-            "num_gens": len(gens),
-        })
+        results.append(
+            {
+                "name": name,
+                "draw_pct": draw_pct,
+                "p1_pct": p1_pct,
+                "p2_pct": p2_pct,
+                "vloss": avg_vloss,
+                "ploss": avg_ploss,
+                "stability": stability,
+                "num_gens": len(gens),
+            }
+        )
 
     # Sort by draw rate (higher is better for TTT)
     results.sort(key=lambda r: r["draw_pct"], reverse=True)
@@ -179,20 +177,34 @@ def summarize_sweep(sweep_dir: str):
             f"{r['vloss']:>8.4f} {r['ploss']:>8.4f} {r['stability']:>5.1f}% {r['num_gens']:>5}"
         )
 
-    print(f"\n(Draws%/P1%/P2% = last 10 gens. Stab = std of draw% over 5-gen windows, lower=more stable)")
+    print(
+        f"\n(Draws%/P1%/P2% = last 10 gens. Stab = std of draw% over 5-gen windows, lower=more stable)"
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Tic-Tac-Toe hyperparameter sweep")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--gens", type=int, default=50, help="Generations per experiment")
-    parser.add_argument("--sweep-dir", type=str, default="sweep_ttt",
-                        help="Directory for sweep outputs")
-    parser.add_argument("--dry-run", action="store_true", help="Print experiments without running")
-    parser.add_argument("--only", type=str, default=None,
-                        help="Run only experiments matching this substring")
-    parser.add_argument("--summary-only", action="store_true",
-                        help="Only print summary of existing results")
+    parser.add_argument(
+        "--gens", type=int, default=50, help="Generations per experiment"
+    )
+    parser.add_argument(
+        "--sweep-dir", type=str, default="sweep_ttt", help="Directory for sweep outputs"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print experiments without running"
+    )
+    parser.add_argument(
+        "--only",
+        type=str,
+        default=None,
+        help="Run only experiments matching this substring",
+    )
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Only print summary of existing results",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.sweep_dir, exist_ok=True)
@@ -208,10 +220,12 @@ def main():
 
     print(f"Sweep: {len(experiments)} experiments, {args.gens} generations each\n")
     for i, exp in enumerate(experiments):
-        print(f"  [{i+1:2d}] {exp.name:<25} sims={exp.simulations} lr={exp.lr} "
-              f"cpuct={exp.c_puct} dir_eps={exp.dir_epsilon} "
-              f"replay={exp.replay_window} vls={exp.value_loss_scale} "
-              f"sym={exp.augment_symmetry}")
+        print(
+            f"  [{i + 1:2d}] {exp.name:<25} sims={exp.simulations} lr={exp.lr} "
+            f"cpuct={exp.c_puct} dir_eps={exp.dir_epsilon} "
+            f"replay={exp.replay_window} vls={exp.value_loss_scale} "
+            f"sym={exp.augment_symmetry}"
+        )
 
     if args.dry_run:
         print("\n(dry run — not executing)")
@@ -223,13 +237,16 @@ def main():
         log_path = os.path.join(args.sweep_dir, f"{exp.name}_log.csv")
         if os.path.exists(log_path):
             import csv
+
             with open(log_path) as f:
                 existing_gens = sum(1 for _ in csv.DictReader(f))
             if existing_gens >= args.gens:
-                print(f"\n>>> [{i+1}/{len(experiments)}] {exp.name} — already done ({existing_gens} gens), skipping")
+                print(
+                    f"\n>>> [{i + 1}/{len(experiments)}] {exp.name} — already done ({existing_gens} gens), skipping"
+                )
                 continue
 
-        print(f"\n>>> [{i+1}/{len(experiments)}] Running: {exp.name}")
+        print(f"\n>>> [{i + 1}/{len(experiments)}] Running: {exp.name}")
         t0 = time.time()
 
         # Override model log path so it writes to sweep dir
