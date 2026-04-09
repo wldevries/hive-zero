@@ -115,7 +115,7 @@ class TestDatasetAugmentation:
     def test_augment_preserves_shapes(self):
         ds = self._make_dataset()
         ds.augment_symmetry = True
-        b, rv, p, v, w, vo, po, aux = ds[0]
+        b, rv, p, v, vo, po, aux = ds[0]
         assert b.shape == (NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
         assert p.shape == (POLICY_SIZE,)
         assert rv.shape == (RESERVE_SIZE,)
