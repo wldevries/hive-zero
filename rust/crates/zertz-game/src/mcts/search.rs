@@ -405,7 +405,7 @@ impl MctsSearch {
     ) {
         for (i, &leaf) in leaves.iter().enumerate() {
             expand_with_policy(&mut self.arena, leaf, &heads_list[i]);
-            let mut value = values[i];
+            let value = values[i];
             correct_virtual_loss(&mut self.arena, leaf, value);
         }
     }
