@@ -1,7 +1,7 @@
 [package]
 name = "engine-zero"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 name = "engine_zero"
@@ -15,6 +15,5 @@ tictactoe-game = { path = "../tictactoe-game" }
 pyo3 = { version = "0.22", features = ["extension-module"] }
 numpy = "0.22"
 rand = { workspace = true }
-rand_distr = { workspace = true }
 rayon = "1.10"
 ort = { version = "2.0.0-rc.12", features = ["load-dynamic", "cuda", "qnn", "api-22"] }

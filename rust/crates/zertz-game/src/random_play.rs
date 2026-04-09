@@ -1,7 +1,7 @@
 //! Random game simulation for testing game rules.
 
 use core_game::game::{Game, Outcome, Player};
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom;
 use crate::zertz::ZertzBoard;
 
 #[derive(Debug)]
@@ -65,7 +65,7 @@ pub fn run_game(rng: &mut impl rand::Rng) -> GameResult {
 }
 
 pub fn run_random_games(n: u32) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let mut wins_a = 0u32;
     let mut wins_b = 0u32;

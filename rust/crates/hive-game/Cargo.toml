@@ -1,12 +1,11 @@
 [package]
 name = "hive-game"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 core-game = { path = "../core-game" }
 rand = { workspace = true }
-rand_distr = { workspace = true }
 zip = "2"
 clap = { workspace = true }
 

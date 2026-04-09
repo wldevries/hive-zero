@@ -88,7 +88,8 @@ fn prepend_qnn_dir_to_path() {
         let dir_str = dir.to_string_lossy();
         let current = std::env::var("PATH").unwrap_or_default();
         if !current.contains(dir_str.as_ref()) {
-            std::env::set_var("PATH", format!("{};{}", dir_str, current));
+            // SAFETY: single-threaded startup, before any threads are spawned
+            unsafe { std::env::set_var("PATH", format!("{};{}", dir_str, current)); }
         }
     }
 }

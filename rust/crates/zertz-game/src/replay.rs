@@ -914,8 +914,8 @@ pub fn run_playback(games_path: &str, auto_ms: Option<u64>) {
     }
 
     // Pick one at random.
-    use rand::seq::SliceRandom;
-    let mut rng = rand::thread_rng();
+    use rand::seq::IndexedRandom;
+    let mut rng = rand::rng();
     let (sgf_name, record) = all_games.choose(&mut rng).unwrap();
     println!("Game: {sgf_name}");
     println!("  {} vs {}  result: {}", record.player0, record.player1, record.result);

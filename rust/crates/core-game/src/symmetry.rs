@@ -9,7 +9,7 @@
 /// - `inverse()` satisfies `compose(s, s.inverse()) == identity()`
 /// - `all()` returns every element exactly once
 
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom;
 use rand::Rng;
 
 pub trait Symmetry: 'static + Default + Copy + Clone + Eq + std::fmt::Debug + Send + Sync {

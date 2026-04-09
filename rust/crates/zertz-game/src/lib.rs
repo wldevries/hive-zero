@@ -4,5 +4,6 @@ pub mod mcts;
 pub mod move_encoding;
 pub mod random_play;
 pub mod replay;
+pub mod search;
 pub mod sgf;
 pub mod zertz;

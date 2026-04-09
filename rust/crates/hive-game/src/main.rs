@@ -307,7 +307,7 @@ fn run_mcts(simulations: u32, batch_size: usize) {
 // ---------------------------------------------------------------------------
 
 fn run_random(n: u32) {
-    use rand::Rng;
+    use rand::RngExt;
     use hive_game::uhp::format_move_uhp;
 
     let verbose = n == 1;
@@ -320,7 +320,7 @@ fn run_random(n: u32) {
 
     for game_idx in 0..n {
         let mut game = Game::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut move_num = 0u32;
 
         let mut last_to:   Option<hive_game::hex::Hex> = None;
@@ -340,7 +340,7 @@ fn run_random(n: u32) {
                 last_to   = None;
                 last_from = None;
             } else {
-                let idx = rng.gen_range(0..moves.len());
+                let idx = rng.random_range(0..moves.len());
                 let mv = moves[idx];
                 if verbose {
                     let uhp = format_move_uhp(&game, &mv);

@@ -352,8 +352,8 @@ impl<G: GameEngine> MctsSearch<G> {
     /// alpha: concentration parameter (e.g. 0.3 for Hive)
     /// epsilon: noise weight (e.g. 0.25)
     pub fn apply_root_dirichlet(&mut self, alpha: f32, epsilon: f32) {
-        use rand::SeedableRng;
-        use rand_distr::{Dirichlet, Distribution};
+        use rand_distr::Distribution;
+        use rand_distr::multi::Dirichlet;
 
         let root = self.arena.get(self.root);
         let child_count = root.child_count as usize;
@@ -361,12 +361,12 @@ impl<G: GameEngine> MctsSearch<G> {
             return;
         }
 
-        let alphas = vec![alpha; child_count];
+        let alphas: Vec<f32> = vec![alpha; child_count];
         let dirichlet = match Dirichlet::new(&alphas) {
             Ok(d) => d,
             Err(_) => return,
         };
-        let mut rng = rand::rngs::StdRng::from_entropy();
+        let mut rng = rand::rng();
         let noise: Vec<f32> = dirichlet.sample(&mut rng);
 
         let mut child_id = self.arena.get(self.root).first_child;

@@ -11,7 +11,7 @@ use zertz_game::move_encoding::POLICY_SIZE;
 use zertz_game::zertz::{Marble, ZertzBoard, ZertzMove, MAX_CAPTURE_JUMPS};
 use core_game::game::{Game, Outcome, Player};
 use crate::inference::ZertzInference;
-use crate::zertz_core::{best_move_core, play_battle_core, play_selfplay_core};
+use zertz_game::search::{best_move_core, play_battle_core, play_selfplay_core};
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 
@@ -236,7 +236,7 @@ impl PyZertzSelfPlaySession {
         progress_fn: Option<&Bound<'_, PyAny>>,
         onnx_path: Option<String>,
     ) -> PyResult<PyZertzSelfPlayResult> {
-        let eval_core: crate::zertz_core::EvalFn = if let Some(path) = onnx_path {
+        let eval_core: zertz_game::search::EvalFn = if let Some(path) = onnx_path {
             let engine = crate::inference::ZertzOrtEngine::load(&path)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let shared = Arc::new(Mutex::new(engine));

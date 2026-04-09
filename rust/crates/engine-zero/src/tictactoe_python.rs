@@ -3,9 +3,9 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
-use rand::Rng;
-use rand::distributions::WeightedIndex;
-use rand::prelude::Distribution;
+use rand::RngExt;
+use rand::distr::weighted::WeightedIndex;
+use rand::distr::Distribution;
 
 use tictactoe_game::game::{
     TicTacToe, GRID_SIZE, CHANNELS_PER_STEP, POLICY_SIZE,
@@ -171,7 +171,7 @@ impl PyTTTSelfPlaySession {
         let mut histories: Vec<Vec<TurnRecord>> = (0..num_games).map(|_| Vec::new()).collect();
         let mut board_buf: Vec<f32> = Vec::new();
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // Stats
         let mut wins_p1 = 0u32;
@@ -192,7 +192,7 @@ impl PyTTTSelfPlaySession {
 
             // Decide fast vs full search per game
             let is_full: Vec<bool> = if use_playout_cap {
-                (0..n).map(|_| rng.gen::<f32>() < self.playout_cap_p).collect()
+                (0..n).map(|_| rng.random::<f32>() < self.playout_cap_p).collect()
             } else {
                 vec![true; n]
             };
@@ -247,7 +247,7 @@ impl PyTTTSelfPlaySession {
 
                 let nl = leaf_data.len();
                 let mut leaf_boards_flat = vec![0f32; nl * bf];
-                for (k, (_, ref board_enc)) in leaf_data.iter().enumerate() {
+                for (k, (_, board_enc)) in leaf_data.iter().enumerate() {
                     leaf_boards_flat[k * bf..(k + 1) * bf]
                         .copy_from_slice(board_enc);
                 }

@@ -412,20 +412,20 @@ impl MctsSearch {
 
     /// Apply Dirichlet noise to root edge priors.
     pub fn apply_root_dirichlet(&mut self, alpha: f32, epsilon: f32) {
-        use rand::SeedableRng;
-        use rand_distr::{Dirichlet, Distribution};
+        use rand_distr::Distribution;
+        use rand_distr::multi::Dirichlet;
 
         let edge_count = self.arena.get(self.root).edges.len();
         if edge_count == 0 {
             return;
         }
 
-        let alphas = vec![alpha; edge_count];
+        let alphas: Vec<f32> = vec![alpha; edge_count];
         let dirichlet = match Dirichlet::new(&alphas) {
             Ok(d) => d,
             Err(_) => return,
         };
-        let mut rng = rand::rngs::StdRng::from_entropy();
+        let mut rng = rand::rng();
         let noise: Vec<f32> = dirichlet.sample(&mut rng);
 
         let edges = &mut self.arena.get_mut(self.root).edges;

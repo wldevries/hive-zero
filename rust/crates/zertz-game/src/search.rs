@@ -1,13 +1,13 @@
-use rand::Rng;
-use rand::distributions::WeightedIndex;
-use rand::prelude::Distribution;
+use rand::RngExt;
+use rand::distr::weighted::WeightedIndex;
+use rand::distr::Distribution;
 
-use zertz_game::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
-use zertz_game::mcts::arena::NodeId;
-use zertz_game::mcts::search::{MctsSearch, PolicyHeads, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
-use zertz_game::random_play::{classify_win, WinType};
-use zertz_game::zertz::{ZertzBoard, ZertzMove};
-use zertz_game::move_encoding::{encode_move, POLICY_SIZE};
+use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
+use crate::mcts::arena::NodeId;
+use crate::mcts::search::{MctsSearch, PolicyHeads, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
+use crate::random_play::{classify_win, WinType};
+use crate::zertz::{ZertzBoard, ZertzMove};
+use crate::move_encoding::{encode_move, POLICY_SIZE};
 use core_game::game::{Game, Outcome, Player};
 use core_game::symmetry::{D6Symmetry, Symmetry, apply_d6_sym_spatial};
 
@@ -169,7 +169,7 @@ pub fn play_battle_core(
         Ok((place, src, dst, value))
     };
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let place_channels = PLACE_HEAD_SIZE / (GRID_SIZE * GRID_SIZE);
 
     while active.iter().any(|&a| a) {
@@ -366,9 +366,7 @@ pub fn play_selfplay_core(
     let mut board_buf: Vec<f32> = Vec::new();
     let mut reserve_buf: Vec<f32> = Vec::new();
 
-    let mut rng = rand::thread_rng();
-
-    // Stats
+    let mut rng = rand::rng();
     let mut wins_p1 = 0u32;
     let mut wins_p2 = 0u32;
     let mut draws = 0u32;
@@ -395,7 +393,7 @@ pub fn play_selfplay_core(
 
         // Decide full vs fast per game
         let is_full: Vec<bool> = if use_playout_cap {
-            (0..n).map(|_| rng.gen::<f32>() < playout_cap_p).collect()
+            (0..n).map(|_| rng.random::<f32>() < playout_cap_p).collect()
         } else { vec![true; n] };
         let sim_caps: Vec<usize> = is_full.iter().map(|&f| if f { simulations } else { fast_cap }).collect();
         full_search_turns += is_full.iter().filter(|&&f| f).count() as u32;

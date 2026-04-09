@@ -17,9 +17,9 @@ use hive_game::move_encoding::{self, encode_game_move};
 use hive_game::piece::{Piece, PieceColor, PieceType};
 use core_game::symmetry::{Symmetry, D6Symmetry, apply_d6_sym_spatial};
 
-use rand::Rng;
-use rand::distributions::WeightedIndex;
-use rand::prelude::Distribution;
+use rand::RngExt;
+use rand::distr::weighted::WeightedIndex;
+use rand::distr::Distribution;
 
 
 /// Wraps either a Python eval callback or a native engine (ORT, tract, …).
@@ -425,10 +425,10 @@ impl PySelfPlaySession {
 
         // Per-game random opening move counts (sampled once per game from [min, max])
         let game_random_opening_moves: Vec<u32> = {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             (0..num_games).map(|_| {
                 if cfg.random_opening_moves_max > cfg.random_opening_moves_min {
-                    rng.gen_range(cfg.random_opening_moves_min..=cfg.random_opening_moves_max)
+                    rng.random_range(cfg.random_opening_moves_min..=cfg.random_opening_moves_max)
                 } else {
                     cfg.random_opening_moves_min
                 }
@@ -440,7 +440,7 @@ impl PySelfPlaySession {
 
         // Per-game D6 symmetry for opening book moves
         let opening_syms: Vec<core_game::symmetry::D6Symmetry> = {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             (0..num_games).map(|_| core_game::symmetry::D6Symmetry::random(&mut rng)).collect()
         };
 
@@ -453,11 +453,11 @@ impl PySelfPlaySession {
         let mut calibration_would_resign: Vec<Option<PieceColor>> = vec![None; num_games];
         if cfg.resign_threshold.is_some() {
             let num_cal = (num_games as f32 * cfg.calibration_frac).ceil().max(1.0) as usize;
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             let mut indices: Vec<usize> = (0..num_games).collect();
             // Fisher-Yates partial shuffle
             for i in 0..num_cal.min(num_games) {
-                let j = rng.gen_range(i..num_games);
+                let j = rng.random_range(i..num_games);
                 indices.swap(i, j);
                 calibration[indices[i]] = true;
             }
@@ -469,7 +469,7 @@ impl PySelfPlaySession {
 
         // --- Main game loop ---
         while active.iter().any(|&a| a) {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
 
             // Collect games that need MCTS search this turn
             let mut mcts_games: Vec<usize> = Vec::new();
@@ -503,7 +503,7 @@ impl PySelfPlaySession {
                     if valid.is_empty() {
                         games[gi].play_pass();
                     } else {
-                        let idx = rng.gen_range(0..valid.len());
+                        let idx = rng.random_range(0..valid.len());
                         games[gi].play_move(&valid[idx]).unwrap();
                     }
                     move_counts[gi] += 1;
@@ -532,7 +532,7 @@ impl PySelfPlaySession {
 
             // --- Decide fast vs full per game ---
             let is_full: Vec<bool> = if use_playout_cap {
-                (0..n).map(|_| rng.gen::<f32>() < cfg.playout_cap_p).collect()
+                (0..n).map(|_| rng.random::<f32>() < cfg.playout_cap_p).collect()
             } else {
                 vec![true; n]
             };
@@ -831,7 +831,7 @@ impl PySelfPlaySession {
                 let num_active = active.iter().filter(|&&a| a).count() as u32;
                 let max_turn: u32 = if num_active > 0 {
                     move_counts.iter().zip(active.iter())
-                        .filter(|(_, &a)| a)
+                        .filter(|(_, a)| **a)
                         .map(|(&m, _)| m)
                         .max()
                         .unwrap_or(0)
@@ -994,9 +994,9 @@ impl PySelfPlaySession {
         let mut wins_model2 = 0u32;
         let mut draws = 0u32;
         let mut game_lengths: Vec<u32> = Vec::new();
-        let mut rng = rand::thread_rng();
 
         // model1 = White (Player1) for games 0..half; model1 = Black (Player2) for half..num_games.
+        let mut rng = rand::rng();
         let use_fn1 = |gi: usize, player: Player| -> bool {
             (gi < half) == (player == Player::Player1)
         };
