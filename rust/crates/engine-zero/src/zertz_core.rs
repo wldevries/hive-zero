@@ -63,6 +63,8 @@ pub fn best_move_core(
     // Simulation rounds (batch_size=8)
     let batch = 8usize;
     let mut done = 0usize;
+    let mut flat = vec![0f32; batch * BOARD_FLAT];
+    let mut flat_res = vec![0f32; batch * RESERVE_SIZE];
     while done < simulations {
         let leaves = search.select_leaves(batch.min(simulations - done));
         if leaves.is_empty() {
@@ -70,35 +72,23 @@ pub fn best_move_core(
         }
         let nl = leaves.len();
 
-        let mut flat = vec![0f32; nl * BOARD_FLAT];
-        let mut flat_res = vec![0f32; nl * RESERVE_SIZE];
         for (k, &leaf) in leaves.iter().enumerate() {
             let (board_enc, reserve_enc) = search.encode_leaf(leaf);
             flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
             flat_res[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
         }
 
-        let (lp_place_data, lp_src_data, lp_dst_data, leaf_values) = eval_fn(&flat, &flat_res, nl)?;
+        let (lp_place_data, lp_src_data, lp_dst_data, leaf_values) = eval_fn(
+            &flat[..nl * BOARD_FLAT],
+            &flat_res[..nl * RESERVE_SIZE],
+            nl,
+        )?;
 
-        struct LeafHeadData {
-            place: Vec<f32>,
-            src: Vec<f32>,
-            dst: Vec<f32>,
-        }
-
-        let leaf_head_data: Vec<LeafHeadData> = (0..nl)
-            .map(|k| LeafHeadData {
-                place: lp_place_data[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE].to_vec(),
-                src: lp_src_data[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec(),
-                dst: lp_dst_data[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec(),
-            })
-            .collect();
-        let leaf_heads: Vec<PolicyHeads> = leaf_head_data
-            .iter()
-            .map(|d| PolicyHeads {
-                place: &d.place,
-                cap_source: &d.src,
-                cap_dest: &d.dst,
+        let leaf_heads: Vec<PolicyHeads> = (0..nl)
+            .map(|k| PolicyHeads {
+                place: &lp_place_data[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE],
+                cap_source: &lp_src_data[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
+                cap_dest: &lp_dst_data[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
             })
             .collect();
 
@@ -520,7 +510,7 @@ pub fn play_selfplay_core(
 
             let is_capture_turn = dist.first().map_or(false, |(mv, _)| matches!(mv, ZertzMove::Capture { .. }));
             let is_mid_capture_turn = boards[gi].is_mid_capture();
-            histories[gi].push((turn_board_offsets[i], turn_reserve_offsets[i], boards[gi].next_player(), !is_full[i], is_capture_turn, is_mid_capture_turn, policy_vec.clone()));
+            histories[gi].push((turn_board_offsets[i], turn_reserve_offsets[i], boards[gi].next_player(), !is_full[i], is_capture_turn, is_mid_capture_turn, policy_vec));
 
             let mv = if dist.is_empty() {
                 ZertzMove::Pass
