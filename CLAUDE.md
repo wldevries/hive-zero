@@ -61,7 +61,7 @@ rust/crates/
 - **SGD + momentum 0.9**, constant LR (default 0.02, set via --lr). Previously tried cosine annealing with warm restarts — removed in favour of manual LR adjustment.
 - **1 epoch** per iteration (avoids overfitting on stale replay buffer data)
 - **Playout cap randomization**: per-turn random fast/full search (KataGo-style), fast turns train value only
-- **Symmetry augmentation**: previously implemented (12 hex symmetries) but removed — not in use.
+- **Symmetry augmentation**: D6 hex symmetries (12 transforms), active and in use via `--augment-symmetry`.
 - **Replay buffer**: in-memory only, not persisted to disk. Lost on process exit. Pretrain and selfplay run as separate processes so the buffer is always empty at the start of selfplay.
 - **Fast-cap turns**: no Dirichlet noise, play strongest move, added to buffer with value-only training (policy loss masked)
 - **Heuristic value** for unfinished games: queen neighbor pressure only (no draw penalty)
