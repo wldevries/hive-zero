@@ -2,6 +2,7 @@ pub mod inference;
 pub mod hive_python;
 pub mod hive_selfplay;
 pub mod zertz_python;
+pub mod zertz_core;
 pub mod tictactoe_python;
 
 use pyo3::prelude::*;
