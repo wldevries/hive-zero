@@ -228,7 +228,8 @@ impl Board {
     }
 
     /// Check if a ground-level piece can slide between two adjacent positions.
-    /// Blocked if both common neighbors are occupied (gate blocking).
+    /// Requires exactly one common neighbor occupied: must slide along a piece (freedom to move),
+    /// and must not be blocked by a gate (both common neighbors occupied).
     pub fn can_slide(&self, from: Hex, to: Hex) -> bool {
         // Find the two common neighbors of from and to
         let from_ns = hex_neighbors(from);
@@ -247,7 +248,7 @@ impl Board {
                 }
             }
         }
-        blocked < 2
+        blocked == 1
     }
 
     /// Check if all pieces form a single connected group (BFS).
