@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
-use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyArrayMethods};
 use std::sync::{Arc, Mutex};
 
 use zertz_game::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
@@ -21,12 +21,12 @@ fn call_python_eval(
     reserves: &[f32],
     batch_size: usize,
 ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>), String> {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let board_arr = numpy::ndarray::Array2::from_shape_vec(
             (batch_size, BOARD_FLAT),
             boards.to_vec(),
         ).map_err(|e| e.to_string())?;
-        let board_np = PyArray2::from_owned_array_bound(py, board_arr);
+        let board_np = PyArray2::from_owned_array(py, board_arr);
         let board_4d = board_np
             .reshape([batch_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE])
             .map_err(|e| e.to_string())?;
@@ -35,20 +35,40 @@ fn call_python_eval(
             (batch_size, RESERVE_SIZE),
             reserves.to_vec(),
         ).map_err(|e| e.to_string())?;
-        let reserve_np = PyArray2::from_owned_array_bound(py, reserve_arr);
+        let reserve_np = PyArray2::from_owned_array(py, reserve_arr);
 
         let result = eval_fn
             .bind(py)
             .call1((board_4d, reserve_np))
             .map_err(|e| e.to_string())?;
         let tuple = result
-            .downcast::<PyTuple>()
+            .cast::<PyTuple>()
             .map_err(|_| "eval_fn must return (place, cap_source, cap_dest, value) tuple".to_string())?;
 
-        let place: PyReadonlyArray2<f32> = tuple.get_item(0).map_err(|e| e.to_string())?.extract().map_err(|e| e.to_string())?;
-        let cap_source: PyReadonlyArray2<f32> = tuple.get_item(1).map_err(|e| e.to_string())?.extract().map_err(|e| e.to_string())?;
-        let cap_dest: PyReadonlyArray2<f32> = tuple.get_item(2).map_err(|e| e.to_string())?.extract().map_err(|e| e.to_string())?;
-        let value: PyReadonlyArray1<f32> = tuple.get_item(3).map_err(|e| e.to_string())?.extract().map_err(|e| e.to_string())?;
+        let place = tuple
+            .get_item(0)
+            .map_err(|e| e.to_string())?
+            .cast::<PyArray2<f32>>()
+            .map_err(|e| e.to_string())?
+            .readonly();
+        let cap_source = tuple
+            .get_item(1)
+            .map_err(|e| e.to_string())?
+            .cast::<PyArray2<f32>>()
+            .map_err(|e| e.to_string())?
+            .readonly();
+        let cap_dest = tuple
+            .get_item(2)
+            .map_err(|e| e.to_string())?
+            .cast::<PyArray2<f32>>()
+            .map_err(|e| e.to_string())?
+            .readonly();
+        let value = tuple
+            .get_item(3)
+            .map_err(|e| e.to_string())?
+            .cast::<PyArray1<f32>>()
+            .map_err(|e| e.to_string())?
+            .readonly();
 
         Ok((
             place.as_slice().map_err(|e| e.to_string())?.to_vec(),
@@ -114,10 +134,10 @@ impl PyZertzSelfPlayResult {
         ).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
         (
-            PyArray2::from_owned_array_bound(py, boards),
-            PyArray2::from_owned_array_bound(py, reserves),
-            PyArray2::from_owned_array_bound(py, policies),
-            PyArray1::from_owned_array_bound(py, values),
+            PyArray2::from_owned_array(py, boards),
+            PyArray2::from_owned_array(py, reserves),
+            PyArray2::from_owned_array(py, policies),
+            PyArray1::from_owned_array(py, values),
             self.value_only_flags.clone(),
             self.capture_turn_flags.clone(),
             self.mid_capture_turn_flags.clone(),
@@ -260,7 +280,7 @@ impl PyZertzSelfPlaySession {
         let progress_core = progress_fn.map(|pfn| {
             let pfn = pfn.clone().unbind();
             Box::new(move |finished: u32, total: u32, active: u32, total_moves: u32| {
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     pfn.bind(py).call1((finished, total, active, total_moves)).ok();
                     py.check_signals().ok();
                 });
@@ -316,13 +336,10 @@ impl PyZertzSelfPlaySession {
     fn play_battle(
         &self,
         _py: Python,
-        eval_fn1: PyObject,
-        eval_fn2: PyObject,
-        progress_fn: Option<PyObject>,
+        eval_fn1: Py<PyAny>,
+        eval_fn2: Py<PyAny>,
+        progress_fn: Option<Py<PyAny>>,
     ) -> PyResult<PyZertzBattleResult> {
-        let eval_fn1: Py<PyAny> = eval_fn1.extract(_py)?;
-        let eval_fn2: Py<PyAny> = eval_fn2.extract(_py)?;
-
         let core_eval1 = Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
             call_python_eval(&eval_fn1, boards, reserves, n)
         });
@@ -333,7 +350,7 @@ impl PyZertzSelfPlaySession {
         let progress_core = progress_fn.map(|pfn| {
             let pfn: Py<PyAny> = pfn;
             Box::new(move |finished: u32, total: u32, active: u32, total_moves: u32| {
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     pfn.bind(py).call1((finished, total, active, total_moves)).ok();
                     py.check_signals().ok();
                 });
@@ -518,7 +535,7 @@ impl PyZertzGame {
         let mut board_buf = vec![0f32; BOARD_FLAT];
         let mut reserve_buf = vec![0f32; RESERVE_SIZE];
         encode_board(&self.board, &mut board_buf, &mut reserve_buf);
-        (PyArray1::from_vec_bound(py, board_buf), PyArray1::from_vec_bound(py, reserve_buf))
+        (PyArray1::from_vec(py, board_buf), PyArray1::from_vec(py, reserve_buf))
     }
 
     /// Run MCTS for `simulations` sims and return the best move string.
@@ -570,7 +587,7 @@ fn zertz_d6_grid_permutations<'py>(py: Python<'py>) -> Vec<Bound<'py, PyArray1<i
             let dst = dst_row * GRID_SIZE + dst_col;
             perm[dst] = src as i64;
         }
-        PyArray1::from_owned_array_bound(py, numpy::ndarray::Array1::from(perm))
+        PyArray1::from_owned_array(py, numpy::ndarray::Array1::from(perm))
     }).collect()
 }
 
@@ -592,7 +609,7 @@ fn zertz_d6_hex_permutations<'py>(py: Python<'py>) -> Vec<Bound<'py, PyArray1<i6
             let dst = hex_to_index(h2);
             perm[dst] = i as i64;
         }
-        PyArray1::from_owned_array_bound(py, numpy::ndarray::Array1::from(perm))
+        PyArray1::from_owned_array(py, numpy::ndarray::Array1::from(perm))
     }).collect()
 }
 

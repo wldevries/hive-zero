@@ -61,9 +61,9 @@ impl PyTTTSelfPlayResult {
         ).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
         (
-            PyArray2::from_owned_array_bound(py, boards),
-            PyArray2::from_owned_array_bound(py, policies),
-            PyArray1::from_owned_array_bound(py, values),
+            PyArray2::from_owned_array(py, boards),
+            PyArray2::from_owned_array(py, policies),
+            PyArray1::from_owned_array(py, values),
             self.value_only_flags.clone(),
         )
     }
@@ -423,11 +423,11 @@ fn infer_batch(
     let board_arr = numpy::ndarray::Array2::from_shape_vec(
         (batch_size, bf), boards_flat.to_vec(),
     ).unwrap();
-    let board_np = PyArray2::from_owned_array_bound(py, board_arr);
+    let board_np = PyArray2::from_owned_array(py, board_arr);
     let board_4d = board_np.reshape([batch_size, num_channels, GRID_SIZE, GRID_SIZE])?;
 
     let result = eval_fn.call1((board_4d,))?;
-    let tuple = result.downcast::<PyTuple>().map_err(|_|
+    let tuple = result.cast::<PyTuple>().map_err(|_|
         pyo3::exceptions::PyRuntimeError::new_err("eval_fn must return (policy, value) tuple")
     )?;
     let policy: PyReadonlyArray2<f32> = tuple.get_item(0)?.extract()?;

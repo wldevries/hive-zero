@@ -12,8 +12,8 @@ core-game = { path = "../core-game" }
 hive-game = { path = "../hive-game" }
 zertz-game = { path = "../zertz-game" }
 tictactoe-game = { path = "../tictactoe-game" }
-pyo3 = { version = "0.22", features = ["extension-module"] }
-numpy = "0.22"
+pyo3 = { version = "0.28.3", features = ["extension-module"] }
+numpy = "0.28.0"
 rand = { workspace = true }
 rayon = "1.10"
 ort = { version = "2.0.0-rc.12", features = ["load-dynamic", "cuda", "qnn", "api-22"] }

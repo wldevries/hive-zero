@@ -1,4 +1,4 @@
-use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
@@ -46,21 +46,31 @@ fn call_python_eval_bf16(
 
     let board_arr = numpy::ndarray::Array2::from_shape_vec((batch_size, board_flat), boards_bf16)
         .map_err(|e| e.to_string())?;
-    let board_np = PyArray2::from_owned_array_bound(py, board_arr);
+    let board_np = PyArray2::from_owned_array(py, board_arr);
     let board_4d = board_np
         .reshape([batch_size, NUM_CHANNELS, grid_size, grid_size])
         .map_err(|e| e.to_string())?;
 
     let reserve_arr = numpy::ndarray::Array2::from_shape_vec((batch_size, RESERVE_SIZE), reserves_bf16)
         .map_err(|e| e.to_string())?;
-    let reserve_np = PyArray2::from_owned_array_bound(py, reserve_arr);
+    let reserve_np = PyArray2::from_owned_array(py, reserve_arr);
 
     let result = eval_fn.call1((board_4d, reserve_np)).map_err(|e| e.to_string())?;
     let tuple = result
-        .downcast::<PyTuple>()
+        .cast::<PyTuple>()
         .map_err(|_| "eval_fn must return (policy, value) tuple".to_string())?;
-    let policy_arr: PyReadonlyArray2<f32> = tuple.get_item(0).map_err(|e| e.to_string())?.extract().map_err(|e| e.to_string())?;
-    let value_arr: PyReadonlyArray1<f32> = tuple.get_item(1).map_err(|e| e.to_string())?.extract().map_err(|e| e.to_string())?;
+    let policy_arr = tuple
+        .get_item(0)
+        .map_err(|e| e.to_string())?
+        .cast::<PyArray2<f32>>()
+        .map_err(|e| e.to_string())?
+        .readonly();
+    let value_arr = tuple
+        .get_item(1)
+        .map_err(|e| e.to_string())?
+        .cast::<PyArray1<f32>>()
+        .map_err(|e| e.to_string())?
+        .readonly();
     Ok((
         policy_arr.as_slice().map_err(|e| e.to_string())?.to_vec(),
         value_arr.as_slice().map_err(|e| e.to_string())?.to_vec(),
@@ -241,13 +251,13 @@ impl PySelfPlayResult {
         let aux = numpy::ndarray::Array2::from_shape_vec((n, 6), aux_data).unwrap();
 
         (
-            PyArray2::from_owned_array_bound(py, boards),
-            PyArray2::from_owned_array_bound(py, reserves),
-            PyArray2::from_owned_array_bound(py, policies),
-            PyArray1::from_owned_array_bound(py, values),
+            PyArray2::from_owned_array(py, boards),
+            PyArray2::from_owned_array(py, reserves),
+            PyArray2::from_owned_array(py, policies),
+            PyArray1::from_owned_array(py, values),
             self.value_only_flags.clone(),
             self.policy_only_flags.clone(),
-            PyArray2::from_owned_array_bound(py, aux),
+            PyArray2::from_owned_array(py, aux),
         )
     }
 

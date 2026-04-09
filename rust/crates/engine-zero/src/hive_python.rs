@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
-use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods};
 
 use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
 use hive_game::game::{self, Game};
@@ -22,7 +22,7 @@ fn call_python_eval(
         (batch_size, board_size),
         boards.to_vec(),
     ).map_err(|e| e.to_string())?;
-    let board_np = PyArray2::from_owned_array_bound(eval_fn.py(), board_arr);
+    let board_np = PyArray2::from_owned_array(eval_fn.py(), board_arr);
     let board_4d = board_np
         .reshape([batch_size, NUM_CHANNELS, grid_size, grid_size])
         .map_err(|e| e.to_string())?;
@@ -31,14 +31,24 @@ fn call_python_eval(
         (batch_size, RESERVE_SIZE),
         reserves.to_vec(),
     ).map_err(|e| e.to_string())?;
-    let reserve_np = PyArray2::from_owned_array_bound(eval_fn.py(), reserve_arr);
+    let reserve_np = PyArray2::from_owned_array(eval_fn.py(), reserve_arr);
 
     let result = eval_fn.call1((board_4d, reserve_np)).map_err(|e| e.to_string())?;
     let tuple = result
-        .downcast::<PyTuple>()
+        .cast::<PyTuple>()
         .map_err(|_| "eval_fn must return (policy, value)".to_string())?;
-    let policy: PyReadonlyArray2<f32> = tuple.get_item(0).map_err(|e| e.to_string())?.extract().map_err(|e| e.to_string())?;
-    let value: PyReadonlyArray1<f32> = tuple.get_item(1).map_err(|e| e.to_string())?.extract().map_err(|e| e.to_string())?;
+    let policy = tuple
+        .get_item(0)
+        .map_err(|e| e.to_string())?
+        .cast::<PyArray2<f32>>()
+        .map_err(|e| e.to_string())?
+        .readonly();
+    let value = tuple
+        .get_item(1)
+        .map_err(|e| e.to_string())?
+        .cast::<PyArray1<f32>>()
+        .map_err(|e| e.to_string())?
+        .readonly();
     Ok((
         policy.as_slice().map_err(|e| e.to_string())?.to_vec(),
         value.as_slice().map_err(|e| e.to_string())?.to_vec(),
@@ -48,13 +58,13 @@ fn call_python_eval(
 /// Create a 1D numpy array from a slice.
 fn make_array1<'py>(py: Python<'py>, data: &[f32]) -> Bound<'py, PyArray1<f32>> {
     let arr = numpy::ndarray::Array1::from(data.to_vec());
-    PyArray1::from_owned_array_bound(py, arr)
+    PyArray1::from_owned_array(py, arr)
 }
 
 /// Create a 3D numpy array from a flat slice with shape.
 fn make_array3<'py>(py: Python<'py>, data: &[f32], d0: usize, d1: usize, d2: usize) -> Bound<'py, PyArray3<f32>> {
     let arr = numpy::ndarray::Array3::from_shape_vec((d0, d1, d2), data.to_vec()).unwrap();
-    PyArray3::from_owned_array_bound(py, arr)
+    PyArray3::from_owned_array(py, arr)
 }
 
 /// Rust Game exposed to Python.
@@ -341,7 +351,7 @@ fn d6_grid_permutations<'py>(py: Python<'py>, grid_size: usize) -> Vec<Bound<'py
             }
         }
         let arr = numpy::ndarray::Array1::from(perm);
-        PyArray1::from_owned_array_bound(py, arr)
+        PyArray1::from_owned_array(py, arr)
     }).collect()
 }
 
