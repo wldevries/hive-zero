@@ -329,11 +329,11 @@ class SelfPlayTrainer:
             if game_lengths:
                 median = game_lengths[len(game_lengths) // 2]
                 avg = sum(game_lengths) / len(game_lengths)
-                print(f"  Game length: avg={avg:.0f} med={median} min={game_lengths[0]} max={game_lengths[-1]}", end="")
+                print(f"  Game length:  min=\033[1;37m{game_lengths[0]}\033[0m  avg=\033[1;37m{avg:.0f}\033[0m  med=\033[1;37m{median}\033[0m  max=\033[1;37m{game_lengths[-1]}\033[0m", end="")
                 if decisive_lengths:
                     d_med = decisive_lengths[len(decisive_lengths) // 2]
                     d_avg = sum(decisive_lengths) / len(decisive_lengths)
-                    print(f"  decisive: avg={d_avg:.0f} med={d_med}")
+                    print(f"  decisive:  avg=\033[1;37m{d_avg:.0f}\033[0m  med=\033[1;37m{d_med}\033[0m")
                 else:
                     print()
             if result.use_playout_cap:
