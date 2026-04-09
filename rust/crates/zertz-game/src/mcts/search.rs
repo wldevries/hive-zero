@@ -122,7 +122,7 @@ fn select_leaf(
 /// (standard alpha-zero), but keeps it when parent has the same player
 /// (mid-capture continuation).
 fn backpropagate(arena: &mut NodeArena, node_id: NodeId, value: f32) {
-    let mut value = value;
+    let mut value = -value;
     let mut node_id = node_id;
     loop {
         let node = arena.get_mut(node_id);
@@ -403,13 +403,9 @@ impl MctsSearch {
         heads_list: &[PolicyHeads],
         values: &[f32],
     ) {
-        let root_player = self.arena.get(self.root).board.next_player();
         for (i, &leaf) in leaves.iter().enumerate() {
             expand_with_policy(&mut self.arena, leaf, &heads_list[i]);
             let mut value = values[i];
-            if self.arena.get(leaf).board.next_player() != root_player {
-                value = -value;
-            }
             correct_virtual_loss(&mut self.arena, leaf, value);
         }
     }
@@ -598,7 +594,7 @@ impl MctsSearch {
 
     /// Root value estimate.
     pub fn root_value(&self) -> f32 {
-        self.arena.get(self.root).value()
+        -self.arena.get(self.root).value()
     }
 }
 
