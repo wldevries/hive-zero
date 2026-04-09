@@ -37,6 +37,7 @@ pub fn hex_distance(a: Hex, b: Hex) -> i8 {
     ((dq.abs() + dr.abs() + (dq + dr).abs()) / 2) as i8
 }
 
+/// Returns the 6 neighboring hexes in clockwise order starting from the right (E).
 #[inline]
 pub fn hex_neighbors(h: Hex) -> [Hex; 6] {
     [

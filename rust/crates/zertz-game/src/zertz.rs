@@ -571,17 +571,20 @@ impl ZertzBoard {
         moves
     }
 
-    /// A ring at `pos` is an edge if it has 4 or less neighbours
-    /// (off the board or removed).
+    /// A ring at `pos` is an edge if it two neighbours that are adjacent to it are both missing
+    /// a ring (either removed or off the board).
     fn is_edge_static(rings: &[Ring; BOARD_SIZE], pos: Hex) -> bool {
-        let mut neighbor_count = 0;
-        for n in hex_neighbors(pos) {
-            if !is_valid(n) || rings[hex_to_index(n)] == Ring::Removed {
-                continue;
+        let neighbors = hex_neighbors(pos);
+        for i in 0..6 {
+            let n1 = neighbors[i];
+            let n2 = neighbors[(i + 1) % 6];
+            let n1_missing = !is_valid(n1) || rings[hex_to_index(n1)] == Ring::Removed;
+            let n2_missing = !is_valid(n2) || rings[hex_to_index(n2)] == Ring::Removed;
+            if n1_missing && n2_missing {
+                return true;
             }
-            neighbor_count += 1;
         }
-        neighbor_count <= 4
+        false
     }
 
     /// Check win conditions and update outcome.
