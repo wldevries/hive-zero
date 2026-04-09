@@ -6,20 +6,49 @@ use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyRe
 
 use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
 use hive_game::game::{self, Game};
-use core_game::mcts::search::MctsSearch;
 use hive_game::move_encoding;
 use hive_game::piece::{Piece, PieceColor, PieceType};
+use hive_game::search::best_move_core;
+
+fn call_python_eval(
+    eval_fn: &Bound<'_, PyAny>,
+    boards: &[f32],
+    reserves: &[f32],
+    batch_size: usize,
+    grid_size: usize,
+) -> Result<(Vec<f32>, Vec<f32>), String> {
+    let board_size = NUM_CHANNELS * grid_size * grid_size;
+    let board_arr = numpy::ndarray::Array2::from_shape_vec(
+        (batch_size, board_size),
+        boards.to_vec(),
+    ).map_err(|e| e.to_string())?;
+    let board_np = PyArray2::from_owned_array_bound(eval_fn.py(), board_arr);
+    let board_4d = board_np
+        .reshape([batch_size, NUM_CHANNELS, grid_size, grid_size])
+        .map_err(|e| e.to_string())?;
+
+    let reserve_arr = numpy::ndarray::Array2::from_shape_vec(
+        (batch_size, RESERVE_SIZE),
+        reserves.to_vec(),
+    ).map_err(|e| e.to_string())?;
+    let reserve_np = PyArray2::from_owned_array_bound(eval_fn.py(), reserve_arr);
+
+    let result = eval_fn.call1((board_4d, reserve_np)).map_err(|e| e.to_string())?;
+    let tuple = result
+        .downcast::<PyTuple>()
+        .map_err(|_| "eval_fn must return (policy, value)".to_string())?;
+    let policy: PyReadonlyArray2<f32> = tuple.get_item(0).map_err(|e| e.to_string())?.extract().map_err(|e| e.to_string())?;
+    let value: PyReadonlyArray1<f32> = tuple.get_item(1).map_err(|e| e.to_string())?.extract().map_err(|e| e.to_string())?;
+    Ok((
+        policy.as_slice().map_err(|e| e.to_string())?.to_vec(),
+        value.as_slice().map_err(|e| e.to_string())?.to_vec(),
+    ))
+}
 
 /// Create a 1D numpy array from a slice.
 fn make_array1<'py>(py: Python<'py>, data: &[f32]) -> Bound<'py, PyArray1<f32>> {
     let arr = numpy::ndarray::Array1::from(data.to_vec());
     PyArray1::from_owned_array_bound(py, arr)
-}
-
-/// Create a 2D numpy array from a flat slice with shape.
-fn make_array2<'py>(py: Python<'py>, data: &[f32], rows: usize, cols: usize) -> Bound<'py, PyArray2<f32>> {
-    let arr = numpy::ndarray::Array2::from_shape_vec((rows, cols), data.to_vec()).unwrap();
-    PyArray2::from_owned_array_bound(py, arr)
 }
 
 /// Create a 3D numpy array from a flat slice with shape.
@@ -260,7 +289,7 @@ impl PyGame {
     #[pyo3(signature = (eval_fn, simulations=800, c_puct=1.5))]
     fn best_move(
         &mut self,
-        py: Python<'_>,
+        _py: Python<'_>,
         eval_fn: &Bound<'_, PyAny>,
         simulations: usize,
         c_puct: f32,
@@ -273,79 +302,16 @@ impl PyGame {
         }
 
         let gs = self.game.nn_grid_size;
-        let board_size = NUM_CHANNELS * gs * gs;
-        let ps = move_encoding::policy_size(gs);
-        let batch = 8usize;
-
-        let mut search = MctsSearch::<Game>::new(simulations + 64);
-        search.c_puct = c_puct;
-
-        // Initial NN eval on root
-        let mut board_buf = vec![0.0f32; board_size];
-        let mut reserve_buf = vec![0.0f32; RESERVE_SIZE];
-        hive_game::board_encoding::encode_board(&self.game, &mut board_buf, &mut reserve_buf, gs);
-
-        let root_board = make_array2(py, &board_buf, 1, board_size);
-        let root_board_4d = root_board.reshape([1usize, NUM_CHANNELS, gs, gs]).unwrap();
-        let root_reserve = make_array2(py, &reserve_buf, 1, RESERVE_SIZE);
-
-        let result = eval_fn.call1((root_board_4d, root_reserve))?;
-        let tuple = result.downcast::<PyTuple>().map_err(|_| {
-            pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value)")
-        })?;
-        let root_policy: PyReadonlyArray2<f32> = tuple.get_item(0)?.extract()?;
-        let root_policy_vec = root_policy.as_slice()?.to_vec();
-
-        search.init(&self.game, &root_policy_vec);
-        search.apply_root_dirichlet(0.3, 0.25);
-
-        let mut done = 0usize;
-        while done < simulations {
-            let leaf_ids = search.select_leaves(batch.min(simulations - done));
-            if leaf_ids.is_empty() { break; }
-            let nl = leaf_ids.len();
-
-            let mut boards = vec![0.0f32; nl * board_size];
-            let mut reserves = vec![0.0f32; nl * RESERVE_SIZE];
-            for (k, &lid) in leaf_ids.iter().enumerate() {
-                let (board, reserve) = search.encode_leaf(lid);
-                boards[k * board_size..(k + 1) * board_size].copy_from_slice(&board);
-                reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve);
-            }
-
-            let leaf_board = make_array2(py, &boards, nl, board_size);
-            let leaf_board_4d = leaf_board.reshape([nl, NUM_CHANNELS, gs, gs]).unwrap();
-            let leaf_reserve = make_array2(py, &reserves, nl, RESERVE_SIZE);
-
-            let res = eval_fn.call1((leaf_board_4d, leaf_reserve))?;
-            let tup = res.downcast::<PyTuple>().map_err(|_| {
-                pyo3::exceptions::PyTypeError::new_err("eval_fn must return (policy, value)")
-            })?;
-            let lp: PyReadonlyArray2<f32> = tup.get_item(0)?.extract()?;
-            let lv: PyReadonlyArray1<f32> = tup.get_item(1)?.extract()?;
-            let lp_data = lp.as_slice()?.to_vec();
-            let lv_data: Vec<f32> = lv.as_slice()?.to_vec();
-
-            let policies_vec: Vec<Vec<f32>> = (0..nl)
-                .map(|k| lp_data[k * ps..(k + 1) * ps].to_vec())
-                .collect();
-
-            search.expand_and_backprop(&policies_vec, &lv_data);
-            done += nl;
-        }
-
-        let dist = search.get_pruned_visit_distribution();
-        let best = dist.iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            .map(|(mv, _)| {
-                if mv.piece.is_none() {
-                    "pass".to_string()
-                } else {
-                    hive_game::uhp::format_move_uhp(&self.game, mv)
-                }
-            })
-            .unwrap_or_else(|| "pass".to_string());
-        Ok(best)
+        let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
+            call_python_eval(eval_fn, boards, reserves, batch_size, gs)
+        });
+        let best = best_move_core(&self.game, simulations, c_puct, core_eval)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        Ok(if best.piece.is_none() {
+            "pass".to_string()
+        } else {
+            hive_game::uhp::format_move_uhp(&self.game, &best)
+        })
     }
 }
 

@@ -6,4 +6,5 @@ pub mod game;
 pub mod uhp;
 pub mod board_encoding;
 pub mod move_encoding;
+pub mod search;
 pub mod sgf;
