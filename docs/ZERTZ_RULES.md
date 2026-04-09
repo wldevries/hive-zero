@@ -126,3 +126,26 @@ This variant concerns the original “Basic Game”. It is a short, very aggress
 ## H. Have fun!
 
 GIPF, TAMSK, ZÈRTZ, DVONN,YINSH and PÜNCT ® & © Don & Co NV. Content © Kris Burm. All rights
+
+
+## Frequently Asked Questions
+
+From <https://www.gipf.com/zertz/faq/faq.html>
+
+### FAQ 1
+
+> If you isolate a ring without a marble on it, must it be removed or does it remain in play?
+
+It remains part of the board. The player who puts a marble on in, removes the ring and captures the marble he put here. He may, of course, also put a marble somewhere else and then choose which ring he'll remove - and that includes the isolated ring.
+
+### FAQ 2
+
+> Imagine that a player has the choice between two captures. He chooses the option that creates another opportunity to capture. So, when it is the next player's turn, there are again two possible captures. May the next player, too, choose which capture he'll make or must he capture the marble with which the previous player made his move?
+
+If there are more possibilities to capture, a player may always choose what he feels is most advantageous, without restriction - that is, apart from the fact that he must capture.
+
+### FAQ 3
+
+> What if all of the marbles have been placed on the board and the player whose turn it is hasn't captured any marbles yet?
+
+That can only occur if both players collaborate to get one of them in that situation. Theoretically it is even possible that both players have not made a capture yet, but then is even more clear that they worked together. In an official game (i.e. during a tournament) they both lose the game. A tie is not accepted.
