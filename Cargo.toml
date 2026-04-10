@@ -6,6 +6,10 @@ members = [
     "rust/crates/engine-zero",
     "rust/crates/zertz-game",
     "rust/crates/tictactoe-game",
+    # zertz-wasm is intentionally excluded: WASM crates are built separately with
+    # wasm-pack and must not share the workspace feature graph (engine-zero enables
+    # the "replay" feature on zertz-game which pulls in C libs incompatible with wasm32).
+    # Build with: wasm-pack build rust/crates/zertz-wasm --target web
 ]
 
 [workspace.dependencies]

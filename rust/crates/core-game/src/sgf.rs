@@ -86,6 +86,7 @@ pub fn is_timeout(content: &str) -> bool {
 /// Nested brackets within the content are handled correctly.
 /// Iterate over all `.sgf` entries in a zip archive, yielding `(name, text)` for each.
 /// Text is decoded as ISO-8859-1 (safe for all boardspace SGF files).
+#[cfg(feature = "zip-sgf")]
 pub fn iter_sgf_texts_in_zip<R, F>(reader: R, mut f: F) -> Result<(), String>
 where
     R: std::io::Read + std::io::Seek,

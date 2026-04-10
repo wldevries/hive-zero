@@ -3,7 +3,11 @@ name = "core-game"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["zip-sgf"]
+zip-sgf = ["dep:zip"]
+
 [dependencies]
 rand = { workspace = true }
 rand_distr = { workspace = true }
-zip = "2"
+zip = { version = "2", optional = true }

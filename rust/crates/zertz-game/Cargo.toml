@@ -3,11 +3,18 @@ name = "zertz-game"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# "replay" gates the zip-based boardspace game loader (C deps: bzip2, lzma, zstd).
+# Enabled by default so the zertz-tools binary works as usual.
+# Consumers that only need the library (e.g. zertz-wasm) can disable it.
+default = ["replay"]
+replay = ["dep:zip", "core-game/zip-sgf"]
+
 [dependencies]
-core-game = { path = "../core-game" }
+core-game = { path = "../core-game", default-features = false }
 rand = { workspace = true }
 rand_distr = { workspace = true }
-zip = "2"
+zip = { version = "2", optional = true }
 clap = { workspace = true }
 
 [lib]
@@ -17,3 +24,4 @@ path = "src/lib.rs"
 [[bin]]
 name = "zertz-tools"
 path = "src/main.rs"
+required-features = ["replay"]

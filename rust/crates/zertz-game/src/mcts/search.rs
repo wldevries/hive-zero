@@ -587,6 +587,11 @@ impl MctsSearch {
         (board_buf, reserve_buf)
     }
 
+    /// Return the board at a leaf node for rollout evaluation.
+    pub fn get_leaf_board(&self, leaf: NodeId) -> &ZertzBoard {
+        &self.arena.get(leaf).board
+    }
+
     /// Total visit count at the root.
     pub fn root_visit_count(&self) -> u32 {
         self.arena.get(self.root).visit_count

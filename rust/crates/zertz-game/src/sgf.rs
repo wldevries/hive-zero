@@ -495,6 +495,7 @@ pub fn parse_game(text: &str) -> Result<GameRecord, ParseError> {
 
 /// Iterate over all .sgf games inside a zip archive, streaming from a reader.
 /// Calls `f` for each successfully parsed game.
+#[cfg(feature = "replay")]
 pub fn iter_games_in_zip<R, F>(reader: R, mut f: F) -> Result<(), String>
 where
     R: std::io::Read + std::io::Seek,
