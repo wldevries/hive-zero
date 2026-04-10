@@ -9,7 +9,7 @@ use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArra
 use hive_game::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE, f32_to_bf16};
 use crate::inference::HiveInference;
 use hive_game::game::{Game, GameState};
-use hive_game::hex::hex_neighbors;
+use core_game::hex::hex_neighbors;
 use core_game::game::{Game as GameTrait, PolicyIndex, Outcome, Player};
 use core_game::mcts::search::MctsSearch;
 use core_game::mcts::arena::NodeId;

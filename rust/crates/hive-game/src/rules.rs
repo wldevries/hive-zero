@@ -1,6 +1,6 @@
 /// Movement rules for each Hive piece type.
 
-use crate::hex::{Hex, DIRECTIONS, hex_add, hex_neighbors};
+use core_game::hex::{Hex, DIRECTIONS, hex_add, hex_neighbors};
 use crate::board::Board;
 use crate::piece::{Piece, PieceColor, PieceType};
 

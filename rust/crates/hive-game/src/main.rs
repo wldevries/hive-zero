@@ -1,6 +1,7 @@
 mod replay;
 
 use clap::{Parser, Subcommand};
+use core_game::hex::{Hex, hex_neighbors};
 use hive_game::sgf;
 use hive_game::game::Game;
 use hive_game::piece::{PieceColor, PieceType, player_pieces};
@@ -323,8 +324,8 @@ fn run_random(n: u32) {
         let mut rng = rand::thread_rng();
         let mut move_num = 0u32;
 
-        let mut last_to:   Option<hive_game::hex::Hex> = None;
-        let mut last_from: Option<hive_game::hex::Hex> = None;
+        let mut last_to:   Option<Hex> = None;
+        let mut last_from: Option<Hex> = None;
 
         while !game.is_game_over() {
             let moves = game.valid_moves();
@@ -387,8 +388,6 @@ fn pct(n: u64, total: u64) -> f64 {
 }
 
 fn run_stats(games_path: &str) {
-    use hive_game::hex::hex_neighbors;
-
     let path = Path::new(games_path);
     if !path.exists() {
         eprintln!("Path not found: {games_path}");

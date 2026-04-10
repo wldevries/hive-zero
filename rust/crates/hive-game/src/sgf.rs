@@ -6,7 +6,7 @@
 /// boardspace grid coordinates to axial hex coordinates.
 
 use crate::game::{Game, Move};
-use crate::hex::Hex;
+use core_game::hex::Hex;
 use crate::piece::{Piece, PieceColor, PieceType};
 
 pub use core_game::sgf::{

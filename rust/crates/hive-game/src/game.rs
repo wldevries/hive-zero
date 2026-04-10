@@ -1,6 +1,6 @@
 /// Game state management for Hive.
 
-use crate::hex::{Hex, hex_neighbors};
+use core_game::hex::{Hex, hex_neighbors};
 use crate::board::Board;
 use crate::piece::{Piece, PieceColor, PieceType, PIECE_COUNTS, ALL_PIECE_TYPES, player_pieces};
 use crate::rules::{get_moves, get_placements};
