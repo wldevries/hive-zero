@@ -236,6 +236,10 @@ let selectedColor = null;
 let selectedCell  = null;
 let capSrcLabel   = null;
 
+// ── last-move highlight state ─────────────────────────────────────────────────
+let lastMoveInfo       = null;  // null | {type:'place'|'capture', ...}
+let pendingCaptureMoves = [];   // [{mv, statesBefore}] accumulated during a chain
+
 // ── SVG setup ─────────────────────────────────────────────────────────────────
 const svgNS = 'http://www.w3.org/2000/svg';
 const svg   = document.getElementById('board-svg');
@@ -418,6 +422,8 @@ function updateBoard() {
   const nnReady = ortSession !== null;
   document.getElementById('rollouts-row').style.display = nnReady ? 'none' : 'flex';
   aiBtn.classList.toggle('nn-mode', nnReady);
+
+  renderLastMove();
 }
 
 // ── interaction ───────────────────────────────────────────────────────────────
@@ -430,8 +436,23 @@ function resetPhase() {
 
 function playMove(mv) {
   try {
+    const statesBefore = Array.from(game.cell_states());
     game.play(mv);
     log(`Played: ${mv}`);
+    if (mv.trim().startsWith('CAP')) {
+      pendingCaptureMoves.push({ mv, statesBefore });
+      if (game.is_mid_capture()) {
+        resetPhase();
+        handleMidCapture();
+        updateBoard();
+        return;
+      }
+      lastMoveInfo = computeLastMoveInfo(pendingCaptureMoves);
+      pendingCaptureMoves = [];
+    } else {
+      pendingCaptureMoves = [];
+      lastMoveInfo = computeLastMoveInfo([{ mv, statesBefore }]);
+    }
     resetPhase();
     handleMidCapture();
     updateBoard();
@@ -447,6 +468,8 @@ function onColorClick(color) {
   if (!moves.some(m => m.startsWith(color + ' '))) return;
   selectedColor = color;
   phase = 'pick-color';
+  lastMoveInfo = null;
+  pendingCaptureMoves = [];
   updateBoard();
 }
 
@@ -485,9 +508,104 @@ function onCellClick(idx) {
     if (moves.some(m => m.startsWith('CAP ') && m.trim().split(/\s+/)[1] === label)) {
       capSrcLabel = label;
       phase = 'pick-cap-dst';
+      lastMoveInfo = null;
+      pendingCaptureMoves = [];
       updateBoard();
     }
   }
+}
+
+// ── last-move highlight helpers ───────────────────────────────────────────────
+function labelToIdx(label) {
+  return coords.findIndex((c) => coordLabel(c.q, c.r) === label);
+}
+
+function captureMidLabel(label1, label2) {
+  const i1 = labelToIdx(label1), i2 = labelToIdx(label2);
+  if (i1 < 0 || i2 < 0) return null;
+  const midQ = (coords[i1].q + coords[i2].q) / 2;
+  const midR = (coords[i1].r + coords[i2].r) / 2;
+  return coordLabel(midQ, midR);
+}
+
+function computeLastMoveInfo(moves) {
+  if (!moves.length) return null;
+  const firstParts = moves[0].mv.trim().split(/\s+/);
+  if (firstParts[0] === 'CAP') {
+    const path = [firstParts[1]];
+    const capturedBalls = [];
+    for (const { mv, statesBefore } of moves) {
+      const parts = mv.trim().split(/\s+/);
+      path.push(parts[2]);
+      const mid = captureMidLabel(parts[1], parts[2]);
+      if (mid !== null) {
+        const idx = labelToIdx(mid);
+        if (idx >= 0 && statesBefore[idx] >= 2)
+          capturedBalls.push({ label: mid, color: statesBefore[idx] });
+      }
+    }
+    return { type: 'capture', path, capturedBalls };
+  }
+  // Place move: "W D4" or "W D4 E5"
+  return { type: 'place', placedLabel: firstParts[1], removedLabel: firstParts[2] || null };
+}
+
+function addHexRing(parent, label, stroke, sw, dasharray, opacity) {
+  const idx = labelToIdx(label);
+  if (idx < 0) return;
+  const { x, y } = hexCenter(coords[idx].q, coords[idx].r);
+  const poly = document.createElementNS(svgNS, 'polygon');
+  poly.setAttribute('points', hexPoints(x, y, HEX_SIZE - 1.5));
+  poly.setAttribute('fill', 'none');
+  poly.setAttribute('stroke', stroke);
+  poly.setAttribute('stroke-width', sw);
+  if (dasharray) poly.setAttribute('stroke-dasharray', dasharray);
+  poly.setAttribute('opacity', opacity);
+  parent.appendChild(poly);
+}
+
+function renderLastMove() {
+  const old = document.getElementById('move-overlay');
+  if (old) old.remove();
+  if (!lastMoveInfo) return;
+
+  const overlay = document.createElementNS(svgNS, 'g');
+  overlay.id = 'move-overlay';
+  overlay.style.pointerEvents = 'none';
+
+  if (lastMoveInfo.type === 'place') {
+    addHexRing(overlay, lastMoveInfo.placedLabel, '#aaff44', 3, null, 0.85);
+    if (lastMoveInfo.removedLabel)
+      addHexRing(overlay, lastMoveInfo.removedLabel, '#ff6644', 2.5, '7,4', 0.75);
+  } else {
+    const { path, capturedBalls } = lastMoveInfo;
+    // Ghost marbles first (so path outlines render on top)
+    for (const { label, color } of capturedBalls) {
+      const idx = labelToIdx(label);
+      if (idx < 0) continue;
+      const { x, y } = hexCenter(coords[idx].q, coords[idx].r);
+      const mc = MARBLE_COLORS[color];
+      if (!mc) continue;
+      const g = document.createElementNS(svgNS, 'circle');
+      g.setAttribute('cx', x); g.setAttribute('cy', y);
+      g.setAttribute('r', HEX_SIZE * 0.45);
+      g.setAttribute('fill', mc.fill);
+      g.setAttribute('stroke', mc.stroke);
+      g.setAttribute('stroke-width', '1.5');
+      g.setAttribute('opacity', '0.35');
+      overlay.appendChild(g);
+    }
+    // Path outlines: start = orange, end = bright cyan, intermediate = dim cyan
+    path.forEach((label, i) => {
+      const isStart = i === 0, isEnd = i === path.length - 1;
+      const stroke = isStart ? '#ff9900' : '#00ddff';
+      const sw     = (isStart || isEnd) ? 3 : 2;
+      const op     = (isStart || isEnd) ? 0.9 : 0.55;
+      addHexRing(overlay, label, stroke, sw, null, op);
+    });
+  }
+
+  svg.appendChild(overlay);
 }
 
 // ── mid-capture auto-detection ────────────────────────────────────────────────
@@ -614,11 +732,13 @@ document.getElementById('ai-btn').addEventListener('click', async () => {
   const btn     = document.getElementById('ai-btn');
   btn.disabled  = true;
 
+  const aiMoves = [];
   try {
     // Loop to automatically play all hops in an AI capture chain.
     do {
       const t0 = performance.now();
       let mv;
+      const statesBefore = Array.from(game.cell_states());
 
       if (ortSession !== null) {
         // ── NN + MCTS via ORT Web ───────────────────────────────────────
@@ -639,9 +759,12 @@ document.getElementById('ai-btn').addEventListener('click', async () => {
       }
 
       game.play(mv);
+      aiMoves.push({ mv, statesBefore });
       resetPhase();
     } while (game.is_mid_capture());
 
+    lastMoveInfo = computeLastMoveInfo(aiMoves);
+    pendingCaptureMoves = [];
     updateBoard();
   } catch (e) {
     log(`AI error: ${e}`);
