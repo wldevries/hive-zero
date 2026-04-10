@@ -1,0 +1,15 @@
+{
+  "name": "zertz-wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "zertz_wasm_bg.wasm",
+    "zertz_wasm.js",
+    "zertz_wasm.d.ts"
+  ],
+  "main": "zertz_wasm.js",
+  "types": "zertz_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

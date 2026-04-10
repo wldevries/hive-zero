@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zertz</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; justify-content: center; padding: 20px; gap: 24px; }
+h1 { font-size: 1.4rem; color: #a0c8ff; margin-bottom: 12px; }
+h2 { font-size: 0.85rem; color: #8899bb; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
+
+#board-wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+svg { display: block; }
+
+.hex { cursor: default; transition: opacity 0.1s; }
+.hex.clickable { cursor: pointer; }
+.hex.clickable:hover { opacity: 0.85; }
+
+#sidebar { width: 240px; display: flex; flex-direction: column; gap: 16px; padding-top: 4px; }
+
+.panel { background: #16213e; border: 1px solid #2a3a5e; border-radius: 8px; padding: 12px; }
+
+.status-row { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot.p1 { background: #7bbfff; }
+.dot.p2 { background: #ff9966; }
+#status-text { color: #c0d8ff; font-weight: 600; }
+#phase-text { color: #8899bb; font-size: 0.8rem; margin-top: 4px; }
+
+.supply-grid, .capture-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin-top: 4px; }
+.marble-count { text-align: center; font-size: 0.8rem; }
+.marble-count .icon { font-size: 1.1rem; }
+.marble-count .val { color: #c0d8ff; }
+
+/* Marble color picker */
+#color-picker { display: flex; gap: 12px; justify-content: center; align-items: center; padding: 8px 0; }
+#color-picker.hidden { display: none; }
+.color-btn {
+  width: 44px; height: 44px; border-radius: 50%; border: 3px solid transparent;
+  cursor: pointer; transition: border-color 0.15s, transform 0.1s;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.7rem; font-weight: 700; color: #333;
+}
+.color-btn:hover { transform: scale(1.1); }
+.color-btn.selected { border-color: #ffd700; transform: scale(1.12); }
+.color-btn.disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+#btn-white { background: #f0f0f0; color: #555; }
+#btn-grey  { background: #999; color: #eee; }
+#btn-black { background: #222; color: #ddd; border-color: #555; }
+#btn-black.selected { border-color: #ffd700; }
+
+#ai-btn {
+  width: 100%; padding: 10px; background: #1a4080; border: 1px solid #3060a0;
+  border-radius: 6px; color: #a0c8ff; font-size: 0.9rem; cursor: pointer;
+  font-weight: 600; transition: background 0.15s;
+}
+#ai-btn:hover:not(:disabled) { background: #2a5090; }
+#ai-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+#ai-btn.nn-mode { background: #1a5030; border-color: #306050; color: #80d8b0; }
+#ai-btn.nn-mode:hover:not(:disabled) { background: #2a6040; }
+#cancel-btn {
+  width: 100%; padding: 8px; background: #402010; border: 1px solid #603020;
+  border-radius: 6px; color: #ff9966; font-size: 0.85rem; cursor: pointer;
+  font-weight: 600; transition: background 0.15s; display: none;
+}
+#cancel-btn:hover { background: #503020; }
+
+.settings-row { display: flex; align-items: center; justify-content: space-between; font-size: 0.8rem; color: #8899bb; margin-top: 6px; }
+.settings-row input[type=number] { width: 60px; background: #0d1b30; border: 1px solid #2a3a5e; color: #c0d8ff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem; }
+
+/* Model status */
+#model-row { display: flex; align-items: center; justify-content: space-between; font-size: 0.8rem; margin-top: 6px; }
+.model-badge {
+  font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; font-weight: 600;
+}
+.model-badge.loading { background: #2a3a1a; color: #88aa60; }
+.model-badge.ready    { background: #1a3a2a; color: #60d090; }
+.model-badge.failed   { background: #3a1a1a; color: #d06060; }
+.model-badge.none     { background: #2a2a3a; color: #8899bb; }
+
+#value-row { display: flex; align-items: center; justify-content: space-between; font-size: 0.8rem; color: #8899bb; margin-top: 6px; display: none; }
+#value-bar-wrap { flex: 1; margin-left: 8px; height: 6px; background: #0d1b30; border-radius: 3px; overflow: hidden; }
+#value-bar { height: 100%; width: 50%; background: #60d090; border-radius: 3px; transition: width 0.3s, background 0.3s; }
+
+#log { font-size: 0.75rem; color: #667799; max-height: 100px; overflow-y: auto; }
+
+#outcome-banner { display: none; padding: 10px; border-radius: 6px; text-align: center; font-weight: 700; font-size: 1rem; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<div id="board-wrap">
+  <h1>Zertz</h1>
+  <svg id="board-svg" viewBox="-220 -220 440 440" width="440" height="440"></svg>
+  <div id="color-picker" class="hidden">
+    <button class="color-btn" id="btn-white" title="White">W</button>
+    <button class="color-btn" id="btn-grey"  title="Grey">G</button>
+    <button class="color-btn" id="btn-black" title="Black">B</button>
+  </div>
+</div>
+
+<div id="sidebar">
+  <div class="panel">
+    <h2>Turn</h2>
+    <div class="status-row">
+      <span class="dot" id="player-dot"></span>
+      <span id="status-text">—</span>
+    </div>
+    <div id="phase-text"></div>
+    <div id="outcome-banner"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Supply (shared)</h2>
+    <div class="supply-grid">
+      <div class="marble-count"><div class="icon">⚪</div><div class="val" id="sup-w">—</div></div>
+      <div class="marble-count"><div class="icon">🔘</div><div class="val" id="sup-g">—</div></div>
+      <div class="marble-count"><div class="icon">⚫</div><div class="val" id="sup-b">—</div></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Captures</h2>
+    <div style="font-size:0.75rem;color:#8899bb;margin-bottom:4px;">P1 (blue) / P2 (orange)</div>
+    <div class="capture-grid">
+      <div class="marble-count"><div class="icon">⚪</div><div class="val" id="cap-p1w">—</div><div style="color:#667799;font-size:0.7rem">P1</div></div>
+      <div class="marble-count"><div class="icon">🔘</div><div class="val" id="cap-p1g">—</div><div style="color:#667799;font-size:0.7rem">P1</div></div>
+      <div class="marble-count"><div class="icon">⚫</div><div class="val" id="cap-p1b">—</div><div style="color:#667799;font-size:0.7rem">P1</div></div>
+      <div class="marble-count"><div class="icon">⚪</div><div class="val" id="cap-p2w">—</div><div style="color:#667799;font-size:0.7rem">P2</div></div>
+      <div class="marble-count"><div class="icon">🔘</div><div class="val" id="cap-p2g">—</div><div style="color:#667799;font-size:0.7rem">P2</div></div>
+      <div class="marble-count"><div class="icon">⚫</div><div class="val" id="cap-p2b">—</div><div style="color:#667799;font-size:0.7rem">P2</div></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>AI</h2>
+
+    <!-- Model status -->
+    <div id="model-row">
+      <span style="color:#8899bb">Model</span>
+      <span class="model-badge none" id="model-badge">not loaded</span>
+    </div>
+
+    <!-- Value bar (shown after NN eval) -->
+    <div id="value-row" style="margin-top:6px">
+      <span>Eval</span>
+      <div id="value-bar-wrap"><div id="value-bar"></div></div>
+      <span id="value-label" style="margin-left:6px;color:#c0d8ff;min-width:40px;text-align:right">—</span>
+    </div>
+
+    <div class="settings-row">
+      <label>Simulations</label>
+      <input type="number" id="sims-input" value="200" min="50" max="2000" step="50">
+    </div>
+    <div class="settings-row" id="rollouts-row">
+      <label>Rollouts/leaf</label>
+      <input type="number" id="rollouts-input" value="1" min="1" max="10">
+    </div>
+
+    <button id="ai-btn" style="margin-top:10px">AI Move (P2)</button>
+    <button id="cancel-btn" style="margin-top:6px">Cancel</button>
+  </div>
+
+  <div class="panel">
+    <h2>Log</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<!-- ORT Web — includes WebGPU EP; falls back to WASM CPU automatically -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.webgpu.min.js"></script>
+
+<script type="module">
+import init, {
+  ZertzGame, hex_coords, board_cell_count,
+  board_flat_size, reserve_size, place_head_size, cap_head_size,
+} from './pkg/zertz_wasm.js';
+
+// ── ORT Web setup ─────────────────────────────────────────────────────────────
+// Point ORT at the CDN for its own WASM binaries (threading, SIMD, etc.)
+if (typeof ort !== 'undefined') {
+  ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
+}
+
+let ortSession = null;  // InferenceSession once model is loaded
+let ortEp = 'none';     // which EP was actually used
+
+// ── hex geometry ─────────────────────────────────────────────────────────────
+const HEX_SIZE = 28;
+
+function hexCenter(q, r) {
+  return {
+    x: HEX_SIZE * (1.5 * q),
+    y: HEX_SIZE * (Math.sqrt(3) * r + Math.sqrt(3) / 2 * q),
+  };
+}
+
+function hexPoints(cx, cy, size) {
+  return Array.from({ length: 6 }, (_, i) => {
+    const a = Math.PI / 3 * i;
+    return `${cx + size * Math.cos(a)},${cy + size * Math.sin(a)}`;
+  }).join(' ');
+}
+
+const RADIUS = 3;
+function coordLabel(q, r) {
+  const col = String.fromCharCode('A'.charCodeAt(0) + q + RADIUS);
+  const row = RADIUS + 1 - r;
+  return `${col}${row}`;
+}
+
+// ── constants ─────────────────────────────────────────────────────────────────
+const HIGHLIGHT = {
+  cap_src:   { stroke: '#ff8800', sw: 2.5 },
+  cap_dst:   { stroke: '#00ccff', sw: 2.5 },
+  place:     { stroke: '#44dd44', sw: 2.5 },
+  remove:    { stroke: '#ff4444', sw: 2.5 },
+};
+
+const RING_FILL    = '#d4c4a0';
+const RING_STROKE  = '#8a7a60';
+const REMOVED_FILL = '#2a2a3a';
+const MARBLE_COLORS = {
+  2: { fill: '#f0f0f0', stroke: '#aaaaaa' },
+  3: { fill: '#999999', stroke: '#555555' },
+  4: { fill: '#222222', stroke: '#000000' },
+};
+
+// ── state ─────────────────────────────────────────────────────────────────────
+let game;
+let coords = [];
+
+let phase = 'idle';
+let selectedColor = null;
+let selectedCell  = null;
+let capSrcLabel   = null;
+
+// ── SVG setup ─────────────────────────────────────────────────────────────────
+const svgNS = 'http://www.w3.org/2000/svg';
+const svg   = document.getElementById('board-svg');
+
+function buildBoard() {
+  svg.innerHTML = '';
+  const n   = board_cell_count();
+  const raw = hex_coords();
+  coords = [];
+  for (let i = 0; i < n; i++) {
+    const q = raw[i * 2], r = raw[i * 2 + 1];
+    coords.push({ q, r });
+    const { x, y } = hexCenter(q, r);
+    const g = document.createElementNS(svgNS, 'g');
+    g.dataset.idx = i;
+
+    const poly = document.createElementNS(svgNS, 'polygon');
+    poly.setAttribute('points', hexPoints(x, y, HEX_SIZE - 1.5));
+    poly.setAttribute('fill', RING_FILL);
+    poly.setAttribute('stroke', RING_STROKE);
+    poly.setAttribute('stroke-width', '1');
+    poly.classList.add('hex');
+    g.appendChild(poly);
+
+    const circle = document.createElementNS(svgNS, 'circle');
+    circle.setAttribute('cx', x);
+    circle.setAttribute('cy', y);
+    circle.setAttribute('r', HEX_SIZE * 0.45);
+    circle.style.display = 'none';
+    circle.classList.add('marble');
+    g.appendChild(circle);
+
+    g.addEventListener('click', () => onCellClick(i));
+    svg.appendChild(g);
+  }
+}
+
+// ── rendering ─────────────────────────────────────────────────────────────────
+function getHighlightSet() {
+  const map   = new Map();
+  const moves = game.valid_moves();
+  if (phase === 'idle') {
+    moves.filter(m => m.startsWith('CAP ')).forEach(m => {
+      map.set(m.trim().split(/\s+/)[1], 'cap_src');
+    });
+  } else if (phase === 'pick-color') {
+    const prefix = selectedColor + ' ';
+    moves.filter(m => m.startsWith(prefix)).forEach(m => {
+      map.set(m.trim().split(/\s+/)[1], 'place');
+    });
+  } else if (phase === 'pick-remove') {
+    const prefix = `${selectedColor} ${selectedCell} `;
+    moves.filter(m => m.startsWith(prefix)).forEach(m => {
+      const parts = m.trim().split(/\s+/);
+      if (parts[2]) map.set(parts[2], 'remove');
+    });
+  } else if (phase === 'pick-cap-dst') {
+    moves.filter(m => {
+      const parts = m.trim().split(/\s+/);
+      return parts[0] === 'CAP' && parts[1] === capSrcLabel;
+    }).forEach(m => {
+      map.set(m.trim().split(/\s+/)[2], 'cap_dst');
+    });
+  }
+  return map;
+}
+
+function updateBoard() {
+  const states  = game.cell_states();
+  const supply  = game.supply_counts();
+  const caps    = game.capture_counts();
+  const outcome = game.outcome();
+  const player  = game.next_player();
+  const moves   = game.valid_moves();
+  const hlMap   = getHighlightSet();
+
+  const groups = svg.querySelectorAll('g[data-idx]');
+  groups.forEach(g => {
+    const i     = parseInt(g.dataset.idx);
+    const s     = states[i];
+    const poly  = g.querySelector('polygon');
+    const circle = g.querySelector('circle');
+    const label = coordLabel(coords[i].q, coords[i].r);
+
+    if (s === 0) {
+      poly.setAttribute('fill', REMOVED_FILL);
+      poly.setAttribute('stroke', '#333344');
+      circle.style.display = 'none';
+    } else {
+      poly.setAttribute('fill', RING_FILL);
+      if (s >= 2) {
+        const mc = MARBLE_COLORS[s];
+        circle.setAttribute('fill', mc.fill);
+        circle.setAttribute('stroke', mc.stroke);
+        circle.setAttribute('stroke-width', '1.5');
+        circle.style.display = '';
+      } else {
+        circle.style.display = 'none';
+      }
+    }
+
+    if (hlMap.has(label)) {
+      const hl = HIGHLIGHT[hlMap.get(label)];
+      poly.setAttribute('stroke', hl.stroke);
+      poly.setAttribute('stroke-width', hl.sw);
+      poly.classList.add('clickable');
+    } else {
+      poly.setAttribute('stroke', s === 0 ? '#333344' : RING_STROKE);
+      poly.setAttribute('stroke-width', '1');
+      poly.classList.remove('clickable');
+    }
+  });
+
+  document.getElementById('sup-w').textContent = supply[0];
+  document.getElementById('sup-g').textContent = supply[1];
+  document.getElementById('sup-b').textContent = supply[2];
+  document.getElementById('cap-p1w').textContent = caps[0];
+  document.getElementById('cap-p1g').textContent = caps[1];
+  document.getElementById('cap-p1b').textContent = caps[2];
+  document.getElementById('cap-p2w').textContent = caps[3];
+  document.getElementById('cap-p2g').textContent = caps[4];
+  document.getElementById('cap-p2b').textContent = caps[5];
+
+  const dot        = document.getElementById('player-dot');
+  const statusText = document.getElementById('status-text');
+  const phaseText  = document.getElementById('phase-text');
+  const banner     = document.getElementById('outcome-banner');
+  const aiBtn      = document.getElementById('ai-btn');
+
+  if (outcome === 'ongoing') {
+    dot.className = 'dot ' + (player === 0 ? 'p1' : 'p2');
+    statusText.textContent = player === 0 ? 'Player 1 (blue)' : 'Player 2 (orange)';
+    banner.style.display = 'none';
+    aiBtn.disabled = false;
+
+    const phaseHints = {
+      'idle':        game.is_mid_capture() ? 'Continue capture chain' : 'Place a marble or capture',
+      'pick-color':  'Pick a marble color',
+      'pick-cell':   'Pick cell to place marble',
+      'pick-remove': 'Pick a ring to remove',
+      'pick-cap-dst':'Pick capture destination',
+    };
+    phaseText.textContent = phaseHints[phase] || '';
+  } else {
+    dot.className = 'dot';
+    phaseText.textContent = '';
+    if (outcome === 'p1') {
+      banner.textContent = 'Player 1 wins!';
+      banner.style.background = '#1a4060';
+      statusText.textContent = 'Game over';
+    } else if (outcome === 'p2') {
+      banner.textContent = 'Player 2 wins!';
+      banner.style.background = '#402010';
+      statusText.textContent = 'Game over';
+    } else {
+      banner.textContent = 'Draw';
+      banner.style.background = '#303020';
+      statusText.textContent = 'Game over';
+    }
+    banner.style.display = 'block';
+    aiBtn.disabled = true;
+  }
+
+  const picker = document.getElementById('color-picker');
+  const colorVisible = outcome === 'ongoing' && (phase === 'idle' || phase === 'pick-color') && !game.is_mid_capture();
+  picker.classList.toggle('hidden', !colorVisible);
+
+  if (colorVisible) {
+    ['W', 'G', 'B'].forEach((c, idx) => {
+      const btn       = document.getElementById(['btn-white','btn-grey','btn-black'][idx]);
+      const available = supply[idx] > 0 && moves.some(m => m.startsWith(c + ' '));
+      btn.classList.toggle('disabled', !available);
+      btn.classList.toggle('selected', c === selectedColor);
+    });
+  }
+
+  document.getElementById('cancel-btn').style.display = (phase !== 'idle') ? 'block' : 'none';
+
+  // Show/hide rollouts row and update AI button style based on NN mode
+  const nnReady = ortSession !== null;
+  document.getElementById('rollouts-row').style.display = nnReady ? 'none' : 'flex';
+  aiBtn.classList.toggle('nn-mode', nnReady);
+}
+
+// ── interaction ───────────────────────────────────────────────────────────────
+function resetPhase() {
+  phase = 'idle';
+  selectedColor = null;
+  selectedCell  = null;
+  capSrcLabel   = null;
+}
+
+function playMove(mv) {
+  try {
+    game.play(mv);
+    log(`Played: ${mv}`);
+    resetPhase();
+    updateBoard();
+  } catch (e) {
+    log(`Error: ${e}`);
+    resetPhase();
+    updateBoard();
+  }
+}
+
+function onColorClick(color) {
+  const moves = game.valid_moves();
+  if (!moves.some(m => m.startsWith(color + ' '))) return;
+  selectedColor = color;
+  phase = 'pick-color';
+  updateBoard();
+}
+
+function onCellClick(idx) {
+  if (game.outcome() !== 'ongoing') return;
+  const label = coordLabel(coords[idx].q, coords[idx].r);
+  const moves = game.valid_moves();
+
+  if (phase === 'pick-color') {
+    const prefix   = selectedColor + ' ';
+    const matching = moves.filter(m => m.startsWith(prefix) && m.trim().split(/\s+/)[1] === label);
+    if (matching.length === 0) return;
+    if (matching.some(m => m.trim().split(/\s+/).length === 2)) {
+      playMove(`${selectedColor} ${label}`);
+      return;
+    }
+    selectedCell = label;
+    phase = 'pick-remove';
+    updateBoard();
+    return;
+  }
+
+  if (phase === 'pick-remove') {
+    const mv = `${selectedColor} ${selectedCell} ${label}`;
+    if (moves.includes(mv)) playMove(mv);
+    return;
+  }
+
+  if (phase === 'pick-cap-dst') {
+    const mv = `CAP ${capSrcLabel} ${label}`;
+    if (moves.includes(mv)) playMove(mv);
+    return;
+  }
+
+  if (phase === 'idle') {
+    if (moves.some(m => m.startsWith('CAP ') && m.trim().split(/\s+/)[1] === label)) {
+      capSrcLabel = label;
+      phase = 'pick-cap-dst';
+      updateBoard();
+    }
+  }
+}
+
+// ── mid-capture auto-detection ────────────────────────────────────────────────
+function handleMidCapture() {
+  if (!game.is_mid_capture()) return false;
+  const moves = game.valid_moves();
+  const srcs  = new Set(moves.map(m => m.trim().split(/\s+/)[1]));
+  if (srcs.size === 1) {
+    capSrcLabel = [...srcs][0];
+    phase = 'pick-cap-dst';
+    return true;
+  }
+  return false;
+}
+
+// ── color preference (post-MCTS) ──────────────────────────────────────────────
+function applyColorPreference(validMoves, aiMove) {
+  const parts = aiMove.trim().split(/\s+/);
+  if (!['W', 'G', 'B'].includes(parts[0])) return aiMove;
+  const rest = parts.slice(1).join(' ');
+  for (const color of ['W', 'G', 'B']) {
+    const candidate = `${color} ${rest}`;
+    if (validMoves.some(m => m === candidate)) return candidate;
+  }
+  return aiMove;
+}
+
+// ── ORT eval function ─────────────────────────────────────────────────────────
+// Called by the WASM MCTS with batches of encoded positions.
+// boards/reserves are Float32Array views from WASM linear memory.
+async function ortEvalBatch(boards, reserves, n) {
+  const BOARD_CHANNELS = 6, GRID = 7, RES_SIZE = 22;
+
+  // Copy into plain Float32Arrays (WASM memory views can't be passed directly to ORT).
+  const boardData   = new Float32Array(boards);
+  const reserveData = new Float32Array(reserves);
+
+  const boardTensor   = new ort.Tensor('float32', boardData,   [n, BOARD_CHANNELS, GRID, GRID]);
+  const reserveTensor = new ort.Tensor('float32', reserveData, [n, RES_SIZE]);
+
+  const outputs = await ortSession.run({ board: boardTensor, reserve: reserveTensor });
+
+  // ORT returns typed arrays whose .data may be BigInt64Array for integer tensors —
+  // force f32 views so the WASM side always sees Float32Array.
+  return [
+    new Float32Array(outputs.place.data.buffer,      outputs.place.data.byteOffset,      outputs.place.data.byteLength      / 4),
+    new Float32Array(outputs.cap_source.data.buffer,  outputs.cap_source.data.byteOffset,  outputs.cap_source.data.byteLength  / 4),
+    new Float32Array(outputs.cap_dest.data.buffer,    outputs.cap_dest.data.byteOffset,    outputs.cap_dest.data.byteLength    / 4),
+    new Float32Array(outputs.value.data.buffer,       outputs.value.data.byteOffset,       outputs.value.data.byteLength       / 4),
+  ];
+}
+
+// ── model loading ─────────────────────────────────────────────────────────────
+function setModelBadge(state, text) {
+  const badge = document.getElementById('model-badge');
+  badge.className = 'model-badge ' + state;
+  badge.textContent = text;
+}
+
+async function loadModel(url) {
+  if (typeof ort === 'undefined') {
+    setModelBadge('failed', 'ORT unavailable');
+    log('onnxruntime-web failed to load — check your internet connection.');
+    return;
+  }
+  setModelBadge('loading', 'loading…');
+  log(`Loading ONNX model from ${url}…`);
+  try {
+    // Fetch the ONNX protobuf as bytes.
+    const modelResp = await fetch(url);
+    if (!modelResp.ok) throw new Error(`HTTP ${modelResp.status} fetching ${url}`);
+    const modelBytes = new Uint8Array(await modelResp.arrayBuffer());
+
+    // PyTorch dynamo export splits weights into a companion <name>.data file.
+    // Probe for it and pass it via the externalData session option if found.
+    const dataUrl  = url + '.data';
+    const dataName = dataUrl.split('/').pop();
+    const sessionOptions = { executionProviders: ['webgpu', 'wasm'] };
+
+    const dataResp = await fetch(dataUrl).catch(() => null);
+    if (dataResp && dataResp.ok) {
+      log(`Loading weight data (${dataName})…`);
+      const dataBytes = new Uint8Array(await dataResp.arrayBuffer());
+      sessionOptions.externalData = [{ path: dataName, data: dataBytes }];
+    }
+
+    ortSession = await ort.InferenceSession.create(modelBytes, sessionOptions);
+
+    // Detect execution provider: navigator.gpu present → WebGPU session was created.
+    const ep = (typeof navigator !== 'undefined' && 'gpu' in navigator) ? 'WebGPU' : 'CPU';
+    ortEp = ep;
+    setModelBadge('ready', `ready · ${ep}`);
+    log(`ONNX model loaded (${ep}) — NN+MCTS active.`);
+    updateBoard();
+  } catch (e) {
+    ortSession = null;
+    const msg = (e && e.message) ? e.message : String(e);
+    setModelBadge('failed', 'load failed');
+    log(`Model load error: ${msg}`);
+    console.error('ORT load failed:', e);
+    updateBoard();
+  }
+}
+
+// ── value bar ─────────────────────────────────────────────────────────────────
+function showValue(v) {
+  // v is from AI's perspective: +1 = AI winning, -1 = human winning.
+  // Bar: 0%=human winning, 50%=equal, 100%=AI winning.
+  const pct = Math.round((v + 1) / 2 * 100);
+  const bar   = document.getElementById('value-bar');
+  const label = document.getElementById('value-label');
+  const row   = document.getElementById('value-row');
+
+  row.style.display = 'flex';
+  bar.style.width   = `${pct}%`;
+  bar.style.background = v > 0.1 ? '#d06060' : v < -0.1 ? '#60d090' : '#8899bb';
+  label.textContent = (v >= 0 ? '+' : '') + v.toFixed(2);
+}
+
+// ── AI ────────────────────────────────────────────────────────────────────────
+document.getElementById('ai-btn').addEventListener('click', async () => {
+  const sims    = parseInt(document.getElementById('sims-input').value)   || 300;
+  const rollouts = parseInt(document.getElementById('rollouts-input').value) || 1;
+  const btn     = document.getElementById('ai-btn');
+  btn.disabled  = true;
+
+  try {
+    const t0 = performance.now();
+    let mv;
+
+    if (ortSession !== null) {
+      // ── NN + MCTS via ORT Web ─────────────────────────────────────────
+      btn.textContent = 'Thinking (NN)…';
+      const result = await game.best_move_nn(ortEvalBatch, sims, 1.5);
+      mv = result.move;
+      showValue(result.value);
+      const ms = (performance.now() - t0).toFixed(0);
+      const validMoves = game.valid_moves();
+      mv = applyColorPreference(validMoves, mv);
+      log(`AI (NN): ${mv}  val=${result.value.toFixed(2)}  ${sims} sims  ${ms}ms`);
+    } else {
+      // ── random-rollout MCTS fallback ──────────────────────────────────
+      btn.textContent = 'Thinking…';
+      mv = game.best_move_random(sims, rollouts, 1.5);
+      const ms = (performance.now() - t0).toFixed(0);
+      const validMoves = game.valid_moves();
+      mv = applyColorPreference(validMoves, mv);
+      log(`AI (random): ${mv}  ${sims} sims  ${ms}ms`);
+    }
+
+    game.play(mv);
+    resetPhase();
+    handleMidCapture();
+    updateBoard();
+  } catch (e) {
+    log(`AI error: ${e}`);
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = ortSession ? 'AI Move NN (P2)' : 'AI Move (P2)';
+  }
+});
+
+document.getElementById('cancel-btn').addEventListener('click', () => {
+  resetPhase();
+  updateBoard();
+});
+
+['W', 'G', 'B'].forEach((c, i) => {
+  const ids = ['btn-white', 'btn-grey', 'btn-black'];
+  document.getElementById(ids[i]).addEventListener('click', () => onColorClick(c));
+});
+
+// ── logging ───────────────────────────────────────────────────────────────────
+function log(msg) {
+  const el = document.getElementById('log');
+  el.innerHTML = `<div>${msg}</div>` + el.innerHTML;
+}
+
+// ── init ──────────────────────────────────────────────────────────────────────
+async function main() {
+  await init();
+  game = new ZertzGame();
+  buildBoard();
+  handleMidCapture();
+  updateBoard();
+  log('Game started. P1 = you, P2 = AI.');
+
+  // Auto-load the ONNX model if it exists alongside the page.
+  loadModel('./zertz_b6_c64.onnx');
+}
+
+main().catch(console.error);
+</script>
+</body>
+</html>

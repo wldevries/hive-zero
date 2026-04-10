@@ -1,0 +1,35 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_zertzgame_free: (a: number, b: number) => void;
+export const board_cell_count: () => number;
+export const board_flat_size: () => number;
+export const cap_head_size: () => number;
+export const hex_coords: () => [number, number];
+export const place_head_size: () => number;
+export const reserve_size: () => number;
+export const zertzgame_best_move: (a: number, b: any, c: number, d: number) => [number, number, number, number];
+export const zertzgame_best_move_nn: (a: number, b: any, c: number, d: number) => any;
+export const zertzgame_best_move_random: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const zertzgame_board_str: (a: number) => [number, number];
+export const zertzgame_capture_counts: (a: number) => [number, number];
+export const zertzgame_cell_states: (a: number) => [number, number];
+export const zertzgame_encode: (a: number) => any;
+export const zertzgame_is_mid_capture: (a: number) => number;
+export const zertzgame_new: () => number;
+export const zertzgame_next_player: (a: number) => number;
+export const zertzgame_outcome: (a: number) => [number, number];
+export const zertzgame_play: (a: number, b: number, c: number) => [number, number];
+export const zertzgame_supply_counts: (a: number) => [number, number];
+export const zertzgame_valid_moves: (a: number) => any;
+export const wasm_bindgen__convert__closures_____invoke__h16d11d9a0c5bd96a: (a: number, b: number, c: any) => [number, number];
+export const wasm_bindgen__convert__closures_____invoke__h31b189bcbc434bb6: (a: number, b: number, c: any, d: any) => void;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_destroy_closure: (a: number, b: number) => void;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_start: () => void;
