@@ -12,6 +12,7 @@
 
 use js_sys::{Array, Float32Array, Function};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::JsFuture;
 
 use core_game::game::{Game, Outcome, Player};
 use zertz_game::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
@@ -68,6 +69,117 @@ fn call_js_eval(
         Float32Array::from(arr.get(2)).to_vec(),
         Float32Array::from(arr.get(3)).to_vec(),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Async eval callback (for ORT Web / GPU inference)
+// ---------------------------------------------------------------------------
+
+/// Call an async JS eval function and await the Promise it returns.
+/// The JS function must accept (boards: Float32Array, reserves: Float32Array, n: number)
+/// and return a Promise resolving to
+/// [place: Float32Array, cap_source: Float32Array, cap_dest: Float32Array, value: Float32Array].
+async fn call_js_eval_async(
+    eval_fn: &Function,
+    boards: &[f32],
+    reserves: &[f32],
+    n: usize,
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>), JsValue> {
+    let boards_js = Float32Array::from(boards);
+    let reserves_js = Float32Array::from(reserves);
+    let n_js = JsValue::from(n as u32);
+    let promise = eval_fn.call3(&JsValue::NULL, &boards_js, &reserves_js, &n_js)?;
+    let result = JsFuture::from(js_sys::Promise::from(promise)).await?;
+    let arr = Array::from(&result);
+    Ok((
+        Float32Array::from(arr.get(0)).to_vec(),
+        Float32Array::from(arr.get(1)).to_vec(),
+        Float32Array::from(arr.get(2)).to_vec(),
+        Float32Array::from(arr.get(3)).to_vec(),
+    ))
+}
+
+/// Async MCTS loop driven by an ORT-Web eval callback (returns Promise per batch).
+/// Mirrors best_move_core but with .await at each NN batch call.
+async fn best_move_nn_impl(
+    board: ZertzBoard,
+    eval_fn: Function,
+    simulations: usize,
+    c_puct: f32,
+) -> Result<JsValue, JsValue> {
+    if board.outcome() != Outcome::Ongoing {
+        return Err(JsValue::from_str("Game is already over"));
+    }
+
+    // Evaluate root position.
+    let mut board_buf = vec![0f32; BOARD_FLAT];
+    let mut reserve_buf = vec![0f32; RESERVE_SIZE];
+    encode_board(&board, &mut board_buf, &mut reserve_buf);
+    let (root_place, root_src, root_dst, _) =
+        call_js_eval_async(&eval_fn, &board_buf, &reserve_buf, 1).await?;
+
+    let root_heads = PolicyHeads {
+        place: &root_place,
+        cap_source: &root_src,
+        cap_dest: &root_dst,
+    };
+    let mut search = MctsSearch::new(simulations + 64);
+    search.c_puct = c_puct;
+    search.init(&board, &root_heads);
+
+    let batch = 16usize;
+    let mut done = 0usize;
+    let mut flat_boards = vec![0f32; batch * BOARD_FLAT];
+    let mut flat_reserves = vec![0f32; batch * RESERVE_SIZE];
+
+    while done < simulations {
+        let n = batch.min(simulations - done);
+        let leaves = search.select_leaves(n);
+        if leaves.is_empty() {
+            break;
+        }
+        let nl = leaves.len();
+
+        for (k, &leaf) in leaves.iter().enumerate() {
+            let (board_enc, reserve_enc) = search.encode_leaf(leaf);
+            flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
+            flat_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE]
+                .copy_from_slice(&reserve_enc);
+        }
+
+        let (lp, ls, ld, vals) = call_js_eval_async(
+            &eval_fn,
+            &flat_boards[..nl * BOARD_FLAT],
+            &flat_reserves[..nl * RESERVE_SIZE],
+            nl,
+        )
+        .await?;
+
+        let leaf_heads: Vec<PolicyHeads> = (0..nl)
+            .map(|k| PolicyHeads {
+                place: &lp[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE],
+                cap_source: &ls[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
+                cap_dest: &ld[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
+            })
+            .collect();
+
+        search.expand_and_backprop(&leaves, &leaf_heads, &vals);
+        done += nl;
+    }
+
+    let dist = search.get_pruned_visit_distribution();
+    let best = dist
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(mv, _)| *mv)
+        .unwrap_or(ZertzMove::Pass);
+
+    // Also surface the root value estimate (negated because root stores opponent's perspective).
+    let root_value = -search.root_value();
+    let obj = js_sys::Object::new();
+    js_sys::Reflect::set(&obj, &JsValue::from_str("move"), &JsValue::from_str(&move_to_str(best)))?;
+    js_sys::Reflect::set(&obj, &JsValue::from_str("value"), &JsValue::from_f64(root_value as f64))?;
+    Ok(JsValue::from(obj))
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +313,24 @@ impl ZertzGame {
         let mv = best_move_core(&self.board, simulations, c_puct, core_eval)
             .map_err(|e| JsValue::from_str(&e))?;
         Ok(move_to_str(mv))
+    }
+
+    /// NN-guided MCTS with an **async** eval callback (ORT Web / GPU inference).
+    ///
+    /// `eval_fn(boards: Float32Array, reserves: Float32Array, n: number)`
+    /// must return a **Promise** resolving to
+    /// `[place: Float32Array, cap_source: Float32Array, cap_dest: Float32Array, value: Float32Array]`.
+    ///
+    /// Returns a `Promise<{move: string, value: number}>`.
+    /// Run this in a Web Worker or via `await` in an async context.
+    pub fn best_move_nn(
+        &self,
+        eval_fn: Function,
+        simulations: usize,
+        c_puct: f32,
+    ) -> js_sys::Promise {
+        let board = self.board.clone();
+        wasm_bindgen_futures::future_to_promise(best_move_nn_impl(board, eval_fn, simulations, c_puct))
     }
 
     /// Random-rollout MCTS — no neural network needed.
