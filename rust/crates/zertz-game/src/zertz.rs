@@ -786,16 +786,9 @@ impl ZertzBoard {
     }
 
     /// Execute a single capture hop and handle mid-capture state transitions.
+    /// Does not validate legality — callers that need legality checks must do
+    /// so before calling (see `apply_move`).
     fn apply_single_hop(&mut self, from: Hex, over: Hex, to: Hex) -> Result<(), String> {
-        // During a capture chain, only the active marble may continue jumping.
-        if let Some(mc) = self.mid_capture {
-            if from != mc.marble_pos {
-                return Err(format!(
-                    "mid-capture continuation must use the marble at ({},{}), not ({},{})",
-                    mc.marble_pos.0, mc.marble_pos.1, from.0, from.1
-                ));
-            }
-        }
         let pi = Self::player_index(self.next_player);
         let marble_from = self.rings[hex_to_index(from)];
         let captured = match self.rings[hex_to_index(over)] {
@@ -825,14 +818,32 @@ impl ZertzBoard {
         Ok(())
     }
 
-    /// Core move execution: applies the move, checks winner, updates history.
+    /// Core move execution: applies the move with legality checks, updates history.
+    /// Use play_mcts / apply_move_no_history for the MCTS hot path (no checks).
     fn apply_move(&mut self, mv: ZertzMove) -> Result<(), String> {
+        if self.outcome != Outcome::Ongoing {
+            return Err("game is already over".to_string());
+        }
         match mv {
-            ZertzMove::Place {
-                color,
-                place_at,
-                remove,
-            } => {
+            ZertzMove::Place { color, place_at, remove } => {
+                if self.mid_capture.is_some() {
+                    return Err("cannot place a marble during a capture chain".to_string());
+                }
+                if !self.generate_first_hops().is_empty() {
+                    return Err("captures are mandatory — must capture instead of placing".to_string());
+                }
+                if self.rings[hex_to_index(place_at)] != Ring::Empty {
+                    return Err(format!("({},{}) is not an empty ring", place_at.0, place_at.1));
+                }
+                if remove == place_at {
+                    return Err("cannot remove the ring you are placing on".to_string());
+                }
+                if self.rings[hex_to_index(remove)] != Ring::Empty {
+                    return Err(format!("({},{}) is not an empty ring to remove", remove.0, remove.1));
+                }
+                if !Self::is_edge_static(&self.rings, remove) {
+                    return Err(format!("({},{}) is not a removable edge ring", remove.0, remove.1));
+                }
                 self.take_marble(color)?;
                 self.rings[hex_to_index(place_at)] = Ring::Occupied(color);
                 self.rings[hex_to_index(remove)] = Ring::Removed;
@@ -841,6 +852,24 @@ impl ZertzBoard {
                 self.next_player = self.next_player.opposite();
             }
             ZertzMove::PlaceOnly { color, place_at } => {
+                if self.mid_capture.is_some() {
+                    return Err("cannot place a marble during a capture chain".to_string());
+                }
+                if !self.generate_first_hops().is_empty() {
+                    return Err("captures are mandatory — must capture instead of placing".to_string());
+                }
+                if self.rings[hex_to_index(place_at)] != Ring::Empty {
+                    return Err(format!("({},{}) is not an empty ring", place_at.0, place_at.1));
+                }
+                // PlaceOnly is only legal when no other ring can be removed.
+                let has_removable = self.rings.iter().enumerate().any(|(i, &r)| {
+                    r == Ring::Empty
+                        && index_to_hex(i) != place_at
+                        && Self::is_edge_static(&self.rings, index_to_hex(i))
+                });
+                if has_removable {
+                    return Err("must remove a ring after placing — use Place instead of PlaceOnly".to_string());
+                }
                 self.take_marble(color)?;
                 self.rings[hex_to_index(place_at)] = Ring::Occupied(color);
                 self.resolve_isolation();
@@ -850,9 +879,24 @@ impl ZertzBoard {
             ZertzMove::Capture { jumps, len } => {
                 if len == 1 {
                     let (from, over, to) = jumps[0];
+                    // During a capture chain, only the active marble may continue.
+                    if let Some(mc) = self.mid_capture {
+                        if from != mc.marble_pos {
+                            return Err(format!(
+                                "mid-capture continuation must use the marble at ({},{}), not ({},{})",
+                                mc.marble_pos.0, mc.marble_pos.1, from.0, from.1
+                            ));
+                        }
+                    }
+                    if !matches!(self.rings[hex_to_index(from)], Ring::Occupied(_)) {
+                        return Err(format!("no marble at ({},{}) to capture with", from.0, from.1));
+                    }
+                    if self.rings[hex_to_index(to)] != Ring::Empty {
+                        return Err(format!("landing position ({},{}) is not empty", to.0, to.1));
+                    }
                     self.apply_single_hop(from, over, to)?;
                 } else {
-                    // Multi-hop — used by replay/boardspace parsing.
+                    // Multi-hop — used by replay/boardspace parsing (trusted).
                     let pi = Self::player_index(self.next_player);
                     for i in 0..len as usize {
                         let (from, over, to) = jumps[i];
