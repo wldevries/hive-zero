@@ -10,7 +10,7 @@ body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; 
 h1 { font-size: 1.4rem; color: #a0c8ff; margin-bottom: 12px; }
 h2 { font-size: 0.85rem; color: #8899bb; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
 
-#board-wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+#board-wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; flex-shrink: 0; }
 svg { display: block; }
 
 .hex { cursor: default; transition: opacity 0.1s; }
@@ -18,6 +18,18 @@ svg { display: block; }
 .hex.clickable:hover { opacity: 0.85; }
 
 #sidebar { width: 240px; display: flex; flex-direction: column; gap: 16px; padding-top: 4px; }
+
+@media (max-width: 720px) {
+  body { flex-direction: column; align-items: center; padding: 12px; gap: 16px; }
+  #board-wrap { width: 100%; }
+  #board-wrap svg { width: 100%; height: auto; max-width: 440px; }
+  #sidebar { width: 100%; max-width: 500px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding-top: 0; }
+  #panel-turn   { grid-column: 1 / -1; }
+  #panel-log    { grid-column: 1 / -1; }
+  #panel-ai     { grid-column: 1 / -1; }
+  #panel-syslog { grid-column: 1 / -1; }
+  #play-log-wrap { max-height: 200px; }
+}
 
 .panel { background: #16213e; border: 1px solid #2a3a5e; border-radius: 8px; padding: 12px; }
 
@@ -183,7 +195,7 @@ svg { display: block; }
 </div>
 
 <div id="sidebar">
-  <div class="panel">
+  <div class="panel" id="panel-turn">
     <h2>Turn</h2>
     <div class="status-row">
       <span class="dot" id="player-dot"></span>
@@ -194,7 +206,7 @@ svg { display: block; }
     <div id="outcome-banner"></div>
   </div>
 
-  <div class="panel">
+  <div class="panel" id="panel-marbles">
     <h2>Marbles</h2>
     <table class="capture-table">
       <thead>
@@ -228,7 +240,20 @@ svg { display: block; }
     </table>
   </div>
 
-  <div class="panel">
+  <div class="panel" id="panel-log">
+    <h2>Play Log</h2>
+    <div id="play-log-wrap">
+      <div class="log-header">
+        <span style="min-width:22px">#</span>
+        <span style="min-width:28px">Plr</span>
+        <span>Move</span>
+      </div>
+      <table id="play-log-table"></table>
+    </div>
+    <button id="return-btn">&#8617; Return to current</button>
+  </div>
+
+  <div class="panel" id="panel-ai">
     <h2>AI</h2>
 
     <!-- Model status -->
@@ -257,20 +282,7 @@ svg { display: block; }
     <button id="cancel-btn" style="margin-top:6px">Cancel</button>
   </div>
 
-  <div class="panel">
-    <h2>Play Log</h2>
-    <div id="play-log-wrap">
-      <div class="log-header">
-        <span style="min-width:22px">#</span>
-        <span style="min-width:28px">Plr</span>
-        <span>Move</span>
-      </div>
-      <table id="play-log-table"></table>
-    </div>
-    <button id="return-btn">&#8617; Return to current</button>
-  </div>
-
-  <div class="panel">
+  <div class="panel" id="panel-syslog">
     <h2>Log</h2>
     <div id="log"></div>
   </div>
