@@ -99,7 +99,16 @@ svg { display: block; }
 #play-log-wrap td.p1-cell { color: #7bbfff; min-width: 28px; }
 #play-log-wrap td.p2-cell { color: #ff9966; min-width: 28px; }
 #play-log-wrap td.move-cell { color: #c0d8ff; }
+#play-log-wrap tr { cursor: pointer; }
 #play-log-wrap tr:hover { background: #1a2a3a; }
+#play-log-wrap tr.log-selected { background: #1a3a5a !important; outline: 1px solid #3060a0; }
+
+#return-btn {
+  width: 100%; padding: 7px; background: #1a3a20; border: 1px solid #2a5030;
+  border-radius: 6px; color: #80d8b0; font-size: 0.8rem; cursor: pointer;
+  font-weight: 600; transition: background 0.15s; display: none; margin-top: 6px;
+}
+#return-btn:hover { background: #2a4a30; }
 #play-log-wrap .log-header { color: #445566; border-bottom: 1px solid #2a3a5e; margin-bottom: 2px; display: flex; gap: 4px; padding: 0 4px 4px; font-size: 0.7rem; }
 
 /* System log */
@@ -243,6 +252,7 @@ svg { display: block; }
       </div>
       <table id="play-log-table"></table>
     </div>
+    <button id="return-btn">&#8617; Return to current</button>
   </div>
 
   <div class="panel">
@@ -326,6 +336,10 @@ let capChainPlayer = null;  // player who started the current capture chain
 let lastMoveInfo       = null;
 let pendingCaptureMoves = [];
 
+// ── play log history ──────────────────────────────────────────────────────────
+let moveHistory = [];   // [{ player, displayStr, rawMoves: string[] }, ...]
+let historyView = null; // null = live; or { turnIdx, cellStates, supply, caps, outcome, player, lastMoveInfo }
+
 // ── SVG setup ─────────────────────────────────────────────────────────────────
 const svgNS = 'http://www.w3.org/2000/svg';
 const svg   = document.getElementById('board-svg');
@@ -398,15 +412,16 @@ function isHumanTurn() {
 }
 
 function updateBoard() {
-  const states  = game.cell_states();
-  const supply  = game.supply_counts();
-  const caps    = game.capture_counts();
-  const outcome = game.outcome();
-  const player  = game.next_player();
-  const moves   = game.valid_moves();
+  const isHistory = historyView !== null;
+  const states  = isHistory ? historyView.cellStates : game.cell_states();
+  const supply  = isHistory ? historyView.supply     : game.supply_counts();
+  const caps    = isHistory ? historyView.caps        : game.capture_counts();
+  const outcome = isHistory ? historyView.outcome     : game.outcome();
+  const player  = isHistory ? historyView.player      : game.next_player();
+  const moves   = isHistory ? []                       : game.valid_moves();
 
-  // Only show interaction highlights when it's the human's turn
-  const hlMap = isHumanTurn() ? getHighlightSet() : new Map();
+  // Only show interaction highlights when it's the human's turn (never in history view)
+  const hlMap = (!isHistory && isHumanTurn()) ? getHighlightSet() : new Map();
 
   const groups = svg.querySelectorAll('g[data-idx]');
   groups.forEach(g => {
@@ -462,7 +477,16 @@ function updateBoard() {
   const aiBtn      = document.getElementById('ai-btn');
   const indicator  = document.getElementById('turn-indicator');
 
-  if (outcome === 'ongoing') {
+  if (isHistory) {
+    dot.className = 'dot ' + (player === 0 ? 'p1' : 'p2');
+    statusText.textContent = player === 0 ? 'Player 1 (blue)' : 'Player 2 (orange)';
+    phaseText.textContent = `Turn ${historyView.turnIdx + 1} of ${moveHistory.length}`;
+    indicator.className = 'your-turn';
+    indicator.textContent = 'Viewing history';
+    indicator.style.display = '';
+    banner.style.display = 'none';
+    aiBtn.disabled = true;
+  } else if (outcome === 'ongoing') {
     dot.className = 'dot ' + (player === 0 ? 'p1' : 'p2');
     statusText.textContent = player === 0 ? 'Player 1 (blue)' : 'Player 2 (orange)';
     banner.style.display = 'none';
@@ -507,9 +531,9 @@ function updateBoard() {
     aiBtn.disabled = true;
   }
 
-  // Color picker: only show on human's turn
+  // Color picker: only show on human's turn (never in history view)
   const picker = document.getElementById('color-picker');
-  const colorVisible = outcome === 'ongoing' && isHumanTurn()
+  const colorVisible = !isHistory && outcome === 'ongoing' && isHumanTurn()
     && (phase === 'idle' || phase === 'pick-color') && !game.is_mid_capture();
   picker.classList.toggle('hidden', !colorVisible);
 
@@ -522,7 +546,8 @@ function updateBoard() {
     });
   }
 
-  document.getElementById('cancel-btn').style.display = (phase !== 'idle' && isHumanTurn()) ? 'block' : 'none';
+  document.getElementById('cancel-btn').style.display = (!isHistory && phase !== 'idle' && isHumanTurn()) ? 'block' : 'none';
+  document.getElementById('return-btn').style.display = isHistory ? 'block' : 'none';
 
   // Show/hide rollouts row and update AI button style
   const nnReady = ortSession !== null;
@@ -534,7 +559,7 @@ function updateBoard() {
     ? `AI Move NN${aiLabel ? ' (' + aiLabel + ')' : ''}`
     : `AI Move${aiLabel ? ' (' + aiLabel + ')' : ''}`;
 
-  renderLastMove();
+  renderLastMove(isHistory ? historyView.lastMoveInfo : undefined);
 }
 
 // ── interaction ───────────────────────────────────────────────────────────────
@@ -571,13 +596,13 @@ function playMove(mv) {
         return;
       }
       lastMoveInfo = computeLastMoveInfo(pendingCaptureMoves);
-      logMove(capChainPlayer, formatCaptureChain(pendingCaptureMoves));
+      logMove(capChainPlayer, formatCaptureChain(pendingCaptureMoves), pendingCaptureMoves.map(p => p.mv));
       pendingCaptureMoves = [];
       capChainPlayer = null;
     } else {
       pendingCaptureMoves = [];
       lastMoveInfo = computeLastMoveInfo([{ mv, statesBefore }]);
-      logMove(playerBefore, mv.trim());
+      logMove(playerBefore, mv.trim(), [mv.trim()]);
     }
     resetPhase();
     handleMidCapture();
@@ -594,6 +619,7 @@ function playMove(mv) {
 }
 
 function onColorClick(color) {
+  if (historyView !== null) return;
   if (!isHumanTurn() && humanPlayer !== null) return;
   const moves = game.valid_moves();
   if (!moves.some(m => m.startsWith(color + ' '))) return;
@@ -605,6 +631,7 @@ function onColorClick(color) {
 }
 
 function onCellClick(idx) {
+  if (historyView !== null) return;
   if (game.outcome() !== 'ongoing') return;
   if (!isHumanTurn() && humanPlayer !== null) return;
   const label = coordLabel(coords[idx].q, coords[idx].r);
@@ -695,21 +722,22 @@ function addHexRing(parent, label, stroke, sw, dasharray, opacity) {
   parent.appendChild(poly);
 }
 
-function renderLastMove() {
+function renderLastMove(infoOverride) {
+  const lmi = infoOverride !== undefined ? infoOverride : lastMoveInfo;
   const old = document.getElementById('move-overlay');
   if (old) old.remove();
-  if (!lastMoveInfo) return;
+  if (!lmi) return;
 
   const overlay = document.createElementNS(svgNS, 'g');
   overlay.id = 'move-overlay';
   overlay.style.pointerEvents = 'none';
 
-  if (lastMoveInfo.type === 'place') {
-    addHexRing(overlay, lastMoveInfo.placedLabel, '#aaff44', 3, null, 0.85);
-    if (lastMoveInfo.removedLabel)
-      addHexRing(overlay, lastMoveInfo.removedLabel, '#ff6644', 2.5, '7,4', 0.75);
+  if (lmi.type === 'place') {
+    addHexRing(overlay, lmi.placedLabel, '#aaff44', 3, null, 0.85);
+    if (lmi.removedLabel)
+      addHexRing(overlay, lmi.removedLabel, '#ff6644', 2.5, '7,4', 0.75);
   } else {
-    const { path, capturedBalls } = lastMoveInfo;
+    const { path, capturedBalls } = lmi;
     for (const { label, color } of capturedBalls) {
       const idx = labelToIdx(label);
       if (idx < 0) continue;
@@ -839,6 +867,7 @@ let aiRunning = false;
 
 async function triggerAiMove() {
   if (aiRunning) return;
+  if (historyView !== null) return;
   if (game.outcome() !== 'ongoing') return;
   if (humanPlayer !== null && game.next_player() === humanPlayer) return;
 
@@ -883,7 +912,7 @@ async function triggerAiMove() {
     const moveStr = aiMoves[0].mv.trim().startsWith('CAP')
       ? formatCaptureChain(aiMoves)
       : aiMoves[0].mv.trim();
-    logMove(aiPlayer, moveStr);
+    logMove(aiPlayer, moveStr, aiMoves.map(a => a.mv));
 
     updateBoard();
   } catch (e) {
@@ -902,22 +931,77 @@ document.getElementById('cancel-btn').addEventListener('click', () => {
   updateBoard();
 });
 
+document.getElementById('return-btn').addEventListener('click', () => returnToCurrent());
+
 ['W', 'G', 'B'].forEach((c, i) => {
   const ids = ['btn-white', 'btn-grey', 'btn-black'];
   document.getElementById(ids[i]).addEventListener('click', () => onColorClick(c));
 });
 
 // ── play log ──────────────────────────────────────────────────────────────────
-function logMove(player, moveStr) {
+function logMove(player, moveStr, rawMoves) {
+  const turnIdx = moveHistory.length;
+  moveHistory.push({ player, displayStr: moveStr, rawMoves: rawMoves || [moveStr] });
+
   turnNumber++;
   const table = document.getElementById('play-log-table');
   const row = table.insertRow(-1);  // append at bottom
   const cls = player === 0 ? 'p1-cell' : 'p2-cell';
   const plr = player === 0 ? 'P1' : 'P2';
   row.innerHTML = `<td class="turn-num">${turnNumber}</td><td class="${cls}">${plr}</td><td class="move-cell">${moveStr}</td>`;
-  // Auto-scroll to bottom
+  row.addEventListener('click', () => showHistoryTurn(turnIdx));
+  // Auto-scroll to bottom only when not viewing history
+  if (historyView === null) {
+    const wrap = document.getElementById('play-log-wrap');
+    wrap.scrollTop = wrap.scrollHeight;
+  }
+}
+
+function showHistoryTurn(turnIdx) {
+  // Replay game from scratch up to and including turnIdx
+  const tempGame = new ZertzGame();
+
+  // Play all prior turns silently
+  for (let i = 0; i < turnIdx; i++) {
+    for (const mv of moveHistory[i].rawMoves) tempGame.play(mv);
+  }
+
+  // Play the target turn's moves, collecting statesBefore for highlight computation
+  const entry = moveHistory[turnIdx];
+  const moveInfoInputs = [];
+  for (const mv of entry.rawMoves) {
+    const statesBefore = Array.from(tempGame.cell_states());
+    moveInfoInputs.push({ mv, statesBefore });
+    tempGame.play(mv);
+  }
+
+  historyView = {
+    turnIdx,
+    cellStates: Array.from(tempGame.cell_states()),
+    supply:     Array.from(tempGame.supply_counts()),
+    caps:       Array.from(tempGame.capture_counts()),
+    outcome:    tempGame.outcome(),
+    player:     entry.player,
+    lastMoveInfo: computeLastMoveInfo(moveInfoInputs),
+  };
+
+  // Highlight selected row in log
+  const rows = document.querySelectorAll('#play-log-table tr');
+  rows.forEach((r, i) => r.classList.toggle('log-selected', i === turnIdx));
+
+  updateBoard();
+  // Scroll the selected row into view
+  if (rows[turnIdx]) rows[turnIdx].scrollIntoView({ block: 'nearest' });
+}
+
+function returnToCurrent() {
+  historyView = null;
+  // Clear row selection
+  document.querySelectorAll('#play-log-table tr').forEach(r => r.classList.remove('log-selected'));
+  // Scroll log to bottom
   const wrap = document.getElementById('play-log-wrap');
   wrap.scrollTop = wrap.scrollHeight;
+  updateBoard();
 }
 
 // ── system logging ────────────────────────────────────────────────────────────
