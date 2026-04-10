@@ -1,4 +1,3 @@
-pub mod hex;
 pub mod piece;
 pub mod board;
 pub mod rules;

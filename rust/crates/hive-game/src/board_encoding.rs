@@ -1,7 +1,7 @@
 /// Encode Hive board state as a fixed-size tensor for neural network input.
 /// Must produce bitwise-identical output to Python board_encoder.py.
 
-use crate::hex::{Hex, hex_distance, hex_neighbors};
+use core_game::hex::{Hex, hex_distance, hex_neighbors};
 use crate::game::Game;
 use crate::piece::{Piece, PieceColor, PieceType, ALL_PIECE_TYPES, PIECE_COUNTS};
 

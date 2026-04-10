@@ -1,7 +1,7 @@
 /// Board representation for Hive with beetle stacking.
 /// Uses a dense 23x23 grid (fits L1 cache) plus piece position lookup.
 
-use crate::hex::{Hex, hex_neighbors};
+use core_game::hex::{Hex, hex_neighbors};
 use crate::piece::{Piece, PieceColor, PIECES_PER_PLAYER};
 
 pub const GRID_SIZE: usize = 23;

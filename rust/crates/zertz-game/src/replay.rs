@@ -7,10 +7,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use core_game::game::{Game, Outcome};
-use crate::hex::boardspace_to_hex;
-use crate::random_play::{classify_win, WinType};
-use crate::sgf::{self, Color, Coord, GameRecord, Turn, Variant};
-use crate::zertz::{
+use core_game::hex::Hex;
+use zertz_game::hex::boardspace_to_hex;
+use zertz_game::zertz::{classify_win, WinType};
+use zertz_game::sgf::{self, Color, Coord, GameRecord, Turn, Variant};
+use zertz_game::zertz::{
     find_capture_path, find_intermediate, Marble, Ring, ZertzBoard, ZertzMove, MAX_CAPTURE_JUMPS,
 };
 
@@ -26,7 +27,7 @@ fn color_to_marble(c: Color) -> Marble {
     }
 }
 
-fn coord_to_hex(coord: Coord) -> Result<crate::hex::Hex, ReplayError> {
+fn coord_to_hex(coord: Coord) -> Result<Hex, ReplayError> {
     boardspace_to_hex(coord.col, coord.row).ok_or(ReplayError::BadCoord(coord))
 }
 
@@ -923,7 +924,7 @@ pub fn run_playback(games_path: &str, auto_ms: Option<u64>) {
     println!();
 
     // Step through the game, displaying the board after each turn.
-    let mut board = crate::zertz::ZertzBoard::default();
+    let mut board = ZertzBoard::default();
     println!("Initial position:");
     println!("{board}");
 
@@ -957,21 +958,21 @@ pub fn run_playback(games_path: &str, auto_ms: Option<u64>) {
             }
             Turn::Capture { jumps } => {
                 if jumps.is_empty() { continue; }
-                let mut capture_jumps = [((0i8,0i8),(0i8,0i8),(0i8,0i8)); crate::zertz::MAX_CAPTURE_JUMPS];
+                let mut capture_jumps = [((0i8,0i8),(0i8,0i8),(0i8,0i8)); MAX_CAPTURE_JUMPS];
                 let mut len = 0u8;
                 let mut ok = true;
                 for (from_c, to_c) in jumps {
                     let from_h = match coord_to_hex(*from_c) { Ok(h) => h, Err(e) => { eprintln!("  bad coord: {e}"); ok = false; break; } };
                     let to_h   = match coord_to_hex(*to_c)   { Ok(h) => h, Err(e) => { eprintln!("  bad coord: {e}"); ok = false; break; } };
                     if let Some(over_h) = find_intermediate(board.rings(), from_h, to_h) {
-                        if (len as usize) >= crate::zertz::MAX_CAPTURE_JUMPS { eprintln!("  capture chain too long"); ok = false; break; }
+                        if (len as usize) >= MAX_CAPTURE_JUMPS { eprintln!("  capture chain too long"); ok = false; break; }
                         capture_jumps[len as usize] = (from_h, over_h, to_h);
                         len += 1;
                     } else {
                         match find_capture_path(board.rings(), from_h, to_h) {
                             Some(path) => {
                                 for (f, o, t) in path {
-                                    if (len as usize) >= crate::zertz::MAX_CAPTURE_JUMPS { eprintln!("  capture chain too long"); ok = false; break; }
+                                    if (len as usize) >= MAX_CAPTURE_JUMPS { eprintln!("  capture chain too long"); ok = false; break; }
                                     capture_jumps[len as usize] = (f, o, t);
                                     len += 1;
                                 }

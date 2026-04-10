@@ -1,7 +1,7 @@
 /// UHP (Universal Hive Protocol) move parsing and formatting.
 
 use crate::game::{Game, Move};
-use crate::hex::{DIRECTIONS, hex_neighbors};
+use core_game::hex::{DIRECTIONS, hex_neighbors};
 use crate::piece::Piece;
 
 /// Parse a UHP move string and resolve the piece and destination hex.

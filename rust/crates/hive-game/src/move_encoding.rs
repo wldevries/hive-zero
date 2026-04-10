@@ -20,7 +20,7 @@
 ///   Placement visits go to policy[place_offset].
 ///   Movement visits are split: policy[src_offset] += visits, policy[dst_offset] += visits.
 
-use crate::hex::Hex;
+use core_game::hex::Hex;
 use crate::piece::Piece;
 use crate::game::{Game, Move};
 use core_game::game::PolicyIndex;

@@ -3,13 +3,13 @@ use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
 
 use core_game::game::{Game as GameTrait, Outcome, Player, PolicyIndex};
+use core_game::hex::hex_neighbors;
 use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::MctsSearch;
 use core_game::symmetry::{D6Symmetry, Symmetry, apply_d6_sym_spatial};
 
 use crate::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE};
 use crate::game::{Game, GameState, Move};
-use crate::hex::hex_neighbors;
 use crate::move_encoding::{self, encode_game_move};
 use crate::piece::{Piece, PieceColor, PieceType};
 
