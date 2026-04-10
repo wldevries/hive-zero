@@ -787,6 +787,15 @@ impl ZertzBoard {
 
     /// Execute a single capture hop and handle mid-capture state transitions.
     fn apply_single_hop(&mut self, from: Hex, over: Hex, to: Hex) -> Result<(), String> {
+        // During a capture chain, only the active marble may continue jumping.
+        if let Some(mc) = self.mid_capture {
+            if from != mc.marble_pos {
+                return Err(format!(
+                    "mid-capture continuation must use the marble at ({},{}), not ({},{})",
+                    mc.marble_pos.0, mc.marble_pos.1, from.0, from.1
+                ));
+            }
+        }
         let pi = Self::player_index(self.next_player);
         let marble_from = self.rings[hex_to_index(from)];
         let captured = match self.rings[hex_to_index(over)] {

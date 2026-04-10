@@ -433,6 +433,7 @@ function playMove(mv) {
     game.play(mv);
     log(`Played: ${mv}`);
     resetPhase();
+    handleMidCapture();
     updateBoard();
   } catch (e) {
     log(`Error: ${e}`);
@@ -614,32 +615,33 @@ document.getElementById('ai-btn').addEventListener('click', async () => {
   btn.disabled  = true;
 
   try {
-    const t0 = performance.now();
-    let mv;
+    // Loop to automatically play all hops in an AI capture chain.
+    do {
+      const t0 = performance.now();
+      let mv;
 
-    if (ortSession !== null) {
-      // ── NN + MCTS via ORT Web ─────────────────────────────────────────
-      btn.textContent = 'Thinking (NN)…';
-      const result = await game.best_move_nn(ortEvalBatch, sims, 1.5);
-      mv = result.move;
-      showValue(result.value);
-      const ms = (performance.now() - t0).toFixed(0);
-      const validMoves = game.valid_moves();
-      mv = applyColorPreference(validMoves, mv);
-      log(`AI (NN): ${mv}  val=${result.value.toFixed(2)}  ${sims} sims  ${ms}ms`);
-    } else {
-      // ── random-rollout MCTS fallback ──────────────────────────────────
-      btn.textContent = 'Thinking…';
-      mv = game.best_move_random(sims, rollouts, 1.5);
-      const ms = (performance.now() - t0).toFixed(0);
-      const validMoves = game.valid_moves();
-      mv = applyColorPreference(validMoves, mv);
-      log(`AI (random): ${mv}  ${sims} sims  ${ms}ms`);
-    }
+      if (ortSession !== null) {
+        // ── NN + MCTS via ORT Web ───────────────────────────────────────
+        btn.textContent = 'Thinking (NN)…';
+        const result = await game.best_move_nn(ortEvalBatch, sims, 1.5);
+        mv = result.move;
+        showValue(result.value);
+        const ms = (performance.now() - t0).toFixed(0);
+        mv = applyColorPreference(game.valid_moves(), mv);
+        log(`AI (NN): ${mv}  val=${result.value.toFixed(2)}  ${sims} sims  ${ms}ms`);
+      } else {
+        // ── random-rollout MCTS fallback ────────────────────────────────
+        btn.textContent = 'Thinking…';
+        mv = game.best_move_random(sims, rollouts, 1.5);
+        const ms = (performance.now() - t0).toFixed(0);
+        mv = applyColorPreference(game.valid_moves(), mv);
+        log(`AI (random): ${mv}  ${sims} sims  ${ms}ms`);
+      }
 
-    game.play(mv);
-    resetPhase();
-    handleMidCapture();
+      game.play(mv);
+      resetPhase();
+    } while (game.is_mid_capture());
+
     updateBoard();
   } catch (e) {
     log(`AI error: ${e}`);
