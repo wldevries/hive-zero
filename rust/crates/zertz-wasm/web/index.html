@@ -28,6 +28,14 @@ svg { display: block; }
 #status-text { color: #c0d8ff; font-weight: 600; }
 #phase-text { color: #8899bb; font-size: 0.8rem; margin-top: 4px; }
 
+#turn-indicator {
+  padding: 5px 8px; border-radius: 5px; font-size: 0.8rem; font-weight: 700;
+  text-align: center; margin-top: 8px;
+}
+#turn-indicator.your-turn  { background: #0e2a0e; color: #66dd66; border: 1px solid #2a5a2a; }
+#turn-indicator.ai-turn    { background: #2a2a0a; color: #ddbb44; border: 1px solid #555520; }
+#turn-indicator.game-over  { background: #1a1a2a; color: #888899; border: 1px solid #333344; display: none; }
+
 .supply-grid, .capture-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin-top: 4px; }
 .marble-count { text-align: center; font-size: 0.8rem; }
 .marble-count .icon { font-size: 1.1rem; }
@@ -83,12 +91,74 @@ svg { display: block; }
 #value-bar-wrap { flex: 1; margin-left: 8px; height: 6px; background: #0d1b30; border-radius: 3px; overflow: hidden; }
 #value-bar { height: 100%; width: 50%; background: #60d090; border-radius: 3px; transition: width 0.3s, background 0.3s; }
 
-#log { font-size: 0.75rem; color: #667799; max-height: 100px; overflow-y: auto; }
+/* Play log */
+#play-log-wrap { font-size: 0.75rem; font-family: monospace; max-height: 160px; overflow-y: auto; }
+#play-log-wrap table { width: 100%; border-collapse: collapse; }
+#play-log-wrap td { padding: 2px 4px; vertical-align: top; white-space: nowrap; }
+#play-log-wrap td.turn-num { color: #445566; min-width: 22px; }
+#play-log-wrap td.p1-cell { color: #7bbfff; min-width: 28px; }
+#play-log-wrap td.p2-cell { color: #ff9966; min-width: 28px; }
+#play-log-wrap td.move-cell { color: #c0d8ff; }
+#play-log-wrap tr:hover { background: #1a2a3a; }
+#play-log-wrap .log-header { color: #445566; border-bottom: 1px solid #2a3a5e; margin-bottom: 2px; display: flex; gap: 4px; padding: 0 4px 4px; font-size: 0.7rem; }
+
+/* System log */
+#log { font-size: 0.75rem; color: #667799; max-height: 80px; overflow-y: auto; }
 
 #outcome-banner { display: none; padding: 10px; border-radius: 6px; text-align: center; font-weight: 700; font-size: 1rem; margin-top: 8px; }
+
+/* Start screen */
+#start-screen {
+  position: fixed; inset: 0;
+  background: rgba(8, 10, 20, 0.95);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+}
+#start-card {
+  background: #16213e; border: 1px solid #2a3a5e; border-radius: 12px;
+  padding: 32px 40px; text-align: center; min-width: 280px;
+}
+#start-card .title { font-size: 1.6rem; color: #a0c8ff; margin-bottom: 6px; font-weight: 700; }
+#start-card .subtitle { color: #667799; font-size: 0.85rem; margin-bottom: 28px; }
+.start-btn {
+  display: block; width: 100%; padding: 13px 16px; margin-bottom: 10px;
+  border-radius: 8px; border: 2px solid transparent; font-size: 0.95rem;
+  font-weight: 700; cursor: pointer; transition: all 0.15s; text-align: left;
+}
+.start-btn:last-child { margin-bottom: 0; }
+.start-btn .btn-label { font-size: 1rem; }
+.start-btn .btn-sub { font-size: 0.78rem; font-weight: 400; opacity: 0.75; display: block; margin-top: 2px; }
+.start-btn.p1 { background: #0e2040; border-color: #2a4a7a; color: #7bbfff; }
+.start-btn.p1:hover { background: #1a3060; border-color: #7bbfff; }
+.start-btn.p2 { background: #2a1408; border-color: #5a2c10; color: #ff9966; }
+.start-btn.p2:hover { background: #3a2010; border-color: #ff9966; }
+
+/* Sims config in start card */
+.start-sims-row { display: flex; align-items: center; justify-content: space-between; font-size: 0.82rem; color: #8899bb; margin-top: 20px; padding-top: 16px; border-top: 1px solid #2a3a5e; }
+.start-sims-row input[type=number] { width: 70px; background: #0d1b30; border: 1px solid #2a3a5e; color: #c0d8ff; border-radius: 4px; padding: 3px 6px; font-size: 0.82rem; text-align: right; }
 </style>
 </head>
 <body>
+
+<!-- Start screen -->
+<div id="start-screen">
+  <div id="start-card">
+    <div class="title">Zertz</div>
+    <div class="subtitle">Choose your side</div>
+    <button class="start-btn p1" id="choose-p1">
+      <span class="btn-label">Play as Player 1</span>
+      <span class="btn-sub">You go first &middot; blue</span>
+    </button>
+    <button class="start-btn p2" id="choose-p2">
+      <span class="btn-label">Play as Player 2</span>
+      <span class="btn-sub">AI goes first &middot; orange</span>
+    </button>
+    <div class="start-sims-row">
+      <label for="start-sims-input">AI simulations</label>
+      <input type="number" id="start-sims-input" value="1200" min="50" max="2000" step="50">
+    </div>
+  </div>
+</div>
 
 <div id="board-wrap">
   <h1>Zertz</h1>
@@ -108,6 +178,7 @@ svg { display: block; }
       <span id="status-text">—</span>
     </div>
     <div id="phase-text"></div>
+    <div id="turn-indicator" class="your-turn"></div>
     <div id="outcome-banner"></div>
   </div>
 
@@ -151,15 +222,27 @@ svg { display: block; }
 
     <div class="settings-row">
       <label>Simulations</label>
-      <input type="number" id="sims-input" value="200" min="50" max="2000" step="50">
+      <input type="number" id="sims-input" value="1200" min="50" max="2000" step="50">
     </div>
     <div class="settings-row" id="rollouts-row">
       <label>Rollouts/leaf</label>
       <input type="number" id="rollouts-input" value="1" min="1" max="10">
     </div>
 
-    <button id="ai-btn" style="margin-top:10px">AI Move (P2)</button>
+    <button id="ai-btn" style="margin-top:10px">AI Move</button>
     <button id="cancel-btn" style="margin-top:6px">Cancel</button>
+  </div>
+
+  <div class="panel">
+    <h2>Play Log</h2>
+    <div id="play-log-wrap">
+      <div class="log-header">
+        <span style="min-width:22px">#</span>
+        <span style="min-width:28px">Plr</span>
+        <span>Move</span>
+      </div>
+      <table id="play-log-table"></table>
+    </div>
   </div>
 
   <div class="panel">
@@ -178,13 +261,12 @@ import init, {
 } from './pkg/zertz_wasm.js';
 
 // ── ORT Web setup ─────────────────────────────────────────────────────────────
-// Point ORT at the CDN for its own WASM binaries (threading, SIMD, etc.)
 if (typeof ort !== 'undefined') {
   ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
 }
 
-let ortSession = null;  // InferenceSession once model is loaded
-let ortEp = 'none';     // which EP was actually used
+let ortSession = null;
+let ortEp = 'none';
 
 // ── hex geometry ─────────────────────────────────────────────────────────────
 const HEX_SIZE = 28;
@@ -231,14 +313,18 @@ const MARBLE_COLORS = {
 let game;
 let coords = [];
 
+let humanPlayer = null;   // 0 = P1, 1 = P2; null until chosen
+let turnNumber  = 0;
+
 let phase = 'idle';
 let selectedColor = null;
 let selectedCell  = null;
 let capSrcLabel   = null;
+let capChainPlayer = null;  // player who started the current capture chain
 
 // ── last-move highlight state ─────────────────────────────────────────────────
-let lastMoveInfo       = null;  // null | {type:'place'|'capture', ...}
-let pendingCaptureMoves = [];   // [{mv, statesBefore}] accumulated during a chain
+let lastMoveInfo       = null;
+let pendingCaptureMoves = [];
 
 // ── SVG setup ─────────────────────────────────────────────────────────────────
 const svgNS = 'http://www.w3.org/2000/svg';
@@ -307,6 +393,10 @@ function getHighlightSet() {
   return map;
 }
 
+function isHumanTurn() {
+  return humanPlayer !== null && game.next_player() === humanPlayer;
+}
+
 function updateBoard() {
   const states  = game.cell_states();
   const supply  = game.supply_counts();
@@ -314,7 +404,9 @@ function updateBoard() {
   const outcome = game.outcome();
   const player  = game.next_player();
   const moves   = game.valid_moves();
-  const hlMap   = getHighlightSet();
+
+  // Only show interaction highlights when it's the human's turn
+  const hlMap = isHumanTurn() ? getHighlightSet() : new Map();
 
   const groups = svg.querySelectorAll('g[data-idx]');
   groups.forEach(g => {
@@ -368,12 +460,23 @@ function updateBoard() {
   const phaseText  = document.getElementById('phase-text');
   const banner     = document.getElementById('outcome-banner');
   const aiBtn      = document.getElementById('ai-btn');
+  const indicator  = document.getElementById('turn-indicator');
 
   if (outcome === 'ongoing') {
     dot.className = 'dot ' + (player === 0 ? 'p1' : 'p2');
     statusText.textContent = player === 0 ? 'Player 1 (blue)' : 'Player 2 (orange)';
     banner.style.display = 'none';
-    aiBtn.disabled = false;
+
+    if (humanPlayer !== null) {
+      const myTurn = player === humanPlayer;
+      aiBtn.disabled = myTurn;  // AI button only active on AI's turn
+      indicator.className = 'your-turn';
+      indicator.textContent = myTurn ? 'Your turn' : 'AI is thinking…';
+      indicator.style.display = '';
+    } else {
+      aiBtn.disabled = false;
+      indicator.style.display = 'none';
+    }
 
     const phaseHints = {
       'idle':        game.is_mid_capture() ? 'Continue capture chain' : 'Place a marble or capture',
@@ -382,10 +485,11 @@ function updateBoard() {
       'pick-remove': 'Pick a ring to remove',
       'pick-cap-dst':'Pick capture destination',
     };
-    phaseText.textContent = phaseHints[phase] || '';
+    phaseText.textContent = (isHumanTurn() || humanPlayer === null) ? (phaseHints[phase] || '') : '';
   } else {
     dot.className = 'dot';
     phaseText.textContent = '';
+    indicator.style.display = 'none';
     if (outcome === 'p1') {
       banner.textContent = 'Player 1 wins!';
       banner.style.background = '#1a4060';
@@ -403,8 +507,10 @@ function updateBoard() {
     aiBtn.disabled = true;
   }
 
+  // Color picker: only show on human's turn
   const picker = document.getElementById('color-picker');
-  const colorVisible = outcome === 'ongoing' && (phase === 'idle' || phase === 'pick-color') && !game.is_mid_capture();
+  const colorVisible = outcome === 'ongoing' && isHumanTurn()
+    && (phase === 'idle' || phase === 'pick-color') && !game.is_mid_capture();
   picker.classList.toggle('hidden', !colorVisible);
 
   if (colorVisible) {
@@ -416,12 +522,17 @@ function updateBoard() {
     });
   }
 
-  document.getElementById('cancel-btn').style.display = (phase !== 'idle') ? 'block' : 'none';
+  document.getElementById('cancel-btn').style.display = (phase !== 'idle' && isHumanTurn()) ? 'block' : 'none';
 
-  // Show/hide rollouts row and update AI button style based on NN mode
+  // Show/hide rollouts row and update AI button style
   const nnReady = ortSession !== null;
+  const aiPlayer = humanPlayer !== null ? (1 - humanPlayer) : null;
+  const aiLabel = aiPlayer === 0 ? 'P1' : aiPlayer === 1 ? 'P2' : '';
   document.getElementById('rollouts-row').style.display = nnReady ? 'none' : 'flex';
   aiBtn.classList.toggle('nn-mode', nnReady);
+  aiBtn.textContent = nnReady
+    ? `AI Move NN${aiLabel ? ' (' + aiLabel + ')' : ''}`
+    : `AI Move${aiLabel ? ' (' + aiLabel + ')' : ''}`;
 
   renderLastMove();
 }
@@ -434,12 +545,24 @@ function resetPhase() {
   capSrcLabel   = null;
 }
 
+function formatCaptureChain(moves) {
+  if (!moves.length) return '';
+  const parts0 = moves[0].mv.trim().split(/\s+/);
+  let result = `CAP ${parts0[1]}→${parts0[2]}`;
+  for (let i = 1; i < moves.length; i++) {
+    const parts = moves[i].mv.trim().split(/\s+/);
+    result += `→${parts[2]}`;
+  }
+  return result;
+}
+
 function playMove(mv) {
   try {
+    const playerBefore = game.next_player();
     const statesBefore = Array.from(game.cell_states());
     game.play(mv);
-    log(`Played: ${mv}`);
     if (mv.trim().startsWith('CAP')) {
+      if (pendingCaptureMoves.length === 0) capChainPlayer = playerBefore;
       pendingCaptureMoves.push({ mv, statesBefore });
       if (game.is_mid_capture()) {
         resetPhase();
@@ -448,14 +571,21 @@ function playMove(mv) {
         return;
       }
       lastMoveInfo = computeLastMoveInfo(pendingCaptureMoves);
+      logMove(capChainPlayer, formatCaptureChain(pendingCaptureMoves));
       pendingCaptureMoves = [];
+      capChainPlayer = null;
     } else {
       pendingCaptureMoves = [];
       lastMoveInfo = computeLastMoveInfo([{ mv, statesBefore }]);
+      logMove(playerBefore, mv.trim());
     }
     resetPhase();
     handleMidCapture();
     updateBoard();
+    // After a human move, trigger AI if it's now the AI's turn
+    if (humanPlayer !== null && game.next_player() !== humanPlayer && game.outcome() === 'ongoing') {
+      setTimeout(triggerAiMove, 80);
+    }
   } catch (e) {
     log(`Error: ${e}`);
     resetPhase();
@@ -464,6 +594,7 @@ function playMove(mv) {
 }
 
 function onColorClick(color) {
+  if (!isHumanTurn() && humanPlayer !== null) return;
   const moves = game.valid_moves();
   if (!moves.some(m => m.startsWith(color + ' '))) return;
   selectedColor = color;
@@ -475,6 +606,7 @@ function onColorClick(color) {
 
 function onCellClick(idx) {
   if (game.outcome() !== 'ongoing') return;
+  if (!isHumanTurn() && humanPlayer !== null) return;
   const label = coordLabel(coords[idx].q, coords[idx].r);
   const moves = game.valid_moves();
 
@@ -546,7 +678,6 @@ function computeLastMoveInfo(moves) {
     }
     return { type: 'capture', path, capturedBalls };
   }
-  // Place move: "W D4" or "W D4 E5"
   return { type: 'place', placedLabel: firstParts[1], removedLabel: firstParts[2] || null };
 }
 
@@ -579,7 +710,6 @@ function renderLastMove() {
       addHexRing(overlay, lastMoveInfo.removedLabel, '#ff6644', 2.5, '7,4', 0.75);
   } else {
     const { path, capturedBalls } = lastMoveInfo;
-    // Ghost marbles first (so path outlines render on top)
     for (const { label, color } of capturedBalls) {
       const idx = labelToIdx(label);
       if (idx < 0) continue;
@@ -595,7 +725,6 @@ function renderLastMove() {
       g.setAttribute('opacity', '0.35');
       overlay.appendChild(g);
     }
-    // Path outlines: start = orange, end = bright cyan, intermediate = dim cyan
     path.forEach((label, i) => {
       const isStart = i === 0, isEnd = i === path.length - 1;
       const stroke = isStart ? '#ff9900' : '#00ddff';
@@ -634,22 +763,13 @@ function applyColorPreference(validMoves, aiMove) {
 }
 
 // ── ORT eval function ─────────────────────────────────────────────────────────
-// Called by the WASM MCTS with batches of encoded positions.
-// boards/reserves are Float32Array views from WASM linear memory.
 async function ortEvalBatch(boards, reserves, n) {
   const BOARD_CHANNELS = 6, GRID = 7, RES_SIZE = 22;
-
-  // Copy into plain Float32Arrays (WASM memory views can't be passed directly to ORT).
   const boardData   = new Float32Array(boards);
   const reserveData = new Float32Array(reserves);
-
   const boardTensor   = new ort.Tensor('float32', boardData,   [n, BOARD_CHANNELS, GRID, GRID]);
   const reserveTensor = new ort.Tensor('float32', reserveData, [n, RES_SIZE]);
-
   const outputs = await ortSession.run({ board: boardTensor, reserve: reserveTensor });
-
-  // ORT returns typed arrays whose .data may be BigInt64Array for integer tensors —
-  // force f32 views so the WASM side always sees Float32Array.
   return [
     new Float32Array(outputs.place.data.buffer,      outputs.place.data.byteOffset,      outputs.place.data.byteLength      / 4),
     new Float32Array(outputs.cap_source.data.buffer,  outputs.cap_source.data.byteOffset,  outputs.cap_source.data.byteLength  / 4),
@@ -674,27 +794,19 @@ async function loadModel(url) {
   setModelBadge('loading', 'loading…');
   log(`Loading ONNX model from ${url}…`);
   try {
-    // Fetch the ONNX protobuf as bytes.
     const modelResp = await fetch(url);
     if (!modelResp.ok) throw new Error(`HTTP ${modelResp.status} fetching ${url}`);
     const modelBytes = new Uint8Array(await modelResp.arrayBuffer());
-
-    // PyTorch dynamo export splits weights into a companion <name>.data file.
-    // Probe for it and pass it via the externalData session option if found.
     const dataUrl  = url + '.data';
     const dataName = dataUrl.split('/').pop();
     const sessionOptions = { executionProviders: ['webgpu', 'wasm'] };
-
     const dataResp = await fetch(dataUrl).catch(() => null);
     if (dataResp && dataResp.ok) {
       log(`Loading weight data (${dataName})…`);
       const dataBytes = new Uint8Array(await dataResp.arrayBuffer());
       sessionOptions.externalData = [{ path: dataName, data: dataBytes }];
     }
-
     ortSession = await ort.InferenceSession.create(modelBytes, sessionOptions);
-
-    // Detect execution provider: navigator.gpu present → WebGPU session was created.
     const ep = (typeof navigator !== 'undefined' && 'gpu' in navigator) ? 'WebGPU' : 'CPU';
     ortEp = ep;
     setModelBadge('ready', `ready · ${ep}`);
@@ -712,13 +824,10 @@ async function loadModel(url) {
 
 // ── value bar ─────────────────────────────────────────────────────────────────
 function showValue(v) {
-  // v is from AI's perspective: +1 = AI winning, -1 = human winning.
-  // Bar: 0%=human winning, 50%=equal, 100%=AI winning.
   const pct = Math.round((v + 1) / 2 * 100);
   const bar   = document.getElementById('value-bar');
   const label = document.getElementById('value-label');
   const row   = document.getElementById('value-row');
-
   row.style.display = 'flex';
   bar.style.width   = `${pct}%`;
   bar.style.background = v > 0.1 ? '#d06060' : v < -0.1 ? '#60d090' : '#8899bb';
@@ -726,22 +835,28 @@ function showValue(v) {
 }
 
 // ── AI ────────────────────────────────────────────────────────────────────────
-document.getElementById('ai-btn').addEventListener('click', async () => {
-  const sims    = parseInt(document.getElementById('sims-input').value)   || 300;
-  const rollouts = parseInt(document.getElementById('rollouts-input').value) || 1;
-  const btn     = document.getElementById('ai-btn');
-  btn.disabled  = true;
+let aiRunning = false;
 
-  const aiMoves = [];
+async function triggerAiMove() {
+  if (aiRunning) return;
+  if (game.outcome() !== 'ongoing') return;
+  if (humanPlayer !== null && game.next_player() === humanPlayer) return;
+
+  aiRunning = true;
+  const sims     = parseInt(document.getElementById('sims-input').value)    || 300;
+  const rollouts = parseInt(document.getElementById('rollouts-input').value) || 1;
+  const btn      = document.getElementById('ai-btn');
+  btn.disabled   = true;
+
+  const aiPlayer = humanPlayer !== null ? (1 - humanPlayer) : game.next_player();
+  const aiMoves  = [];
   try {
-    // Loop to automatically play all hops in an AI capture chain.
     do {
       const t0 = performance.now();
       let mv;
       const statesBefore = Array.from(game.cell_states());
 
       if (ortSession !== null) {
-        // ── NN + MCTS via ORT Web ───────────────────────────────────────
         btn.textContent = 'Thinking (NN)…';
         const result = await game.best_move_nn(ortEvalBatch, sims, 1.5);
         mv = result.move;
@@ -750,7 +865,6 @@ document.getElementById('ai-btn').addEventListener('click', async () => {
         mv = applyColorPreference(game.valid_moves(), mv);
         log(`AI (NN): ${mv}  val=${result.value.toFixed(2)}  ${sims} sims  ${ms}ms`);
       } else {
-        // ── random-rollout MCTS fallback ────────────────────────────────
         btn.textContent = 'Thinking…';
         mv = game.best_move_random(sims, rollouts, 1.5);
         const ms = (performance.now() - t0).toFixed(0);
@@ -765,14 +879,23 @@ document.getElementById('ai-btn').addEventListener('click', async () => {
 
     lastMoveInfo = computeLastMoveInfo(aiMoves);
     pendingCaptureMoves = [];
+
+    const moveStr = aiMoves[0].mv.trim().startsWith('CAP')
+      ? formatCaptureChain(aiMoves)
+      : aiMoves[0].mv.trim();
+    logMove(aiPlayer, moveStr);
+
     updateBoard();
   } catch (e) {
     log(`AI error: ${e}`);
   } finally {
-    btn.disabled    = false;
-    btn.textContent = ortSession ? 'AI Move NN (P2)' : 'AI Move (P2)';
+    aiRunning  = false;
+    btn.disabled = false;
+    updateBoard();
   }
-});
+}
+
+document.getElementById('ai-btn').addEventListener('click', () => triggerAiMove());
 
 document.getElementById('cancel-btn').addEventListener('click', () => {
   resetPhase();
@@ -784,11 +907,40 @@ document.getElementById('cancel-btn').addEventListener('click', () => {
   document.getElementById(ids[i]).addEventListener('click', () => onColorClick(c));
 });
 
-// ── logging ───────────────────────────────────────────────────────────────────
+// ── play log ──────────────────────────────────────────────────────────────────
+function logMove(player, moveStr) {
+  turnNumber++;
+  const table = document.getElementById('play-log-table');
+  const row = table.insertRow(-1);  // append at bottom
+  const cls = player === 0 ? 'p1-cell' : 'p2-cell';
+  const plr = player === 0 ? 'P1' : 'P2';
+  row.innerHTML = `<td class="turn-num">${turnNumber}</td><td class="${cls}">${plr}</td><td class="move-cell">${moveStr}</td>`;
+  // Auto-scroll to bottom
+  const wrap = document.getElementById('play-log-wrap');
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+// ── system logging ────────────────────────────────────────────────────────────
 function log(msg) {
   const el = document.getElementById('log');
   el.innerHTML = `<div>${msg}</div>` + el.innerHTML;
 }
+
+// ── start screen ─────────────────────────────────────────────────────────────
+function choosePlayer(p) {
+  humanPlayer = p;
+  // Sync sims from start screen input to the sidebar input
+  const startSims = parseInt(document.getElementById('start-sims-input').value);
+  if (!isNaN(startSims)) document.getElementById('sims-input').value = startSims;
+  document.getElementById('start-screen').style.display = 'none';
+  log(`Game started. You are ${p === 0 ? 'P1 (blue, goes first)' : 'P2 (orange, goes second)'}.`);
+  updateBoard();
+  // If AI goes first (human chose P2), trigger AI immediately
+  if (p === 1) setTimeout(triggerAiMove, 200);
+}
+
+document.getElementById('choose-p1').addEventListener('click', () => choosePlayer(0));
+document.getElementById('choose-p2').addEventListener('click', () => choosePlayer(1));
 
 // ── init ──────────────────────────────────────────────────────────────────────
 async function main() {
@@ -796,10 +948,8 @@ async function main() {
   game = new ZertzGame();
   buildBoard();
   handleMidCapture();
-  updateBoard();
-  log('Game started. P1 = you, P2 = AI.');
-
-  // Auto-load the ONNX model if it exists alongside the page.
+  // Don't call updateBoard yet — wait for player selection
+  // But do start loading the model in parallel
   loadModel('./zertz_b6_c64.onnx');
 }
 
