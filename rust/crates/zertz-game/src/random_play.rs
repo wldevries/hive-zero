@@ -2,16 +2,7 @@
 
 use core_game::game::{Game, Outcome, Player};
 use rand::seq::SliceRandom;
-use crate::zertz::ZertzBoard;
-
-#[derive(Debug)]
-pub enum WinType {
-    FourWhite,
-    FiveGrey,
-    SixBlack,
-    ThreeEach,
-    Draw,
-}
+use zertz_game::zertz::{classify_win, WinType, ZertzBoard};
 
 pub struct GameResult {
     pub moves: u32,
@@ -19,23 +10,6 @@ pub struct GameResult {
     pub win_type: WinType,
     pub board_full: bool,
     pub final_board: ZertzBoard,
-}
-
-pub fn classify_win(board: &ZertzBoard, winner: Player) -> WinType {
-    let pi = match winner {
-        Player::Player1 => 0,
-        Player::Player2 => 1,
-    };
-    let caps = &board.captures()[pi];
-    if caps.iter().all(|&c| c >= 3) {
-        WinType::ThreeEach
-    } else if caps[0] >= 4 {
-        WinType::FourWhite
-    } else if caps[1] >= 5 {
-        WinType::FiveGrey
-    } else {
-        WinType::SixBlack
-    }
 }
 
 pub fn run_game(rng: &mut impl rand::Rng) -> GameResult {

@@ -31,6 +31,36 @@ const WIN_SINGLE: [u8; 3] = [4, 5, 6];
 const WIN_EACH: u8 = 3;
 
 // ---------------------------------------------------------------------------
+// Win classification
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum WinType {
+    FourWhite,
+    FiveGrey,
+    SixBlack,
+    ThreeEach,
+    Draw,
+}
+
+pub fn classify_win(board: &ZertzBoard, winner: Player) -> WinType {
+    let pi = match winner {
+        Player::Player1 => 0,
+        Player::Player2 => 1,
+    };
+    let caps = &board.captures()[pi];
+    if caps.iter().all(|&c| c >= 3) {
+        WinType::ThreeEach
+    } else if caps[0] >= 4 {
+        WinType::FourWhite
+    } else if caps[1] >= 5 {
+        WinType::FiveGrey
+    } else {
+        WinType::SixBlack
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Hex-based helper functions
 // ---------------------------------------------------------------------------
 

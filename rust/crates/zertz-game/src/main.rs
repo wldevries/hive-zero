@@ -1,5 +1,8 @@
+mod random_play;
+mod replay;
+
 use clap::{Parser, Subcommand};
-use zertz_game::{mcts, random_play, replay};
+use zertz_game::mcts;
 
 // ---------------------------------------------------------------------------
 // MCTS demo
