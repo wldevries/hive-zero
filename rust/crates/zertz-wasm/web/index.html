@@ -36,10 +36,13 @@ svg { display: block; }
 #turn-indicator.ai-turn    { background: #2a2a0a; color: #ddbb44; border: 1px solid #555520; }
 #turn-indicator.game-over  { background: #1a1a2a; color: #888899; border: 1px solid #333344; display: none; }
 
-.supply-grid, .capture-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin-top: 4px; }
-.marble-count { text-align: center; font-size: 0.8rem; }
-.marble-count .icon { font-size: 1.1rem; }
-.marble-count .val { color: #c0d8ff; }
+.capture-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 0.85rem; }
+.capture-table thead th { text-align: center; font-size: 1.1rem; padding-bottom: 4px; color: #c0d8ff; font-weight: normal; }
+.capture-table tbody th { text-align: left; padding: 3px 6px 3px 0; font-size: 0.8rem; font-weight: 700; white-space: nowrap; }
+.capture-table tbody td { text-align: center; padding: 3px 4px; color: #c0d8ff; font-size: 0.9rem; font-weight: 600; }
+.capture-table .row-supply { color: #8899bb; }
+.capture-table .row-p1 { color: #7bbfff; }
+.capture-table .row-p2 { color: #ff9966; }
 
 /* Marble color picker */
 #color-picker { display: flex; gap: 12px; justify-content: center; align-items: center; padding: 8px 0; }
@@ -192,25 +195,37 @@ svg { display: block; }
   </div>
 
   <div class="panel">
-    <h2>Supply (shared)</h2>
-    <div class="supply-grid">
-      <div class="marble-count"><div class="icon">⚪</div><div class="val" id="sup-w">—</div></div>
-      <div class="marble-count"><div class="icon">🔘</div><div class="val" id="sup-g">—</div></div>
-      <div class="marble-count"><div class="icon">⚫</div><div class="val" id="sup-b">—</div></div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <h2>Captures</h2>
-    <div style="font-size:0.75rem;color:#8899bb;margin-bottom:4px;">P1 (blue) / P2 (orange)</div>
-    <div class="capture-grid">
-      <div class="marble-count"><div class="icon">⚪</div><div class="val" id="cap-p1w">—</div><div style="color:#667799;font-size:0.7rem">P1</div></div>
-      <div class="marble-count"><div class="icon">🔘</div><div class="val" id="cap-p1g">—</div><div style="color:#667799;font-size:0.7rem">P1</div></div>
-      <div class="marble-count"><div class="icon">⚫</div><div class="val" id="cap-p1b">—</div><div style="color:#667799;font-size:0.7rem">P1</div></div>
-      <div class="marble-count"><div class="icon">⚪</div><div class="val" id="cap-p2w">—</div><div style="color:#667799;font-size:0.7rem">P2</div></div>
-      <div class="marble-count"><div class="icon">🔘</div><div class="val" id="cap-p2g">—</div><div style="color:#667799;font-size:0.7rem">P2</div></div>
-      <div class="marble-count"><div class="icon">⚫</div><div class="val" id="cap-p2b">—</div><div style="color:#667799;font-size:0.7rem">P2</div></div>
-    </div>
+    <h2>Marbles</h2>
+    <table class="capture-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>⚪</th>
+          <th>🔘</th>
+          <th>⚫</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th class="row-supply">Supply</th>
+          <td id="sup-w">—</td>
+          <td id="sup-g">—</td>
+          <td id="sup-b">—</td>
+        </tr>
+        <tr>
+          <th class="row-p1">P1</th>
+          <td id="cap-p1w">—</td>
+          <td id="cap-p1g">—</td>
+          <td id="cap-p1b">—</td>
+        </tr>
+        <tr>
+          <th class="row-p2">P2</th>
+          <td id="cap-p2w">—</td>
+          <td id="cap-p2g">—</td>
+          <td id="cap-p2b">—</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
 
   <div class="panel">
