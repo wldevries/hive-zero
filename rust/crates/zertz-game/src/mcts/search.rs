@@ -118,9 +118,10 @@ fn select_leaf(
 // ---------------------------------------------------------------------------
 
 /// Backpropagate a value up the tree.
-/// Negates the value when traversing to a parent with a different player
-/// (standard alpha-zero), but keeps it when parent has the same player
-/// (mid-capture continuation).
+/// Convention B: each node stores value from its parent's player's perspective.
+/// After storing at node N, we prepare the value for N's parent by flipping
+/// iff parent(N).player ≠ grandparent(N).player (not N.player ≠ parent(N).player,
+/// which is wrong when the same player acts on consecutive turns, e.g. mid-capture).
 fn backpropagate(arena: &mut NodeArena, node_id: NodeId, value: f32) {
     let mut value = -value;
     let mut node_id = node_id;
@@ -129,13 +130,16 @@ fn backpropagate(arena: &mut NodeArena, node_id: NodeId, value: f32) {
         node.visit_count += 1;
         node.value_sum += value;
         match node.parent {
-            Some(parent) => {
-                let child_player = node.board.next_player();
-                let parent_player = arena.get(parent).board.next_player();
-                if child_player != parent_player {
+            Some(parent_id) => {
+                let parent_player = arena.get(parent_id).board.next_player();
+                let should_flip = match arena.get(parent_id).parent {
+                    Some(gp_id) => parent_player != arena.get(gp_id).board.next_player(),
+                    None => true, // parent is root: always flip (root_value() negates)
+                };
+                if should_flip {
                     value = -value;
                 }
-                node_id = parent;
+                node_id = parent_id;
             }
             None => break,
         }
@@ -150,13 +154,16 @@ fn apply_virtual_loss(arena: &mut NodeArena, mut node_id: NodeId) {
         node.visit_count += 1;
         node.value_sum += virtual_loss;
         match node.parent {
-            Some(parent) => {
-                let child_player = node.board.next_player();
-                let parent_player = arena.get(parent).board.next_player();
-                if child_player != parent_player {
+            Some(parent_id) => {
+                let parent_player = arena.get(parent_id).board.next_player();
+                let should_flip = match arena.get(parent_id).parent {
+                    Some(gp_id) => parent_player != arena.get(gp_id).board.next_player(),
+                    None => true,
+                };
+                if should_flip {
                     virtual_loss = -virtual_loss;
                 }
-                node_id = parent;
+                node_id = parent_id;
             }
             None => break,
         }
@@ -173,14 +180,17 @@ fn correct_virtual_loss(arena: &mut NodeArena, node_id: NodeId, real_value: f32)
         let node = arena.get_mut(node_id);
         node.value_sum += real_value - virtual_loss;
         match node.parent {
-            Some(parent) => {
-                let child_player = node.board.next_player();
-                let parent_player = arena.get(parent).board.next_player();
-                if child_player != parent_player {
+            Some(parent_id) => {
+                let parent_player = arena.get(parent_id).board.next_player();
+                let should_flip = match arena.get(parent_id).parent {
+                    Some(gp_id) => parent_player != arena.get(gp_id).board.next_player(),
+                    None => true,
+                };
+                if should_flip {
                     real_value = -real_value;
                     virtual_loss = -virtual_loss;
                 }
-                node_id = parent;
+                node_id = parent_id;
             }
             None => break,
         }
