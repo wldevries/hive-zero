@@ -467,6 +467,20 @@ class SelfPlayTrainer:
                     print(f"  decisive:  avg=\033[1;37m{d_avg:.0f}\033[0m  med=\033[1;37m{d_med}\033[0m")
                 else:
                     print()
+            # Board dimension stats over final positions
+            dims = [g.board_dims() for g in finished_games_all]
+            if dims:
+                _w = lambda v: f"\033[1;37m{v}\033[0m"
+                abs_q = [d[0] for d in dims]; abs_r = [d[1] for d in dims]; abs_s = [d[2] for d in dims]
+                sp_q  = [d[3] for d in dims]; sp_r  = [d[4] for d in dims]; sp_s  = [d[5] for d in dims]
+                n = len(dims)
+                print(f"  Board spread: "
+                      f"|q|=avg{_w(f'{sum(abs_q)/n:.1f}')} max{_w(max(abs_q))}  "
+                      f"|r|=avg{_w(f'{sum(abs_r)/n:.1f}')} max{_w(max(abs_r))}  "
+                      f"|s|=avg{_w(f'{sum(abs_s)/n:.1f}')} max{_w(max(abs_s))}  "
+                      f"span=avg{_w(f'{sum(sp_q)/n:.1f}')}/{_w(f'{sum(sp_r)/n:.1f}')}/{_w(f'{sum(sp_s)/n:.1f}')} "
+                      f"max{_w(max(sp_q))}/{_w(max(sp_r))}/{_w(max(sp_s))}")
+
             if result.use_playout_cap:
                 print(f"  Playout cap: {result.full_search_turns}/{result.total_turns} full-search turns "
                       f"({100*result.full_search_turns/max(result.total_turns,1):.0f}%)")

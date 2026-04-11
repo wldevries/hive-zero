@@ -247,6 +247,28 @@ impl PyGame {
         }).collect()
     }
 
+    /// Board dimension stats over occupied hexes (axial coords q, r, s=-q-r).
+    /// Returns (max_abs_q, max_abs_r, max_abs_s, span_q, span_r, span_s).
+    /// Returns all zeros if the board is empty.
+    fn board_dims(&self) -> (i32, i32, i32, i32, i32, i32) {
+        let mut min_q = i32::MAX; let mut max_q = i32::MIN;
+        let mut min_r = i32::MAX; let mut max_r = i32::MIN;
+        let mut min_s = i32::MAX; let mut max_s = i32::MIN;
+        for ((q, r), _) in self.game.board.iter_occupied() {
+            let q = q as i32; let r = r as i32; let s = -q - r;
+            min_q = min_q.min(q); max_q = max_q.max(q);
+            min_r = min_r.min(r); max_r = max_r.max(r);
+            min_s = min_s.min(s); max_s = max_s.max(s);
+        }
+        if min_q == i32::MAX {
+            return (0, 0, 0, 0, 0, 0);
+        }
+        let max_abs_q = min_q.abs().max(max_q.abs());
+        let max_abs_r = min_r.abs().max(max_r.abs());
+        let max_abs_s = min_s.abs().max(max_s.abs());
+        (max_abs_q, max_abs_r, max_abs_s, max_q - min_q, max_r - min_r, max_s - min_s)
+    }
+
     /// Full stack at a position (bottom to top) as list of piece strings.
     #[pyo3(signature = (q, r))]
     fn stack_at(&self, q: i8, r: i8) -> Vec<String> {
