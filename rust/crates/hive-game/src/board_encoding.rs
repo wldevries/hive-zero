@@ -357,27 +357,27 @@ mod tests {
 
     #[test]
     fn test_stacked_beetle() {
+        use crate::game::GameState;
+        // Set up board directly to avoid recentering from play_move.
+        // Position: wQ at (0,0) with wB1 stacked on top; bQ at (1,0); bB1 at (2,0). Black's turn.
         let mut game = Game::new();
         let wq  = Piece::new(PieceColor::White, PieceType::Queen, 1);
         let wb1 = Piece::new(PieceColor::White, PieceType::Beetle, 1);
         let bq  = Piece::new(PieceColor::Black, PieceType::Queen, 1);
         let bb1 = Piece::new(PieceColor::Black, PieceType::Beetle, 1);
 
-        // Place pieces to set up a stack: wQ at (0,0), bQ adjacent, then move beetles on top
-        game.play_move(&Move::placement(wq, (0, 0)));
-        game.play_move(&Move::placement(bq, (1, 0)));
-        game.play_move(&Move::placement(wb1, (-1, 0)));
-        game.play_move(&Move::placement(bb1, (2, 0)));
-        // Move wb1 onto wQ — stack at (0,0): [wQ, wB1], white's turn
-        game.play_move(&Move::movement(wb1, (-1, 0), (0, 0)));
-        // Now black's turn. Stack at (0,0) from black's perspective:
+        game.board.place_piece(wq, (0, 0)).unwrap();
+        game.board.place_piece(wb1, (0, 0)).unwrap(); // beetle stacks on wQ
+        game.board.place_piece(bq, (1, 0)).unwrap();
+        game.board.place_piece(bb1, (2, 0)).unwrap();
+        game.state = GameState::InProgress;
+        game.turn_color = PieceColor::Black;
+
+        // From black's perspective: stack at (0,0) = opponent's pieces.
         // base = wQ (opponent's Q, type 0 → channel OPP_PIECES_BASE+0 = 5)
         // stacked = wB1 (opponent's stacker at depth 1 → channel OPP_STACKER_BASE+0 = 14)
-
         let (bt, _) = encode(&game);
-        // base at (0,0) = opponent's queen → channel 5
         assert_eq!(at(&bt, 5, 11, 11), 1.0);
-        // opponent's stacker at depth 1 → channel 14
         assert_eq!(at(&bt, 14, 11, 11), 1.0);
         // Hive edge: occupied cell (0,0) is NOT on the edge channel (it's occupied)
         assert_eq!(at(&bt, HIVE_EDGE_CH, 11, 11), 0.0);
@@ -385,27 +385,32 @@ mod tests {
 
     #[test]
     fn test_symmetric_encoding() {
+        use crate::game::GameState;
         // After placing wQ, encoding from black's turn should show it in opponent's channels.
         // After placing bQ (mirrored), encoding from white's turn should show it the same way.
+        // Use direct board setup to avoid recentering from play_move.
+
+        // game_a: wQ at (0,0), black's turn.
         let mut game_a = Game::new();
         let wq = Piece::new(PieceColor::White, PieceType::Queen, 1);
-        let bq = Piece::new(PieceColor::Black, PieceType::Queen, 1);
-
-        game_a.play_move(&Move::placement(wq, (0, 0)));
-        // Black's turn: wQ is opponent at center
+        game_a.board.place_piece(wq, (0, 0)).unwrap();
+        game_a.state = GameState::InProgress;
+        game_a.turn_color = PieceColor::Black;
         let (bt_a, _) = encode(&game_a);
 
+        // game_b: wa1 at (0,0) and bQ at (1,0), white's turn.
         let mut game_b = Game::new();
-        // Skip to black's first move by placing wQ somewhere else first
+        let bq  = Piece::new(PieceColor::Black, PieceType::Queen, 1);
         let wa1 = Piece::new(PieceColor::White, PieceType::Ant, 1);
-        game_b.play_move(&Move::placement(wa1, (0, 0)));
-        game_b.play_move(&Move::placement(bq, (1, 0)));
-        // White's turn: bQ is opponent at (1,0)
+        game_b.board.place_piece(wa1, (0, 0)).unwrap();
+        game_b.board.place_piece(bq, (1, 0)).unwrap();
+        game_b.state = GameState::InProgress;
+        game_b.turn_color = PieceColor::White;
         let (bt_b, _) = encode(&game_b);
 
         // Both cases: opponent's queen in channel 5 (OPP_PIECES_BASE + Queen=0)
-        assert_eq!(at(&bt_a, 5, 11, 11), 1.0); // wQ at center, black's turn
-        assert_eq!(at(&bt_b, 5, 11, 12), 1.0); // bQ at (1,0)=(row11,col12), white's turn
+        assert_eq!(at(&bt_a, 5, 11, 11), 1.0); // wQ at (0,0)=grid(11,11), black's turn
+        assert_eq!(at(&bt_b, 5, 11, 12), 1.0); // bQ at (1,0)=grid(11,12), white's turn
         // Neither appears in current player's channels (0-4)
         assert_eq!(at(&bt_a, 0, 11, 11), 0.0);
         assert_eq!(at(&bt_b, 0, 11, 12), 0.0);

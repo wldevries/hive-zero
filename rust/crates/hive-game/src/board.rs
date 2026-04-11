@@ -482,6 +482,59 @@ impl Board {
             })
         })
     }
+
+    /// Shift all pieces by (dq, dr) in axial coordinates.
+    /// Rebuilds the grid and updates piece_positions.
+    /// Panics if any piece would land out of grid bounds.
+    pub fn apply_shift(&mut self, dq: i8, dr: i8) {
+        if dq == 0 && dr == 0 {
+            return;
+        }
+        let mut new_grid = Box::new([[StackSlot::default(); GRID_SIZE]; GRID_SIZE]);
+        let mut new_positions = [None; TOTAL_PIECES];
+        for r in 0..GRID_SIZE {
+            for c in 0..GRID_SIZE {
+                if !self.grid[r][c].is_empty() {
+                    let old_hex = grid_to_hex(r, c);
+                    let new_hex = (old_hex.0 + dq, old_hex.1 + dr);
+                    let (nr, nc) = hex_to_grid(new_hex)
+                        .expect("apply_shift: piece shifted out of grid bounds");
+                    new_grid[nr][nc] = self.grid[r][c];
+                    for piece in self.grid[r][c].iter() {
+                        new_positions[piece.linear_index()] = Some((nr as u8, nc as u8));
+                    }
+                }
+            }
+        }
+        self.grid = new_grid;
+        self.piece_positions = new_positions;
+    }
+
+    /// Shift all pieces so their centroid is as close to (0,0) as possible.
+    /// Returns the (dq, dr) shift that was applied.
+    /// Does nothing and returns (0,0) if the board is empty.
+    pub fn recenter(&mut self) -> (i8, i8) {
+        if self.occupied_count == 0 {
+            return (0, 0);
+        }
+        let mut sum_q: i32 = 0;
+        let mut sum_r: i32 = 0;
+        let count = self.occupied_count as i32;
+        for r in 0..GRID_SIZE {
+            for c in 0..GRID_SIZE {
+                if !self.grid[r][c].is_empty() {
+                    let h = grid_to_hex(r, c);
+                    sum_q += h.0 as i32;
+                    sum_r += h.1 as i32;
+                }
+            }
+        }
+        // Round centroid to nearest integer: -(sum / count), rounded.
+        let dq = -(sum_q.signum() * (sum_q.abs() + count / 2) / count) as i8;
+        let dr = -(sum_r.signum() * (sum_r.abs() + count / 2) / count) as i8;
+        self.apply_shift(dq, dr);
+        (dq, dr)
+    }
 }
 
 impl Board {
@@ -794,17 +847,20 @@ mod tests {
     #[test]
     fn test_can_slide() {
         let mut board = Board::new();
-        let q = Piece::new(PieceColor::White, PieceType::Queen, 1);
-        board.place_piece(q, (0, 0));
-
-        // No blocking pieces: can always slide
-        assert!(board.can_slide((0, 0), (1, 0)));
-
-        // Add blocking pieces to create a gate
+        let q  = Piece::new(PieceColor::White, PieceType::Queen, 1);
         let s1 = Piece::new(PieceColor::White, PieceType::Spider, 1);
         let s2 = Piece::new(PieceColor::White, PieceType::Spider, 2);
-        // Common neighbors of (0,0) and (1,0) are (1,-1) and (0,1)
+        // Common neighbors of (0,0) and (1,0) are (1,-1) and (0,1).
+        board.place_piece(q, (0, 0));
+
+        // Zero common occupied neighbors (other than the piece being moved): cannot slide.
+        assert!(!board.can_slide((0, 0), (1, 0)));
+
+        // Exactly one common neighbor occupied: can slide (freedom to move, no gate).
         board.place_piece(s1, (1, -1));
+        assert!(board.can_slide((0, 0), (1, 0)));
+
+        // Both common neighbors occupied: gate, cannot slide.
         board.place_piece(s2, (0, 1));
         assert!(!board.can_slide((0, 0), (1, 0)));
     }

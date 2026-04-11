@@ -173,6 +173,8 @@ pub struct Game {
     reserves: Reserves,
     /// Reserve snapshots for undo.
     history_reserves: Vec<(u16, u16)>,
+    /// Recentering shift applied after each move, for undo.
+    history_shifts: Vec<(i8, i8)>,
 }
 
 impl Game {
@@ -189,6 +191,7 @@ impl Game {
             move_history: Vec::new(),
             reserves: Reserves::new(),
             history_reserves: Vec::new(),
+            history_shifts: Vec::new(),
         }
     }
 
@@ -335,6 +338,15 @@ impl Game {
             }
         }
 
+        // Recenter the board after each non-pass move so pieces stay near (0,0).
+        // Store the shift for undo.
+        let shift = if mv.piece.is_some() {
+            self.board.recenter()
+        } else {
+            (0, 0)
+        };
+        self.history_shifts.push(shift);
+
         self.move_history.push(*mv);
 
         if self.state == GameState::NotStarted {
@@ -364,7 +376,11 @@ impl Game {
 
         let mv = self.move_history.pop().unwrap();
         let (wr, br) = self.history_reserves.pop().unwrap();
+        let (dq, dr) = self.history_shifts.pop().unwrap();
         self.reserves.restore(wr, br);
+
+        // Reverse the recentering shift so move coordinates are valid again.
+        self.board.apply_shift(-dq, -dr);
 
         if let Some(piece) = mv.piece {
             if mv.from.is_none() {
@@ -622,35 +638,20 @@ mod tests {
     fn test_queen_must_be_placed_by_turn_4() {
         let mut game = Game::new();
 
-        // White turn 1: place ant
-        let wa1 = Piece::new(PieceColor::White, PieceType::Ant, 1);
-        game.play_move(&Move::placement(wa1, (0, 0)));
-
-        // Black turn 1: place ant
-        let ba1 = Piece::new(PieceColor::Black, PieceType::Ant, 1);
-        game.play_move(&Move::placement(ba1, (1, 0)));
-
-        // White turn 2: place spider
-        let ws1 = Piece::new(PieceColor::White, PieceType::Spider, 1);
-        game.play_move(&Move::placement(ws1, (-1, 0)));
-
-        // Black turn 2: place spider
-        let bs1 = Piece::new(PieceColor::Black, PieceType::Spider, 1);
-        game.play_move(&Move::placement(bs1, (2, 0)));
-
-        // White turn 3: place another
-        let wa2 = Piece::new(PieceColor::White, PieceType::Ant, 2);
-        game.play_move(&Move::placement(wa2, (-2, 0)));
-
-        // Black turn 3: place another
-        let ba2 = Piece::new(PieceColor::Black, PieceType::Ant, 2);
-        game.play_move(&Move::placement(ba2, (3, 0)));
+        // Play 6 moves (3 per player) without placing a queen, using legal moves from
+        // valid_moves() so coordinates are always correct even after recentering.
+        for _ in 0..6 {
+            let moves = game.valid_moves();
+            let mv = *moves.iter()
+                .find(|m| m.from.is_none() && m.piece.map_or(false, |p| p.piece_type() != PieceType::Queen))
+                .unwrap();
+            game.play_move(&mv).unwrap();
+        }
 
         // White turn 4: MUST place queen
         let moves = game.valid_moves();
-        assert!(moves.iter().all(|m| {
-            m.piece.unwrap().piece_type() == PieceType::Queen
-        }));
+        assert!(!moves.is_empty());
+        assert!(moves.iter().all(|m| m.piece.unwrap().piece_type() == PieceType::Queen));
     }
 
     #[test]
