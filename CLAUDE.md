@@ -13,8 +13,7 @@ hive/
   nn/          - PyTorch AlphaZero-style model (policy + value heads), training loop
   uhp/         - UHP stdin/stdout protocol engine
   selfplay/    - Self-play training loop (Rust-only, no Python MCTS)
-    selfplay.py       - SelfPlayTrainer orchestrator, playout cap randomization
-    rust_selfplay.py  - RustParallelSelfPlay (rayon-parallel batched MCTS, playout cap)
+    selfplay.py       - SelfPlayTrainer orchestrator + RustParallelSelfPlay (Rust MCTS, Python GPU callback)
 rust/crates/
   core-game/src/       - Game abstractions and shared Rust logic
     game.rs            - Game/NNGame/Outcome traits

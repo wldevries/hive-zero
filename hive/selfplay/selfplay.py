@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 import torch
+import numpy as np
 import os
 import time
 from typing import Optional
 
 from shared.lr_scheduler import LRScheduler
 from shared.training_log import csv_comment
+from ..encoding.move_encoder import policy_size as compute_policy_size
 
 LOG_HEADER = (
     "iter,mode,simulations,wins_w,wins_b,draws,resignations,positions,buffer,"
@@ -32,6 +34,135 @@ _cc = lambda v: _c(v, colorama.Fore.CYAN)     # scores / percentages
 
 from ..nn.model import create_model, save_checkpoint, load_checkpoint, export_onnx
 from ..nn.training import HiveDataset, Trainer
+
+
+class RustParallelSelfPlay:
+    """Self-play using Rust game loop with Python NN inference callback.
+
+    The entire game loop (MCTS, move selection, training data collection)
+    runs in Rust. Python only provides the eval_fn for GPU inference.
+    """
+
+    def __init__(self, model, device: str = "cpu",
+                 simulations: int = 100, max_moves: int = 200,
+                 temperature: float = 1.0, temp_threshold: int = 30,
+                 c_puct: float = 1.5,
+                 dir_alpha: float = 0.3, dir_epsilon: float = 0.25,
+                 resign_threshold: float = -0.97, resign_moves: int = 5,
+                 resign_min_moves: int = 20,
+                 calibration_frac: float = 0.1,
+                 playout_cap_p: float = 0.0,
+                 fast_cap: int = 20,
+                 leaf_batch_size: int = 1,
+                 fixed_batch_size: int | None = None,
+                 random_opening_moves: int | tuple[int, int] = 0,
+                 skip_timeout_games: bool = False,
+                 **kwargs):
+        self.model = model
+        self.device = device
+        self.simulations = simulations
+        self.max_moves = max_moves
+        self.temperature = temperature
+        self.temp_threshold = temp_threshold
+        self.c_puct = c_puct
+        self.dir_alpha = dir_alpha
+        self.dir_epsilon = dir_epsilon
+        self.resign_threshold = resign_threshold
+        self.resign_moves = resign_moves
+        self.resign_min_moves = resign_min_moves
+        self.calibration_frac = calibration_frac
+        self.playout_cap_p = playout_cap_p
+        self.fast_cap = fast_cap
+        self.leaf_batch_size = leaf_batch_size
+        self.fixed_batch_size = fixed_batch_size
+        self.random_opening_moves = random_opening_moves
+        self.skip_timeout_games = skip_timeout_games
+
+    def _eval_fn(self):
+        """Return a callable for Rust's GPU inference callback."""
+        model = self.model
+        device = self.device
+
+        ps = compute_policy_size(getattr(model, 'grid_size', 23) if model else 23)
+
+        def eval_fn(board_batch, reserve_batch):
+            board_4d = np.asarray(board_batch)
+            reserves = np.asarray(reserve_batch)
+            if model is None:
+                n = board_4d.shape[0]
+                return (np.ones((n, ps), dtype=np.float32) / ps,
+                        np.zeros(n, dtype=np.float32))
+            # Data arrives as uint16 (raw bf16 bits) from Rust — reinterpret as bfloat16
+            use_pinned = str(device).startswith("cuda")
+            bt = torch.from_numpy(board_4d).view(torch.bfloat16)
+            rv = torch.from_numpy(reserves).view(torch.bfloat16)
+            if use_pinned:
+                bt = bt.pin_memory()
+                rv = rv.pin_memory()
+            bt = bt.to(device, non_blocking=use_pinned)
+            rv = rv.to(device, non_blocking=use_pinned)
+            with torch.no_grad():
+                policy_logits, values, _ = model(bt, rv)
+            policy = torch.softmax(policy_logits.float(), dim=1).cpu().numpy()
+            vals = values.float().cpu().numpy().flatten()
+            return policy.astype(np.float32), vals.astype(np.float32)
+
+        return eval_fn
+
+    def play_games(self, num_games: int, opening_sequences: list[list[str]] | None = None,
+                   onnx_path: str | None = None):
+        """Play num_games entirely in Rust. Returns SelfPlayResult.
+
+        opening_sequences: per-game UHP move lists to replay before MCTS.
+            Empty inner list (or None) means use random_opening_moves for that game.
+        onnx_path: if provided, use Rust-native ORT inference instead of Python eval.
+        """
+        from engine_zero import RustSelfPlaySession
+        from tqdm import tqdm
+
+        grid_size = getattr(self.model, 'grid_size', 23) if self.model else 23
+        session = RustSelfPlaySession(
+            num_games=num_games,
+            simulations=self.simulations,
+            max_moves=self.max_moves,
+            temperature=self.temperature,
+            temp_threshold=self.temp_threshold,
+            playout_cap_p=self.playout_cap_p,
+            fast_cap=self.fast_cap,
+            c_puct=self.c_puct,
+            dir_alpha=self.dir_alpha,
+            dir_epsilon=self.dir_epsilon,
+            leaf_batch_size=self.leaf_batch_size,
+            fixed_batch_size=self.fixed_batch_size,
+            resign_threshold=self.resign_threshold,
+            resign_moves=self.resign_moves,
+            resign_min_moves=self.resign_min_moves,
+            calibration_frac=self.calibration_frac,
+            random_opening_moves_min=self.random_opening_moves[0] if isinstance(self.random_opening_moves, tuple) else self.random_opening_moves,
+            random_opening_moves_max=self.random_opening_moves[1] if isinstance(self.random_opening_moves, tuple) else self.random_opening_moves,
+            skip_timeout_games=self.skip_timeout_games,
+            grid_size=grid_size,
+        )
+
+        pbar = tqdm(total=self.max_moves, unit="turn", desc="  Self-play", leave=False)
+
+        def progress(finished, total, active, moves, resigned, max_turn=0):
+            advance = max_turn - pbar.n
+            if advance > 0:
+                pbar.update(advance)
+            pbar.set_postfix(active=f"{active}/{total}",
+                             resigned=resigned if resigned else 0)
+
+        if onnx_path:
+            result = session.play_games(progress_fn=progress,
+                                        opening_sequences=opening_sequences,
+                                        onnx_path=onnx_path)
+        else:
+            result = session.play_games(self._eval_fn(), progress,
+                                        opening_sequences=opening_sequences)
+        pbar.update(pbar.total - pbar.n)
+        pbar.close()
+        return result
 
 
 class SelfPlayTrainer:
@@ -125,7 +256,6 @@ class SelfPlayTrainer:
                 all turns are full). KataGo-style playout cap randomization.
             fast_cap: Number of simulations for fast-search turns.
         """
-        from .rust_selfplay import RustParallelSelfPlay
         start_time = time.time()
         self._comment = comment
 
