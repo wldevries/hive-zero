@@ -36,6 +36,9 @@ pub enum PieceType {
     Beetle = 2,
     Grasshopper = 3,
     Ant = 4,
+    Mosquito = 5,
+    Ladybug = 6,
+    Pillbug = 7,
 }
 
 impl PieceType {
@@ -46,6 +49,9 @@ impl PieceType {
             PieceType::Beetle => 'B',
             PieceType::Grasshopper => 'G',
             PieceType::Ant => 'A',
+            PieceType::Mosquito => 'M',
+            PieceType::Ladybug => 'L',
+            PieceType::Pillbug => 'P',
         }
     }
 
@@ -56,6 +62,9 @@ impl PieceType {
             'B' => Some(PieceType::Beetle),
             'G' => Some(PieceType::Grasshopper),
             'A' => Some(PieceType::Ant),
+            'M' => Some(PieceType::Mosquito),
+            'L' => Some(PieceType::Ladybug),
+            'P' => Some(PieceType::Pillbug),
             _ => None,
         }
     }
@@ -71,12 +80,15 @@ impl PieceType {
 pub const PIECE_COUNTS: [u8; 5] = [1, 2, 2, 3, 3]; // Q, S, B, G, A
 
 /// All piece types in order.
-pub const ALL_PIECE_TYPES: [PieceType; 5] = [
+pub const ALL_PIECE_TYPES: [PieceType; 8] = [
     PieceType::Queen,
     PieceType::Spider,
     PieceType::Beetle,
     PieceType::Grasshopper,
     PieceType::Ant,
+    PieceType::Mosquito,
+    PieceType::Ladybug,
+    PieceType::Pillbug,
 ];
 
 /// Total pieces per player: 1+2+2+3+3 = 11
@@ -110,6 +122,9 @@ impl Piece {
             2 => PieceType::Beetle,
             3 => PieceType::Grasshopper,
             4 => PieceType::Ant,
+            5 => PieceType::Mosquito,
+            6 => PieceType::Ladybug,
+            7 => PieceType::Pillbug,
             _ => unreachable!(),
         }
     }

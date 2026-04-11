@@ -33,6 +33,7 @@ pub fn get_moves(piece: Piece, board: &mut Board, articulation_points: &[Hex]) -
         PieceType::Beetle => beetle_moves(pos, board),
         PieceType::Grasshopper => grasshopper_moves(pos, board),
         PieceType::Ant => ant_moves(pos, board),
+        PieceType::Mosquito | PieceType::Ladybug | PieceType::Pillbug => todo!("Expansion pieces not implemented yet"),
     };
 
     // Restore piece
