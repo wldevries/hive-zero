@@ -118,10 +118,11 @@ fn select_leaf(
 // ---------------------------------------------------------------------------
 
 /// Backpropagate a value up the tree.
-/// Convention B: each node stores value from its parent's player's perspective.
-/// After storing at node N, we prepare the value for N's parent by flipping
-/// iff parent(N).player ≠ grandparent(N).player (not N.player ≠ parent(N).player,
-/// which is wrong when the same player acts on consecutive turns, e.g. mid-capture).
+/// Each node stores value from its parent's player's perspective.
+/// After storing at node N, flip sign iff parent(N).player ≠ grandparent(N).player.
+/// Using N.player ≠ parent(N).player instead would be wrong when the same player
+/// acts on consecutive turns (mid-capture), inverting the sign at those nodes.
+/// See docs/mcts_value_convention.md.
 fn backpropagate(arena: &mut NodeArena, node_id: NodeId, value: f32) {
     let mut value = -value;
     let mut node_id = node_id;

@@ -3,14 +3,12 @@
 /// moves from the root game during selection. This reduces per-node memory
 /// from ~4KB+ to ~60 bytes.
 ///
-/// # Value convention (Convention B — parent's perspective)
-/// `value_sum` stores the sum of values from the perspective of the *parent's*
-/// player (the one who chose the move that led to this node). Concretely:
-/// - A child's `value()` is positive when the move was good for the parent.
-/// - UCB selection at a parent uses `node.value() + exploration` directly,
-///   with no sign adjustment (see `ucb_score` in search.rs).
-/// - The root node has no parent, so `root_value()` negates the stored value
-///   to recover the root player's own expected return.
+/// # Value convention
+/// `value_sum` accumulates values from the *parent's player's* perspective:
+/// positive means the move that led here was good for whoever chose it.
+/// UCB selection uses `node.value() + exploration` directly (no negation).
+/// The root has no parent, so `root_value()` negates to recover the root
+/// player's own expected return. See docs/mcts_value_convention.md.
 
 use crate::game::Player;
 use super::arena::NodeId;

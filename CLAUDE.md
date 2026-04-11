@@ -56,6 +56,7 @@ rust/crates/
 - **One Hive Rule**: All pieces must remain connected after any move.
 - **Gate blocking**: Pieces cannot slide through gates (two adjacent occupied hexes).
 - **Rust-only engine**: All game logic, MCTS, and encoding in Rust. Python handles NN inference and training only. When editing move encoding or board encoding, update both Python and Rust versions.
+- **MCTS value convention**: Each node stores the mean backed-up value from the *parent's player's* perspective (positive = the move was good for whoever chose it). UCB reads `child.value()` directly without negation. Backpropagation flips sign based on the parent→grandparent player boundary, not the current→parent boundary — this correctly handles same-player consecutive turns (Zertz mid-capture). The root has no parent so `root_value()` negates to recover the root player's own expected return. See `docs/mcts_value_convention.md` for full derivation and traces.
 
 ## Training Pipeline
 - **SGD + momentum 0.9**, constant LR (default 0.02, set via --lr). Previously tried cosine annealing with warm restarts — removed in favour of manual LR adjustment.

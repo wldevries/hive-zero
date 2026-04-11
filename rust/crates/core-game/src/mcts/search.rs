@@ -9,8 +9,8 @@ const DEFAULT_C_PUCT: f32 = 1.5;
 const VIRTUAL_LOSS: f32 = -1.0f32;
 
 /// UCB score for child selection.
-/// `node.value()` is stored from the *parent's* player's perspective (Convention B),
-/// so it can be added directly without sign adjustment.
+/// `node.value()` is from the parent's player's perspective, so it is added
+/// directly without sign adjustment. See docs/mcts_value_convention.md.
 fn ucb_score<M: Copy>(node: &MctsNode<M>, parent_visits: u32, c_puct: f32) -> f32 {
     let exploration = c_puct * node.prior * (parent_visits as f32).sqrt()
         / (1.0 + node.visit_count as f32);
@@ -99,10 +99,10 @@ fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_visits: u32, c_p
 
 /// Backpropagate a value up the tree.
 /// `value` is from the perspective of the player to move at `node_id`.
-/// Convention B: each node stores the value from its *parent's* player's perspective,
-/// so the initial value is negated before accumulation and the sign flips at each level.
+/// Each node stores value from its parent's player's perspective, so the
+/// initial value is negated and sign flips at each level going up.
 fn backpropagate<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, value: f32) {
-    let mut value = -value; // negate: leaf stores from parent's perspective
+    let mut value = -value; // negate: store from parent's perspective
     let mut node_id = node_id;
     loop {
         let node = arena.get_mut(node_id);
@@ -137,7 +137,7 @@ fn apply_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, mut node_id: NodeId) {
 /// Does NOT increment visit_count (already done by apply_virtual_loss).
 /// `real_value` is from the perspective of the player to move at `node_id`.
 fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real_value: f32) {
-    let mut real_value = -real_value; // negate: Convention B, same as backpropagate
+    let mut real_value = -real_value; // negate: store from parent's perspective
     let mut virtual_loss = VIRTUAL_LOSS;
     let mut node_id = node_id;
     loop {
@@ -524,9 +524,9 @@ impl<G: GameEngine> MctsSearch<G> {
         self.arena.get(self.root).visit_count
     }
 
-    /// Mean value estimate at the root, from the root's current player's perspective.
-    /// Negated relative to the stored value because the root has no parent —
-    /// its value_sum accumulates contributions from the opposite sign (Convention B).
+    /// Mean value estimate at the root, from the root player's own perspective.
+    /// Negated because the root has no parent and its value_sum accumulates
+    /// from the "opposite" frame. See docs/mcts_value_convention.md.
     pub fn root_value(&self) -> f32 {
         -self.arena.get(self.root).value()
     }
