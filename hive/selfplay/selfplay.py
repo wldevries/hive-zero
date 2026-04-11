@@ -204,8 +204,9 @@ class SelfPlayTrainer:
         else:
             self.model = create_model(num_blocks, channels, grid_size=grid_size,
                                       num_attention_layers=num_attention_layers)
+            params = sum(p.numel() for p in self.model.parameters())
             print(f"Created new model ({num_blocks} blocks, {channels} channels, "
-                  f"{num_attention_layers} attn layers, grid {grid_size}x{grid_size})")
+                  f"{num_attention_layers} attn layers, grid {grid_size}x{grid_size}, {params/1e6:.2f}M params)")
 
         self.model.to(device)
         self.lr_scheduler = lr_scheduler
