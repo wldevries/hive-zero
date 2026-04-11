@@ -77,7 +77,7 @@ impl PieceType {
 }
 
 /// How many of each piece type per player (base game).
-pub const PIECE_COUNTS: [u8; 5] = [1, 2, 2, 3, 3]; // Q, S, B, G, A
+pub const PIECE_COUNTS: [u8; 8] = [1, 2, 2, 3, 3, 0, 0, 0]; // Q, S, B, G, A, M, L, P
 
 /// All piece types in order.
 pub const ALL_PIECE_TYPES: [PieceType; 8] = [
