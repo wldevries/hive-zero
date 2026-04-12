@@ -4,6 +4,7 @@ use core_game::hex::{Hex, hex_neighbors};
 use crate::board::Board;
 use crate::piece::{Piece, PieceColor, PieceType, PIECE_COUNTS, ALL_PIECE_TYPES, player_pieces};
 use crate::rules::{get_moves, get_placements};
+use std::collections::HashMap;
 
 use core_game::game::{Game as GameTrait, NNGame, Player, Outcome, PolicyIndex};
 use core_game::symmetry::D6Symmetry;
@@ -175,12 +176,81 @@ pub struct Game {
     history_reserves: Vec<(u16, u16)>,
     /// Recentering shift applied after each move, for undo.
     history_shifts: Vec<(i8, i8)>,
+    /// Position repetition counts keyed by Zobrist hash.
+    repetition_counts: HashMap<u64, u8>,
+    /// Position keys in move order (includes initial position at index 0).
+    repetition_history: Vec<u64>,
 }
 
 impl Game {
+    const ZOBRIST_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+    #[inline]
+    fn splitmix64(mut x: u64) -> u64 {
+        x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        x ^ (x >> 31)
+    }
+
+    #[inline]
+    fn zobrist_piece_key(piece_idx: usize, row: usize, col: usize, depth: usize) -> u64 {
+        let idx = ((((piece_idx * crate::board::GRID_SIZE + row) * crate::board::GRID_SIZE + col)
+            * crate::board::MAX_STACK)
+            + depth) as u64;
+        Self::splitmix64(Self::ZOBRIST_SEED ^ idx)
+    }
+
+    #[inline]
+    fn zobrist_side_to_move_key() -> u64 {
+        Self::splitmix64(Self::ZOBRIST_SEED ^ 0xFFFF_FFFF_FFFF_FFFF)
+    }
+
+    /// Zobrist position key including board occupancy, stack order, and side to move.
+    fn position_key(&self) -> u64 {
+        let mut key = 0u64;
+
+        for row in 0..crate::board::GRID_SIZE {
+            for col in 0..crate::board::GRID_SIZE {
+                let stack = self.board.stack_at_grid(row, col);
+                for (depth, piece) in stack.iter().enumerate() {
+                    key ^= Self::zobrist_piece_key(piece.linear_index(), row, col, depth);
+                }
+            }
+        }
+
+        if self.turn_color == PieceColor::Black {
+            key ^= Self::zobrist_side_to_move_key();
+        }
+
+        key
+    }
+
+    fn record_position_and_check_threefold(&mut self) {
+        let key = self.position_key();
+        self.repetition_history.push(key);
+        let count = self.repetition_counts.entry(key).or_insert(0);
+        *count = count.saturating_add(1);
+        if *count >= 3 {
+            self.state = GameState::Draw;
+        }
+    }
+
+    fn undo_repetition_for_last_position(&mut self) {
+        if let Some(key) = self.repetition_history.pop() {
+            if let Some(count) = self.repetition_counts.get_mut(&key) {
+                if *count <= 1 {
+                    self.repetition_counts.remove(&key);
+                } else {
+                    *count -= 1;
+                }
+            }
+        }
+    }
+
     /// Standard game — queen can be placed on the first move.
     pub fn new() -> Self {
-        Game {
+        let mut game = Game {
             board: Board::new(),
             state: GameState::NotStarted,
             turn_color: PieceColor::White,
@@ -192,7 +262,15 @@ impl Game {
             reserves: Reserves::new(),
             history_reserves: Vec::new(),
             history_shifts: Vec::new(),
-        }
+            repetition_counts: HashMap::new(),
+            repetition_history: Vec::new(),
+        };
+
+        let start_key = game.position_key();
+        game.repetition_counts.insert(start_key, 1);
+        game.repetition_history.push(start_key);
+
+        game
     }
 
     /// Standard game with a custom NN encoding grid size.
@@ -360,6 +438,9 @@ impl Game {
         self.turn_color = self.turn_color.opposite();
 
         self.check_game_end();
+        if self.state == GameState::InProgress {
+            self.record_position_and_check_threefold();
+        }
         Ok(())
     }
 
@@ -373,6 +454,9 @@ impl Game {
         if self.move_history.is_empty() {
             return;
         }
+
+        // Remove repetition entry for the position after the move being undone.
+        self.undo_repetition_for_last_position();
 
         let mv = self.move_history.pop().unwrap();
         let (wr, br) = self.history_reserves.pop().unwrap();
@@ -725,5 +809,65 @@ mod tests {
         game.state = GameState::InProgress;
         game.check_game_end();
         assert_eq!(game.state, GameState::BlackWins);
+    }
+
+    #[test]
+    fn test_position_key_differs_by_side_to_move() {
+        let mut game_white = Game::new();
+        let mut game_black = game_white.clone();
+
+        game_white.turn_color = PieceColor::White;
+        game_black.turn_color = PieceColor::Black;
+
+        assert_ne!(game_white.position_key(), game_black.position_key());
+    }
+
+    #[test]
+    fn test_position_key_includes_stack_order() {
+        let mut game_a = Game::new();
+        let mut game_b = Game::new();
+
+        let wq = Piece::new(PieceColor::White, PieceType::Queen, 1);
+        let bb1 = Piece::new(PieceColor::Black, PieceType::Beetle, 1);
+
+        game_a.board.place_piece(wq, (0, 0)).unwrap();
+        game_a.board.place_piece(bb1, (0, 0)).unwrap();
+
+        game_b.board.place_piece(bb1, (0, 0)).unwrap();
+        game_b.board.place_piece(wq, (0, 0)).unwrap();
+
+        assert_ne!(game_a.position_key(), game_b.position_key());
+    }
+
+    #[test]
+    fn test_threefold_repetition_draw() {
+        let mut game = Game::new();
+
+        // Two full pass cycles repeat the initial side-to-move position for White 3 times:
+        // initial + after move 2 + after move 4.
+        game.play_pass();
+        game.play_pass();
+        assert_eq!(game.state, GameState::InProgress);
+
+        game.play_pass();
+        game.play_pass();
+        assert_eq!(game.state, GameState::Draw);
+    }
+
+    #[test]
+    fn test_undo_clears_threefold_draw_state() {
+        let mut game = Game::new();
+
+        game.play_pass();
+        game.play_pass();
+        game.play_pass();
+        game.play_pass();
+        assert_eq!(game.state, GameState::Draw);
+
+        game.undo();
+        assert_eq!(game.state, GameState::InProgress);
+
+        game.play_pass();
+        assert_eq!(game.state, GameState::Draw);
     }
 }

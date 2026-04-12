@@ -240,7 +240,7 @@ pub fn play_selfplay_core(
     );
 
     let mut games: Vec<Game> = (0..num_games)
-        .map(|_| Game::new_with_grid_size(grid_size))
+        .map(|_| Game::new_tournament_with_grid_size(grid_size))
         .collect();
     let mut searches: Vec<MctsSearch<Game>> = (0..num_games)
         .map(|_| {
