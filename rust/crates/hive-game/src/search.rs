@@ -6,7 +6,7 @@ use core_game::game::{Game as GameTrait, Outcome, Player, PolicyIndex};
 use core_game::hex::hex_neighbors;
 use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::{CpuctStrategy, ForcedExploration, MctsSearch, RootNoise, SearchParams};
-use core_game::symmetry::{D6Symmetry, Symmetry, apply_d6_sym_spatial};
+use core_game::symmetry::{D6Symmetry, Symmetry};
 
 use crate::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE};
 use crate::game::{Game, GameState, Move};
@@ -389,9 +389,6 @@ pub fn play_selfplay_core(
             turn_reserve_offsets.push(reserve_offset);
         }
 
-        let root_syms: Vec<D6Symmetry> = (0..num_search_games)
-            .map(|_| D6Symmetry::random(&mut rng))
-            .collect();
         let mut flat_boards = Vec::with_capacity(num_search_games * board_size);
         let mut flat_reserves = Vec::with_capacity(num_search_games * RESERVE_SIZE);
         for index in 0..num_search_games {
@@ -401,22 +398,8 @@ pub fn play_selfplay_core(
             flat_reserves.extend_from_slice(
                 &reserve_buf[turn_reserve_offsets[index]..turn_reserve_offsets[index] + RESERVE_SIZE],
             );
-            apply_d6_sym_spatial(
-                &mut flat_boards[index * board_size..(index + 1) * board_size],
-                root_syms[index],
-                NUM_CHANNELS,
-                grid_size,
-            );
         }
-        let (mut init_policies, init_values) = eval_fn(&flat_boards, &flat_reserves, num_search_games)?;
-        for index in 0..num_search_games {
-            apply_d6_sym_spatial(
-                &mut init_policies[index * policy_size..(index + 1) * policy_size],
-                root_syms[index].inverse(),
-                move_encoding::NUM_POLICY_CHANNELS,
-                grid_size,
-            );
-        }
+        let (init_policies, init_values) = eval_fn(&flat_boards, &flat_reserves, num_search_games)?;
 
         for (index, &game_index) in mcts_games.iter().enumerate() {
             let search = &mut searches[game_index];
@@ -458,12 +441,10 @@ pub fn play_selfplay_core(
             let mut sims_done = vec![0usize; searching.len()];
             let mut still_searching: Vec<usize> = (0..searching.len()).collect();
             let mut per_game_leaf_ids: Vec<Vec<NodeId>> = vec![Vec::new(); searching.len()];
-            let mut per_game_syms: Vec<Vec<D6Symmetry>> = vec![Vec::new(); searching.len()];
 
             while !still_searching.is_empty() {
                 for index in 0..searching.len() {
                     per_game_leaf_ids[index].clear();
-                    per_game_syms[index].clear();
                 }
 
                 let mut flat_boards: Vec<f32> = Vec::new();
@@ -478,18 +459,9 @@ pub fn play_selfplay_core(
                         sims_done[search_index] += leaf_ids.len().max(1);
                         for &leaf_id in &leaf_ids {
                             let (board, reserve) = searches[game_index].encode_leaf(leaf_id);
-                            let sym = D6Symmetry::random(&mut rng);
-                            let start = flat_boards.len();
                             flat_boards.extend_from_slice(&board);
-                            apply_d6_sym_spatial(
-                                &mut flat_boards[start..],
-                                sym,
-                                NUM_CHANNELS,
-                                grid_size,
-                            );
                             flat_reserves.extend_from_slice(&reserve);
                             per_game_leaf_ids[search_index].push(leaf_id);
-                            per_game_syms[search_index].push(sym);
                             any_this_round = true;
                             any_leaves = true;
                         }
@@ -516,16 +488,9 @@ pub fn play_selfplay_core(
                     let game_index = mcts_games[searching[search_index]];
                     let policies: Vec<Vec<f32>> = (0..num_leaves)
                         .map(|leaf_offset| {
-                            let mut policy = policy_data
+                            policy_data
                                 [(offset + leaf_offset) * policy_size..(offset + leaf_offset + 1) * policy_size]
-                                .to_vec();
-                            apply_d6_sym_spatial(
-                                &mut policy,
-                                per_game_syms[search_index][leaf_offset].inverse(),
-                                move_encoding::NUM_POLICY_CHANNELS,
-                                grid_size,
-                            );
-                            policy
+                                .to_vec()
                         })
                         .collect();
                     let values = value_data[offset..offset + num_leaves].to_vec();
@@ -877,7 +842,6 @@ pub fn play_battle_core(
 
     let use_fn1 = |game_index: usize, player: Player| (game_index < half) == (player == Player::Player1);
 
-    let mut rng = rand::rng();
     while active.iter().any(|&is_active| is_active) {
         let active_games: Vec<usize> = (0..num_games).filter(|&game_index| active[game_index]).collect();
         let mut mcts_games = Vec::new();
@@ -910,9 +874,6 @@ pub fn play_battle_core(
         }
 
         let num_search_games = mcts_games.len();
-        let root_syms: Vec<D6Symmetry> = (0..num_search_games)
-            .map(|_| D6Symmetry::random(&mut rng))
-            .collect();
         let mut flat_boards = vec![0.0f32; num_search_games * board_size];
         let mut flat_reserves = vec![0.0f32; num_search_games * RESERVE_SIZE];
         let mut fn1_flags = Vec::with_capacity(num_search_games);
@@ -921,12 +882,6 @@ pub fn play_battle_core(
                 &games[game_index],
                 &mut flat_boards[index * board_size..(index + 1) * board_size],
                 &mut flat_reserves[index * RESERVE_SIZE..(index + 1) * RESERVE_SIZE],
-                grid_size,
-            );
-            apply_d6_sym_spatial(
-                &mut flat_boards[index * board_size..(index + 1) * board_size],
-                root_syms[index],
-                NUM_CHANNELS,
                 grid_size,
             );
             fn1_flags.push(use_fn1(game_index, games[game_index].next_player()));
@@ -940,12 +895,6 @@ pub fn play_battle_core(
             let source = if fn1_flags[index] { &policy1 } else { &policy2 };
             init_policies[index * policy_size..(index + 1) * policy_size].copy_from_slice(
                 &source[index * policy_size..(index + 1) * policy_size],
-            );
-            apply_d6_sym_spatial(
-                &mut init_policies[index * policy_size..(index + 1) * policy_size],
-                root_syms[index].inverse(),
-                move_encoding::NUM_POLICY_CHANNELS,
-                grid_size,
             );
         }
 
@@ -989,7 +938,6 @@ pub fn play_battle_core(
             let num_leaves = leaf_ids.len();
             let mut leaf_boards = vec![0.0f32; num_leaves * board_size];
             let mut leaf_reserves = vec![0.0f32; num_leaves * RESERVE_SIZE];
-            let mut leaf_syms = Vec::with_capacity(num_leaves);
             let mut leaf_fn1_flags = Vec::with_capacity(num_leaves);
 
             for (index, (&leaf_id, &search_index)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
@@ -997,14 +945,6 @@ pub fn play_battle_core(
                 let (board_enc, reserve_enc) = searches[game_index].encode_leaf(leaf_id);
                 leaf_boards[index * board_size..(index + 1) * board_size].copy_from_slice(&board_enc);
                 leaf_reserves[index * RESERVE_SIZE..(index + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
-                let sym = D6Symmetry::random(&mut rng);
-                apply_d6_sym_spatial(
-                    &mut leaf_boards[index * board_size..(index + 1) * board_size],
-                    sym,
-                    NUM_CHANNELS,
-                    grid_size,
-                );
-                leaf_syms.push(sym);
                 let leaf_player = searches[game_index].get_leaf_player(leaf_id);
                 leaf_fn1_flags.push(use_fn1(game_index, leaf_player));
             }
@@ -1019,13 +959,7 @@ pub fn play_battle_core(
                 let use_first_model = leaf_fn1_flags[index];
                 let policy_source = if use_first_model { &leaf_policy1 } else { &leaf_policy2 };
                 let value = if use_first_model { leaf_value1[index] } else { leaf_value2[index] };
-                let mut policy = policy_source[index * policy_size..(index + 1) * policy_size].to_vec();
-                apply_d6_sym_spatial(
-                    &mut policy,
-                    leaf_syms[index].inverse(),
-                    move_encoding::NUM_POLICY_CHANNELS,
-                    grid_size,
-                );
+                let policy = policy_source[index * policy_size..(index + 1) * policy_size].to_vec();
                 per_game_leaves[search_index].push(leaf_id);
                 per_game_data[search_index].push((policy, value));
             }
