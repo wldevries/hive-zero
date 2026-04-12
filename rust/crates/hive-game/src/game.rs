@@ -341,7 +341,7 @@ impl Game {
         // Recenter the board after each non-pass move so pieces stay near (0,0).
         // Store the shift for undo.
         let shift = if mv.piece.is_some() {
-            self.board.recenter()
+            self.board.recenter(self.nn_grid_size) // recenter only when pieces approach NN view boundary
         } else {
             (0, 0)
         };

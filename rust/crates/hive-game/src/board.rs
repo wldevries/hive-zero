@@ -511,12 +511,39 @@ impl Board {
     }
 
     /// Shift all pieces so their centroid is as close to (0,0) as possible.
+    ///
+    /// `nn_grid_size` is the active encoder view size (odd, <= `GRID_SIZE`).
+    /// If every occupied hex is already inside that view with a 1-hex buffer,
+    /// recentering is skipped to avoid unnecessary coordinate churn.
     /// Returns the (dq, dr) shift that was applied.
     /// Does nothing and returns (0,0) if the board is empty.
-    pub fn recenter(&mut self) -> (i8, i8) {
+    pub fn recenter(&mut self, nn_grid_size: usize) -> (i8, i8) {
         if self.occupied_count == 0 {
             return (0, 0);
         }
+
+        // If all occupied hexes are already inside the NN view (plus a 1-hex
+        // placement buffer), do not shift this turn.
+        let mut all_within_view = true;
+        // Distance from full board edge to NN view edge, then +1 for the buffer.
+        // Clamp to `GRID_SIZE` so malformed larger values do not underflow.
+        let nn_grid_size = nn_grid_size.min(GRID_SIZE);
+        let margin = ((GRID_SIZE - nn_grid_size + 2) / 2) as i8;
+        for r in 0..GRID_SIZE {
+            for c in 0..GRID_SIZE {
+                if !self.grid[r][c].is_empty() {
+                    let h = grid_to_hex(r, c);
+                    if h.0.abs() > margin || h.1.abs() > margin {
+                        all_within_view = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if all_within_view {
+            return (0, 0);
+        }
+
         let mut sum_q: i32 = 0;
         let mut sum_r: i32 = 0;
         let count = self.occupied_count as i32;
