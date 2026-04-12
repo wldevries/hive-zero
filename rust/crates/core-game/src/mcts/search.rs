@@ -8,26 +8,88 @@ use crate::game::{GameEngine, Outcome, Player, PolicyIndex};
 const DEFAULT_C_PUCT: f32 = 1.5;
 const VIRTUAL_LOSS: f32 = -1.0f32;
 
+#[derive(Clone)]
+pub enum CpuctStrategy {
+    Constant { c_puct: f32 },
+    Dynamic { c_init: f32, c_base: f32 },
+}
+
+#[derive(Clone)]
+pub enum RootNoise {
+    None,
+    Dirichlet { alpha: f32, epsilon: f32 },
+}
+
+#[derive(Clone, PartialEq)]
+pub enum ForcedExploration {
+    None,
+    /// selection_k: how aggressively to force playouts during tree search (typical: 0.5)
+    /// pruning_k: how aggressively to remove forced playouts from training targets (typical: 2.0)
+    Soft { selection_k: f32, pruning_k: f32 }
+}
+
+#[derive(Clone)]
+pub struct SearchParams {
+    pub cpuct_strategy: CpuctStrategy,
+    pub forced_exploration: ForcedExploration,
+    pub root_noise: RootNoise,
+}
+
+impl SearchParams {
+    pub fn new(cpuct_strategy: CpuctStrategy, forced_exploration: ForcedExploration, root_noise: RootNoise) -> Self {
+        Self {
+            cpuct_strategy,
+            forced_exploration,
+            root_noise,
+        }
+    }
+
+    pub fn inference(cpuct_strategy: CpuctStrategy) -> Self {
+        Self {
+            cpuct_strategy,
+            forced_exploration: ForcedExploration::None,
+            root_noise: RootNoise::None
+        }
+    }
+}
+
+impl Default for SearchParams {
+    fn default() -> Self {
+        Self {
+            cpuct_strategy: CpuctStrategy::Constant { c_puct: DEFAULT_C_PUCT },
+            forced_exploration: ForcedExploration::None,
+            root_noise: RootNoise::None
+        }
+    }
+}
+
 /// UCB score for child selection.
 /// `node.value()` is from the parent's player's perspective, so it is added
 /// directly without sign adjustment. See docs/mcts_value_convention.md.
-fn ucb_score<M: Copy>(node: &MctsNode<M>, parent_visits: u32, c_puct: f32) -> f32 {
-    let exploration = c_puct * node.prior * (parent_visits as f32).sqrt()
+fn ucb_score<M: Copy>(node: &MctsNode<M>, parent_visits: u32, params: &SearchParams) -> f32 {
+    let parent = parent_visits as f32;
+
+    let c_puct = match params.cpuct_strategy {
+        CpuctStrategy::Constant { c_puct } => c_puct,
+        CpuctStrategy::Dynamic { c_init, c_base } => c_init + ((parent + c_base + 1.0) / c_base).ln(),
+    };
+
+    let exploration = c_puct * node.prior * parent.sqrt()
         / (1.0 + node.visit_count as f32);
     node.value() + exploration
 }
 
 /// Select the best child by UCB score.
-fn best_child<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, c_puct: f32) -> NodeId {
+fn best_child<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params: &SearchParams) -> NodeId {
     let node = arena.get(node_id);
     let parent_visits = node.visit_count;
     let mut best_id = node.first_child.expect("no children");
-    let mut best_score = ucb_score(arena.get(best_id), parent_visits, c_puct);
+    let mut best_score = ucb_score(arena.get(best_id), parent_visits, params);
 
     let mut current = arena.get(best_id).next_sibling;
     while let Some(child_id) = current {
         let child = arena.get(child_id);
-        let score = ucb_score(child, parent_visits, c_puct);
+        let score = ucb_score(child, parent_visits, params);
         if score > best_score {
             best_score = score;
             best_id = child_id;
@@ -41,7 +103,7 @@ fn best_child<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, c_puct: f32) -> No
 /// Select a leaf node by traversing the tree.
 /// If forced_playouts is true, at the root level, children with fewer visits
 /// than their forced minimum get infinite urgency (KataGo forced playouts).
-fn select_leaf<M: Copy>(arena: &NodeArena<M>, root: NodeId, c_puct: f32, forced_playouts: bool) -> NodeId {
+fn select_leaf<M: Copy>(arena: &NodeArena<M>, root: NodeId, params: &SearchParams) -> NodeId {
     let mut node_id = root;
     let mut is_root = true;
     loop {
@@ -49,10 +111,13 @@ fn select_leaf<M: Copy>(arena: &NodeArena<M>, root: NodeId, c_puct: f32, forced_
         if !node.is_expanded || node.first_child.is_none() {
             return node_id;
         }
-        if is_root && forced_playouts {
-            node_id = best_child_with_forced(arena, node_id, c_puct);
+        if is_root {
+            node_id = match params.forced_exploration {
+                ForcedExploration::None => best_child(arena, node_id, params),
+                ForcedExploration::Soft { selection_k, .. } => best_child_with_forced(arena, node_id, params, selection_k),
+            };
         } else {
-            node_id = best_child(arena, node_id, c_puct);
+            node_id = best_child(arena, node_id, params);
         }
         is_root = false;
     }
@@ -62,18 +127,18 @@ fn select_leaf<M: Copy>(arena: &NodeArena<M>, root: NodeId, c_puct: f32, forced_
 /// been visited at least once. A child with visit_count < n_forced gets
 /// infinite urgency so it is always selected first.
 /// n_forced(c) = k * sqrt(P_noised(c) * N_total), k=2
-fn best_child_with_forced<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, c_puct: f32) -> NodeId {
+fn best_child_with_forced<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params: &SearchParams, k: f32) -> NodeId {
     let node = arena.get(node_id);
     let parent_visits = node.visit_count;
     let n_total = parent_visits as f32;
 
     let mut best_id = node.first_child.expect("no children");
-    let mut best_score = child_score_with_forced(arena.get(best_id), parent_visits, c_puct, n_total);
+    let mut best_score = child_score_with_forced(arena.get(best_id), parent_visits, n_total, params, k);
 
     let mut current = arena.get(best_id).next_sibling;
     while let Some(child_id) = current {
         let child = arena.get(child_id);
-        let score = child_score_with_forced(child, parent_visits, c_puct, n_total);
+        let score = child_score_with_forced(child, parent_visits, n_total, params, k);
         if score > best_score {
             best_score = score;
             best_id = child_id;
@@ -86,10 +151,9 @@ fn best_child_with_forced<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, c_puct
 
 /// Score for a root child with forced playout logic.
 /// If the child has been visited but is below its forced minimum, return infinity.
-fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_visits: u32, c_puct: f32, n_total: f32) -> f32 {
-    let mut score = ucb_score(child, parent_visits, c_puct);
+fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_visits: u32, n_total: f32, params: &SearchParams, k: f32) -> f32 {
+    let mut score = ucb_score(child, parent_visits, params);
     if child.visit_count > 0 {
-        let k = 0.5f32;
         let n_forced = (k * (child.prior * n_total).sqrt()) as u32;
         if child.visit_count < n_forced {
             let deficit = (n_forced as i32 - child.visit_count as i32).max(0) as f32;
@@ -227,24 +291,22 @@ fn expand_with_policy<G: GameEngine>(
 /// Game states are reconstructed by replaying moves from root_game.
 pub struct MctsSearch<G: GameEngine> {
     arena: NodeArena<G::Move>,
-    pub c_puct: f32,
     root: NodeId,
     root_game: Option<G>,
     /// Accumulated leaves from select_leaves calls, consumed by expand_and_backprop.
     stashed_leaves: Vec<(NodeId, G)>,
     /// Whether to use forced playouts at the root (KataGo-style).
-    pub use_forced_playouts: bool,
+    pub params: SearchParams,
 }
 
 impl<G: GameEngine> MctsSearch<G> {
     pub fn new(capacity: usize) -> Self {
         MctsSearch {
             arena: NodeArena::new(capacity, G::pass_move()),
-            c_puct: DEFAULT_C_PUCT,
             root: 0, // will be set in init
             root_game: None,
             stashed_leaves: Vec::new(),
-            use_forced_playouts: false,
+            params: SearchParams::default(),
         }
     }
 
@@ -286,7 +348,7 @@ impl<G: GameEngine> MctsSearch<G> {
         let mut leaf_ids = Vec::new();
 
         for _ in 0..batch_size {
-            let leaf = select_leaf(&self.arena, self.root, self.c_puct, self.use_forced_playouts);
+            let leaf = select_leaf(&self.arena, self.root, &self.params);
 
             // Reconstruct game state at the leaf
             let game = self.reconstruct_game(leaf);
@@ -424,9 +486,16 @@ impl<G: GameEngine> MctsSearch<G> {
     }
 
     /// Get visit distribution with policy target pruning (KataGo).
-    /// Subtracts forced playouts from children that wouldn't have been chosen
-    /// by normal PUCT, and prunes children reduced to <=1 visit.
+    /// Only applies if forced exploration is enabled. Subtracts forced playouts from
+    /// children that wouldn't have been chosen by normal PUCT, and prunes children
+    /// reduced to <=1 visit. If forced exploration is disabled, returns unpruned distribution.
     pub fn get_pruned_visit_distribution(&self) -> Vec<(G::Move, f32)> {
+        // Only prune if forced exploration is enabled
+        let pruning_k = match &self.params.forced_exploration {
+            ForcedExploration::None => return self.get_visit_distribution(),
+            ForcedExploration::Soft { pruning_k, .. } => *pruning_k,
+        };
+
         let root = self.arena.get(self.root);
         let parent_visits = root.visit_count;
         let n_total = parent_visits as f32;
@@ -464,19 +533,22 @@ impl<G: GameEngine> MctsSearch<G> {
         let best_value = children[best_idx].value;
 
         // Compute PUCT score of best child (with its current visits)
-        let best_puct = best_value + self.c_puct * children[best_idx].prior
+        let c_puct = match &self.params.cpuct_strategy {
+            CpuctStrategy::Constant { c_puct } => *c_puct,
+            CpuctStrategy::Dynamic { c_init, .. } => *c_init,
+        };
+        let best_puct = best_value + c_puct * children[best_idx].prior
             * n_total.sqrt() / (1.0 + best_visits as f32);
 
         // For each other child, subtract forced playouts as long as
         // it doesn't cause their PUCT to exceed the best child's PUCT
-        let k = 2.0f32;
         let mut adjusted_visits: Vec<u32> = children.iter().map(|c| c.visits).collect();
 
         for (i, child) in children.iter().enumerate() {
             if i == best_idx || child.visits == 0 {
                 continue;
             }
-            let n_forced = (k * (child.prior * n_total).sqrt()) as u32;
+            let n_forced = (pruning_k * (child.prior * n_total).sqrt()) as u32;
             if n_forced == 0 {
                 continue;
             }
@@ -485,7 +557,7 @@ impl<G: GameEngine> MctsSearch<G> {
             for subtract in (1..=max_subtract).rev() {
                 let new_visits = child.visits - subtract;
                 // Check: would PUCT(child) with new_visits still be < best_puct?
-                let child_puct = child.value + self.c_puct * child.prior
+                let child_puct = child.value + c_puct * child.prior
                     * n_total.sqrt() / (1.0 + new_visits as f32);
                 if child_puct < best_puct {
                     adjusted_visits[i] = new_visits;

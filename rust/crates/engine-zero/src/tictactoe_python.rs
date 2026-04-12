@@ -11,7 +11,7 @@ use tictactoe_game::game::{
     TicTacToe, GRID_SIZE, CHANNELS_PER_STEP, POLICY_SIZE,
 };
 use core_game::game::{Game, NNGame, Outcome, Player};
-use core_game::mcts::search::MctsSearch;
+use core_game::mcts::search::{CpuctStrategy, ForcedExploration, MctsSearch, RootNoise, SearchParams};
 
 /// Board flat size for a given history length.
 fn board_flat(history_length: usize) -> usize {
@@ -91,6 +91,7 @@ pub struct PyTTTSelfPlaySession {
     max_moves: u32,
     temperature: f32,
     temp_threshold: u32,
+    #[allow(dead_code)]
     c_puct: f32,
     dir_alpha: f32,
     dir_epsilon: f32,
@@ -109,7 +110,7 @@ impl PyTTTSelfPlaySession {
         temperature = 1.0,
         temp_threshold = 5,
         c_puct = 1.5,
-        dir_alpha = 0.5,
+        dir_alpha = 0.3,
         dir_epsilon = 0.25,
         playout_cap_p = 0.0,
         fast_cap = 20,
@@ -147,14 +148,18 @@ impl PyTTTSelfPlaySession {
         let history_length = self.history_length;
         let bf = board_flat(history_length);
         let num_ch = CHANNELS_PER_STEP * history_length;
+        let search_params = SearchParams::new(
+            CpuctStrategy::Constant { c_puct: self.c_puct },
+            ForcedExploration::None,
+            RootNoise::Dirichlet { alpha: self.dir_alpha, epsilon: self.dir_epsilon },
+        );
 
         let mut games: Vec<TicTacToe> = (0..num_games)
             .map(|_| TicTacToe::with_history(history_length))
             .collect();
         let mut searches: Vec<MctsSearch<TicTacToe>> = (0..num_games).map(|_| {
             let mut s = MctsSearch::<TicTacToe>::new(4096);
-            s.c_puct = self.c_puct;
-            s.use_forced_playouts = false;
+            s.params = search_params.clone();
             s
         }).collect();
         let mut move_counts: Vec<u32> = vec![0; num_games];
@@ -276,10 +281,9 @@ impl PyTTTSelfPlaySession {
             // --- Select and apply moves ---
             for (i, &gi) in mcts_games.iter().enumerate() {
                 let search = &searches[gi];
-                let dist = if search.use_forced_playouts {
-                    search.get_pruned_visit_distribution()
-                } else {
-                    search.get_visit_distribution()
+                let dist = match search.params.forced_exploration {
+                    ForcedExploration::Soft { .. } => search.get_pruned_visit_distribution(),
+                    _ => search.get_visit_distribution(),
                 };
 
                 let mut policy_vec = vec![0.0f32; POLICY_SIZE];
@@ -504,9 +508,10 @@ impl PyTTTGame {
 
         let num_ch = self.game.num_channels();
         let bf = board_flat(self.game.history_length);
+        let search_params = SearchParams::new(CpuctStrategy::Constant { c_puct }, ForcedExploration::None, RootNoise::None);
 
         let mut search = MctsSearch::<TicTacToe>::new(4096);
-        search.c_puct = c_puct;
+        search.params = search_params;
 
         // Initial eval
         let mut board_enc = vec![0.0f32; bf];

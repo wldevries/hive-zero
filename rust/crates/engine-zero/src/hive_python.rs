@@ -1,8 +1,10 @@
-/// PyO3 Python bindings for engine_zero.
+/// PyO3 Python bindings for hive.
 
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods};
+
+use core_game::mcts::search::{CpuctStrategy, ForcedExploration, RootNoise, SearchParams};
 
 use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
 use hive_game::game::{self, Game};
@@ -337,7 +339,12 @@ impl PyGame {
         let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
             call_python_eval(eval_fn, boards, reserves, batch_size, gs)
         });
-        let best = best_move_core(&self.game, simulations, c_puct, core_eval)
+        let search_params = SearchParams::new(
+            CpuctStrategy::Constant { c_puct },
+            ForcedExploration::None,
+            RootNoise::None,
+        );
+        let best = best_move_core(&self.game, simulations, &search_params, core_eval)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         Ok(if best.piece.is_none() {
             "pass".to_string()

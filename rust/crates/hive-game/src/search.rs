@@ -5,7 +5,7 @@ use rand::distr::weighted::WeightedIndex;
 use core_game::game::{Game as GameTrait, Outcome, Player, PolicyIndex};
 use core_game::hex::hex_neighbors;
 use core_game::mcts::arena::NodeId;
-use core_game::mcts::search::MctsSearch;
+use core_game::mcts::search::{CpuctStrategy, ForcedExploration, MctsSearch, RootNoise, SearchParams};
 use core_game::symmetry::{D6Symmetry, Symmetry, apply_d6_sym_spatial};
 
 use crate::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE};
@@ -144,7 +144,7 @@ fn piece_mobility(game: &mut Game, color: PieceColor) -> f32 {
 pub fn best_move_core(
     game: &Game,
     simulations: usize,
-    c_puct: f32,
+    params: &SearchParams,
     mut eval_fn: EvalFn<'_>,
 ) -> Result<Move, String> {
     if game.is_game_over() {
@@ -162,7 +162,7 @@ pub fn best_move_core(
     let batch_size = 8usize;
 
     let mut search = MctsSearch::<Game>::new(simulations + 64);
-    search.c_puct = c_puct;
+    search.params = params.clone();
 
     let mut board_buf = vec![0.0f32; board_size];
     let mut reserve_buf = vec![0.0f32; RESERVE_SIZE];
@@ -233,6 +233,11 @@ pub fn play_selfplay_core(
     let use_playout_cap = playout_cap_p > 0.0;
     let board_size = NUM_CHANNELS * grid_size * grid_size;
     let policy_size = move_encoding::policy_size(grid_size);
+    let search_params = SearchParams::new(
+        CpuctStrategy::Constant { c_puct },
+        if use_forced_playouts { ForcedExploration::Soft { selection_k: 0.5, pruning_k: 2.0 } } else { ForcedExploration::None },
+        RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon },
+    );
 
     let mut games: Vec<Game> = (0..num_games)
         .map(|_| Game::new_with_grid_size(grid_size))
@@ -240,8 +245,7 @@ pub fn play_selfplay_core(
     let mut searches: Vec<MctsSearch<Game>> = (0..num_games)
         .map(|_| {
             let mut search = MctsSearch::<Game>::new(100_000);
-            search.c_puct = c_puct;
-            search.use_forced_playouts = use_forced_playouts;
+            search.params = search_params.clone();
             search
         })
         .collect();
@@ -416,8 +420,7 @@ pub fn play_selfplay_core(
 
         for (index, &game_index) in mcts_games.iter().enumerate() {
             let search = &mut searches[game_index];
-            search.c_puct = c_puct;
-            search.use_forced_playouts = true;
+            search.params = search_params.clone();
             let policy = &init_policies[index * policy_size..(index + 1) * policy_size];
             search.init(&games[game_index], policy);
             if is_full[index] {
@@ -560,10 +563,10 @@ pub fn play_selfplay_core(
             }
 
             let search = &searches[game_index];
-            let dist = if search.use_forced_playouts {
-                search.get_pruned_visit_distribution()
-            } else {
-                search.get_visit_distribution()
+            // we use forced playouts if forced exploration is Soft
+            let dist = match search.params.forced_exploration {
+                ForcedExploration::Soft { .. } => search.get_pruned_visit_distribution(),
+                _ => search.get_visit_distribution(),
             };
 
             if dist.is_empty() {
@@ -847,6 +850,11 @@ pub fn play_battle_core(
     let half = num_games / 2;
     let board_size = NUM_CHANNELS * grid_size * grid_size;
     let policy_size = move_encoding::policy_size(grid_size);
+    let search_params = SearchParams::new(
+        CpuctStrategy::Constant { c_puct },
+        ForcedExploration::None,
+        RootNoise::None,
+    );
 
     let mut games: Vec<Game> = (0..num_games)
         .map(|_| Game::new_with_grid_size(grid_size))
@@ -854,7 +862,7 @@ pub fn play_battle_core(
     let mut searches: Vec<MctsSearch<Game>> = (0..num_games)
         .map(|_| {
             let mut search = MctsSearch::<Game>::new(simulations + 64);
-            search.c_puct = c_puct;
+            search.params = search_params.clone();
             search
         })
         .collect();
@@ -1043,7 +1051,7 @@ pub fn play_battle_core(
         }
 
         for &game_index in &mcts_games {
-            let dist = searches[game_index].get_pruned_visit_distribution();
+            let dist = searches[game_index].get_visit_distribution();
             let mv = if dist.is_empty() {
                 Move::pass()
             } else {
