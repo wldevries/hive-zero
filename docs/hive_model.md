@@ -4,12 +4,12 @@
 
 ```mermaid
 graph TD
-    BT["Board Tensor<br/>(B, 19, G, G)"]:::input --> CAT["Concat"]
+    BT["Board Tensor<br/>(B, 24, G, G)"]:::input --> CAT["Concat"]
     RV["Reserve Vector<br/>(B, 10)"]:::input --> BC["Broadcast to (B, 10, G, G)"]
     BC --> CAT
-    CAT --> INPUT["(B, 29, G, G)"]
+    CAT --> INPUT["(B, 34, G, G)"]
 
-    INPUT --> IC["Input Conv2d(29 → C, 3x3) + BN + ReLU"]
+    INPUT --> IC["Input Conv2d(34 → C, 3x3) + BN + ReLU"]
     IC --> RB["N × ResBlock<br/>Conv3x3 + BN + ReLU + Conv3x3 + BN + skip"]
     RB --> TRUNK["Trunk Output<br/>(B, C, G, G)"]
 
@@ -39,16 +39,21 @@ graph TD
 
 Tensor dimensions use `(B, ...)` notation where B = batch size.
 
-### Board tensor: `(B, 19, G, G)`
-19 channels on a GxG grid (default G=23, configurable, must be odd). Flat-top axial hex coordinates centered on the grid. All channels are current-player-relative. Piece channels use type identity (no per-individual numbering).
+### Board tensor: `(B, 24, G, G)`
+24 channels on a GxG grid (default G=23, configurable, must be odd). Flat-top axial hex coordinates centered on the grid. All channels are current-player-relative. Piece channels use type identity (no per-individual numbering).
 
 | Channels | Content |
 |----------|---------|
 | 0-4 | Current player's pieces at base level (0=Queen, 1=Spider, 2=Beetle, 3=Grasshopper, 4=Ant) |
 | 5-9 | Opponent's pieces at base level (same type ordering) |
-| 10-13 | Current player's stacked beetle depth: ch 10+d = beetle stacked at depth d+1 (generic, not per-individual) |
-| 14-17 | Opponent's stacked beetle depth (same scheme) |
-| 18 | Stack height at each cell |
+| 10-13 | Current player's stacker at depths 1-4 (binary; generic, not per-individual) |
+| 14-17 | Opponent's stacker at depths 1-4 (same scheme) |
+| 18 | Hive edge (binary: 1 for empty cells adjacent to at least one occupied cell) |
+| 19 | Distance to current player's queen (hex distance normalized by grid_size; 1.0 if queen not placed) |
+| 20 | Distance to opponent's queen (same normalization) |
+| 21 | Adjacent to current player's queen (binary: 1 if cell neighbors the queen) |
+| 22 | Adjacent to opponent's queen (binary) |
+| 23 | Pinned piece (binary: 1 if occupied and removing the piece would split the hive) |
 
 ### Reserve vector: `(B, 10)`
 Current-player-relative piece counts remaining in hand.
@@ -61,10 +66,10 @@ Current-player-relative piece counts remaining in hand.
 ## Trunk
 
 Reserve vector is broadcast spatially and concatenated with the board tensor before the trunk:
-`(B, 19, G, G)` + `(B, 10, G, G)` → `(B, 29, G, G)`
+`(B, 24, G, G)` + `(B, 10, G, G)` → `(B, 34, G, G)`
 
 ```
-Input Conv2d(29 -> C, 3x3, pad=1) + BN + ReLU
+Input Conv2d(34 -> C, 3x3, pad=1) + BN + ReLU
   |
 N x ResBlock:
   Conv2d(C -> C, 3x3, pad=1) + BN + ReLU
@@ -160,10 +165,10 @@ loss = policy_loss + value_loss + aux_loss
 | Playout cap randomization | Yes (KataGo-style) |
 
 ## Parameter Count (C=128, N=10, G=17)
-- Input conv: 29 x 128 x 3 x 3 = 33,408
+- Input conv: 34 x 128 x 3 x 3 = 39,168
 - Per ResBlock: 2 x (128 x 128 x 3 x 3) = 294,912 → 10 blocks = 2,949,120
 - BatchNorm (trunk): (128 x 2) x (10+1) = 2,816
 - Policy head: 128x128x1 + BN(128) + Conv(128→5) + Conv(128→1) + Conv(128→5) = 16,384 + 256 + 645 + 129 + 645 = 18,059
 - Value head: 128x1x1 + 289x256 + 256x1 + BN = 128 + 73,984 + 256 + 2 = 74,370
 - Aux head: 128x1x1 + 289x64 + 64x6 + BN = 128 + 18,496 + 384 + 2 = 19,010
-- **Total: ~3.1M parameters**
+- **Total: ~3.1M parameters** (input conv 39,168 vs old 33,408; difference negligible at scale)
