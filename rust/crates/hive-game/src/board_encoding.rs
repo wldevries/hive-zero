@@ -3,12 +3,20 @@
 
 use core_game::hex::{Hex, hex_distance, hex_neighbors};
 use crate::game::Game;
-use crate::piece::{Piece, PieceColor, PieceType, ALL_PIECE_TYPES, PIECE_COUNTS};
+use crate::piece::{Piece, PieceColor, PieceType, PIECE_COUNTS};
 
 /// Number of board encoding channels.
 pub const NUM_CHANNELS: usize = 24;
 /// Reserve vector size: 5 piece types x 2 colors.
 pub const RESERVE_SIZE: usize = 10;
+
+const BASE_PIECE_TYPES: [PieceType; 5] = [
+    PieceType::Queen,
+    PieceType::Spider,
+    PieceType::Beetle,
+    PieceType::Grasshopper,
+    PieceType::Ant,
+];
 
 /// Channel layout (all channels current-player-relative):
 ///
@@ -60,8 +68,15 @@ fn hex_to_encoding_grid(h: Hex, grid_size: usize) -> Option<(usize, usize)> {
 }
 
 #[inline]
-fn piece_type_idx(piece: crate::piece::Piece) -> usize {
-    piece.piece_type() as usize
+fn base_piece_type_idx(piece_type: PieceType) -> Option<usize> {
+    match piece_type {
+        PieceType::Queen => Some(0),
+        PieceType::Spider => Some(1),
+        PieceType::Beetle => Some(2),
+        PieceType::Grasshopper => Some(3),
+        PieceType::Ant => Some(4),
+        PieceType::Mosquito | PieceType::Ladybug | PieceType::Pillbug => None,
+    }
 }
 
 /// Convert f32 to bfloat16, stored as u16 (truncation, matches PyTorch convention).
@@ -95,11 +110,12 @@ pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [
 
         for (depth, piece) in stack.iter().enumerate() {
             let mine = is_mine(piece.color());
-            let type_idx = piece_type_idx(piece);
 
             if depth == 0 {
-                let ch = if mine { MY_PIECES_BASE + type_idx } else { OPP_PIECES_BASE + type_idx };
-                board_out[ch * gs2 + cell] = bf16_one;
+                if let Some(type_idx) = base_piece_type_idx(piece.piece_type()) {
+                    let ch = if mine { MY_PIECES_BASE + type_idx } else { OPP_PIECES_BASE + type_idx };
+                    board_out[ch * gs2 + cell] = bf16_one;
+                }
             } else {
                 let stacker_base = if mine { MY_STACKER_BASE } else { OPP_STACKER_BASE };
                 let depth_offset = (depth - 1).min(3);
@@ -123,7 +139,7 @@ pub fn encode_board_bf16(game: &Game, board_out: &mut [u16], reserve_out: &mut [
     } else {
         (PieceColor::Black, PieceColor::White)
     };
-    for (i, &pt) in ALL_PIECE_TYPES.iter().enumerate() {
+    for (i, &pt) in BASE_PIECE_TYPES.iter().enumerate() {
         let max_count = PIECE_COUNTS[i] as f32;
         if max_count > 0.0 {
             reserve_out[i] = f32_to_bf16(game.reserve_count(cur_color, pt) as f32 / max_count);
@@ -204,12 +220,13 @@ pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32],
         // stack.iter() goes bottom-to-top; depth 0 = base piece
         for (depth, piece) in stack.iter().enumerate() {
             let mine = is_mine(piece.color());
-            let type_idx = piece_type_idx(piece);
 
             if depth == 0 {
                 // Base layer: piece type, current-player-relative
-                let ch = if mine { MY_PIECES_BASE + type_idx } else { OPP_PIECES_BASE + type_idx };
-                board_out[ch * gs2 + cell] = 1.0;
+                if let Some(type_idx) = base_piece_type_idx(piece.piece_type()) {
+                    let ch = if mine { MY_PIECES_BASE + type_idx } else { OPP_PIECES_BASE + type_idx };
+                    board_out[ch * gs2 + cell] = 1.0;
+                }
             } else {
                 // Stacked piece — generic stacker channel by depth
                 let stacker_base = if mine { MY_STACKER_BASE } else { OPP_STACKER_BASE };
@@ -235,7 +252,7 @@ pub fn encode_board(game: &Game, board_out: &mut [f32], reserve_out: &mut [f32],
     } else {
         (PieceColor::Black, PieceColor::White)
     };
-    for (i, &pt) in ALL_PIECE_TYPES.iter().enumerate() {
+    for (i, &pt) in BASE_PIECE_TYPES.iter().enumerate() {
         let max_count = PIECE_COUNTS[i] as f32;
         if max_count > 0.0 {
             reserve_out[i] = game.reserve_count(cur_color, pt) as f32 / max_count;
@@ -381,6 +398,29 @@ mod tests {
         assert_eq!(at(&bt, 14, 11, 11), 1.0);
         // Hive edge: occupied cell (0,0) is NOT on the edge channel (it's occupied)
         assert_eq!(at(&bt, HIVE_EDGE_CH, 11, 11), 0.0);
+    }
+
+    #[test]
+    fn test_expansion_piece_does_not_alias_base_channels_or_reserve() {
+        use crate::game::GameState;
+
+        let mut game = Game::new();
+        let wm = Piece::new(PieceColor::White, PieceType::Mosquito, 1);
+        game.board.place_piece(wm, (0, 0)).unwrap();
+        game.state = GameState::InProgress;
+        game.turn_color = PieceColor::Black;
+
+        let (bt, rv) = encode(&game);
+
+        // Expansion piece at base depth should not be encoded into Q/S/B/G/A channels.
+        for ch in 0..10 {
+            assert_eq!(at(&bt, ch, 11, 11), 0.0, "ch={ch}");
+        }
+
+        // Reserve vector is fixed-size base-game layout and must stay in-bounds.
+        assert_eq!(rv.len(), RESERVE_SIZE);
+        // Opponent queen reserve slot remains unchanged (was not consumed by a mosquito).
+        assert_eq!(rv[5], 1.0);
     }
 
     #[test]
