@@ -530,8 +530,11 @@ impl Board {
             }
         }
         // Round centroid to nearest integer: -(sum / count), rounded.
-        let dq = -(sum_q.signum() * (sum_q.abs() + count / 2) / count) as i8;
-        let dr = -(sum_r.signum() * (sum_r.abs() + count / 2) / count) as i8;
+        // Clamp to i8 range (-128 to 127) to prevent overflow during cast.
+        let centroid_q = -(sum_q.signum() * (sum_q.abs() + count / 2) / count);
+        let centroid_r = -(sum_r.signum() * (sum_r.abs() + count / 2) / count);
+        let dq = centroid_q.clamp(-128, 127) as i8;
+        let dr = centroid_r.clamp(-128, 127) as i8;
         self.apply_shift(dq, dr);
         (dq, dr)
     }
@@ -588,9 +591,15 @@ impl Board {
             update_bounds(sx, sy);
         }
 
-        // Also expand bounds to include the source ghost (may be off the occupied area).
+        // Expand bounds to include the source ghost (may be off the occupied area).
         if let Some(src) = source {
             let (sx, sy) = screen(src);
+            update_bounds(sx, sy);
+        }
+
+        // Expand bounds to include the highlight (destination), which may also be far from pieces.
+        if let Some(hl) = highlight {
+            let (sx, sy) = screen(hl);
             update_bounds(sx, sy);
         }
 

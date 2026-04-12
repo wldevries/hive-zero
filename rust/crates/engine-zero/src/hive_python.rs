@@ -280,10 +280,9 @@ impl PyGame {
 
     /// Render the board as ANSI-coloured flat-top hex ASCII art.
     /// Automatically highlights the last move: destination in orange, source in gray.
+    /// Coordinates are adjusted for all recentering shifts to display correctly.
     fn render_board(&self) -> String {
-        let last = self.game.move_history().last();
-        let highlight = last.and_then(|mv| mv.to);
-        let source    = last.and_then(|mv| mv.from);
+        let (source, highlight) = self.game.last_move_display_coords();
         self.game.board.render(highlight, source)
     }
 

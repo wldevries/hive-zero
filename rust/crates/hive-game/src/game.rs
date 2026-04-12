@@ -461,6 +461,33 @@ impl Game {
         &self.move_history
     }
 
+    /// Get the last move's source and destination adjusted for all recentering shifts.
+    /// Returns (source_adjusted, dest_adjusted) or (None, None) if no moves.
+    pub fn last_move_display_coords(&self) -> (Option<Hex>, Option<Hex>) {
+        if self.move_history.is_empty() {
+            return (None, None);
+        }
+
+        // Calculate cumulative shift from all recentering operations
+        let mut total_shift = (0i8, 0i8);
+        for &(dq, dr) in &self.history_shifts {
+            total_shift.0 = total_shift.0.saturating_add(dq);
+            total_shift.1 = total_shift.1.saturating_add(dr);
+        }
+
+        let last_move = self.move_history.last().unwrap();
+        let source_adj = last_move.from.map(|(q, r)| (
+            q.saturating_add(total_shift.0),
+            r.saturating_add(total_shift.1),
+        ));
+        let dest_adj = last_move.to.map(|(q, r)| (
+            q.saturating_add(total_shift.0),
+            r.saturating_add(total_shift.1),
+        ));
+
+        (source_adj, dest_adj)
+    }
+
     /// Generate UHP GameString: "Base;State;Turn;move1;move2;..."
     pub fn game_string(&self) -> String {
         let mut parts = vec![
