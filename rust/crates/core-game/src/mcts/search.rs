@@ -175,8 +175,7 @@ fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_visits: u32, n_t
     if child.visit_count > 0 {
         let n_forced = (k * (child.prior * n_total).sqrt()) as u32;
         if child.visit_count < n_forced {
-            let deficit = (n_forced as i32 - child.visit_count as i32).max(0) as f32;
-            score += 2.0 * deficit;
+            score = f32::INFINITY;
         }
     }
     score
