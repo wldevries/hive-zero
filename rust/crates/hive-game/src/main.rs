@@ -319,6 +319,8 @@ fn run_random(n: u32) {
     let mut total_moves = 0u64;
     let mut results = HashMap::new();
 
+    let mut valid_moves = vec![];
+
     for game_idx in 0..n {
         let mut game = Game::new();
         let mut rng = rand::rng();
@@ -326,6 +328,7 @@ fn run_random(n: u32) {
 
         while !game.is_game_over() {
             let moves = game.valid_moves();
+            valid_moves.push(moves.len());
             if verbose {
                 println!("\n--- Move {} | {} to play ---", move_num + 1, game.turn_color.as_char());
                 if move_num > 0 {
@@ -365,6 +368,7 @@ fn run_random(n: u32) {
         println!();
         println!("Total moves: {total_moves}");
         println!("Avg moves/game: {:.1}", total_moves as f64 / n as f64);
+        println!("Avg valid moves: {:.1}", valid_moves.iter().sum::<usize>() as f64 / valid_moves.len() as f64);
         println!("Results:");
         let mut sorted: Vec<_> = results.iter().collect();
         sorted.sort_by(|a, b| b.1.cmp(a.1));
