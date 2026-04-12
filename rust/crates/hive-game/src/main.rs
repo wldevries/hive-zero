@@ -253,7 +253,7 @@ fn collect_sgfs(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
 
 fn run_mcts(simulations: u32, batch_size: usize) {
     use core_game::mcts::search::MctsSearch;
-    use core_game::game::NNGame;    
+    use core_game::game::NNGame;
     use hive_game::uhp::format_move_uhp;
 
     let mut game = Game::new();
@@ -324,22 +324,18 @@ fn run_random(n: u32) {
         let mut rng = rand::rng();
         let mut move_num = 0u32;
 
-        let mut last_to:   Option<Hex> = None;
-        let mut last_from: Option<Hex> = None;
-
         while !game.is_game_over() {
             let moves = game.valid_moves();
             if verbose {
                 println!("\n--- Move {} | {} to play ---", move_num + 1, game.turn_color.as_char());
                 if move_num > 0 {
-                    println!("{}", game.board.render(last_to, last_from));
+                    let (from, to) = game.last_move_display_coords();
+                    println!("{}", game.board.render(to, from));
                 }
             }
             if moves.is_empty() {
                 if verbose { println!("  (pass)"); }
                 game.play_pass();
-                last_to   = None;
-                last_from = None;
             } else {
                 let idx = rng.random_range(0..moves.len());
                 let mv = moves[idx];
@@ -347,8 +343,6 @@ fn run_random(n: u32) {
                     let uhp = format_move_uhp(&game, &mv);
                     println!("  -> {uhp}");
                 }
-                last_to   = mv.to;
-                last_from = mv.from;
                 game.play_move(&mv).unwrap();
             }
             move_num += 1;
@@ -357,7 +351,8 @@ fn run_random(n: u32) {
 
         if verbose {
             println!("\n--- Final position ({move_num} moves) ---");
-            println!("{}", game.board.render(last_to, last_from));
+            let (from, to) = game.last_move_display_coords();
+            println!("{}", game.board.render(to, from));
             println!("\nResult: {}", game.state.as_str());
         } else {
             println!("Game {}: {} ({move_num} moves)", game_idx + 1, game.state.as_str());

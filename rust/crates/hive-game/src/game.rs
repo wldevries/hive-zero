@@ -461,28 +461,25 @@ impl Game {
         &self.move_history
     }
 
-    /// Get the last move's source and destination adjusted for all recentering shifts.
+    /// Get the last move's source and destination adjusted for that move's recentering shift.
     /// Returns (source_adjusted, dest_adjusted) or (None, None) if no moves.
     pub fn last_move_display_coords(&self) -> (Option<Hex>, Option<Hex>) {
         if self.move_history.is_empty() {
             return (None, None);
         }
 
-        // Calculate cumulative shift from all recentering operations
-        let mut total_shift = (0i8, 0i8);
-        for &(dq, dr) in &self.history_shifts {
-            total_shift.0 = total_shift.0.saturating_add(dq);
-            total_shift.1 = total_shift.1.saturating_add(dr);
-        }
+        // Move coordinates are recorded in the board frame before that move's recenter.
+        // To display the latest move on the current board, apply only the latest shift.
+        let (dq, dr) = *self.history_shifts.last().unwrap_or(&(0, 0));
 
         let last_move = self.move_history.last().unwrap();
         let source_adj = last_move.from.map(|(q, r)| (
-            q.saturating_add(total_shift.0),
-            r.saturating_add(total_shift.1),
+            q.saturating_add(dq),
+            r.saturating_add(dr),
         ));
         let dest_adj = last_move.to.map(|(q, r)| (
-            q.saturating_add(total_shift.0),
-            r.saturating_add(total_shift.1),
+            q.saturating_add(dq),
+            r.saturating_add(dr),
         ));
 
         (source_adj, dest_adj)
@@ -679,6 +676,22 @@ mod tests {
         let moves = game.valid_moves();
         assert!(!moves.is_empty());
         assert!(moves.iter().all(|m| m.piece.unwrap().piece_type() == PieceType::Queen));
+    }
+
+    #[test]
+    fn test_last_move_display_coords_uses_only_latest_shift() {
+        let mut game = Game::new();
+        game.move_history.push(Move::movement(
+            Piece::new(PieceColor::White, PieceType::Ant, 1),
+            (4, -2),
+            (5, -1),
+        ));
+        game.history_shifts.push((3, 1));
+        game.history_shifts.push((-2, 4));
+
+        let (source, dest) = game.last_move_display_coords();
+        assert_eq!(source, Some((2, 2)));
+        assert_eq!(dest, Some((3, 3)));
     }
 
     #[test]
