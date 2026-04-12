@@ -22,6 +22,7 @@
 
 use core_game::hex::Hex;
 use crate::piece::Piece;
+use crate::piece::PieceType;
 use crate::game::{Game, Move};
 use core_game::game::PolicyIndex;
 
@@ -64,11 +65,23 @@ fn cell(row: usize, col: usize, grid_size: usize) -> usize {
     row * grid_size + col
 }
 
+#[inline]
+fn base_piece_type_idx(piece_type: PieceType) -> Option<usize> {
+    match piece_type {
+        PieceType::Queen => Some(0),
+        PieceType::Spider => Some(1),
+        PieceType::Beetle => Some(2),
+        PieceType::Grasshopper => Some(3),
+        PieceType::Ant => Some(4),
+        PieceType::Mosquito | PieceType::Ladybug | PieceType::Pillbug => None,
+    }
+}
+
 /// Encode a placement move (piece_type, dest) as a Single PolicyIndex.
 /// Returns None if dest is out of grid bounds.
 pub fn encode_placement(piece: Piece, dest: Hex, grid_size: usize) -> Option<PolicyIndex> {
     let (row, col) = hex_to_grid(dest, grid_size)?;
-    let type_idx = piece.piece_type() as usize;
+    let type_idx = base_piece_type_idx(piece.piece_type())?;
     Some(PolicyIndex::Single(type_idx * grid_size * grid_size + cell(row, col, grid_size)))
 }
 
@@ -79,7 +92,7 @@ pub fn encode_movement(src: Hex, piece: Piece, dest: Hex, grid_size: usize) -> O
     let (sr, sc) = hex_to_grid(src, grid_size)?;
     let (dr, dc) = hex_to_grid(dest, grid_size)?;
     let src_idx = src_section_offset(grid_size) + cell(sr, sc, grid_size);
-    let type_idx = piece.piece_type() as usize;
+    let type_idx = base_piece_type_idx(piece.piece_type())?;
     let dst_idx = dst_section_offset(grid_size) + type_idx * grid_size * grid_size + cell(dr, dc, grid_size);
     Some(PolicyIndex::Sum(src_idx, dst_idx))
 }
@@ -211,6 +224,13 @@ mod tests {
     #[test]
     fn test_policy_size() {
         assert_eq!(policy_size(23), NUM_POLICY_CHANNELS * 23 * 23);
+    }
+
+    #[test]
+    fn test_expansion_piece_is_not_encoded_in_base_policy_layout() {
+        let mos = Piece::new(PieceColor::White, PieceType::Mosquito, 1);
+        assert_eq!(encode_placement(mos, (0, 0), GS), None);
+        assert_eq!(encode_movement((1, 0), mos, (0, 0), GS), None);
     }
 
     #[test]
