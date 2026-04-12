@@ -67,16 +67,35 @@ impl Default for SearchParams {
 /// `node.value()` is from the parent's player's perspective, so it is added
 /// directly without sign adjustment. See docs/mcts_value_convention.md.
 fn ucb_score<M: Copy>(node: &MctsNode<M>, parent_visits: u32, params: &SearchParams) -> f32 {
-    let parent = parent_visits as f32;
+    let c_puct = calculate_cpuct(params, parent_visits);
+    calculate_ucb_score(node, c_puct, parent_visits)
+}
 
-    let c_puct = match params.cpuct_strategy {
+#[inline]
+fn calculate_ucb_score<M: Copy>(node: &MctsNode<M>, c_puct: f32, parent_visits: u32) -> f32 {
+    calculate_ucb_score_parts(node.value(), node.prior, node.visit_count, c_puct, parent_visits)
+}
+
+#[inline]
+fn calculate_ucb_score_parts(
+    value: f32,
+    prior: f32,
+    visit_count: u32,
+    c_puct: f32,
+    parent_visits: u32,
+) -> f32 {
+    let parent = parent_visits as f32;
+    let exploration = c_puct * prior * parent.sqrt() / (1.0 + visit_count as f32);
+    value + exploration
+}
+
+#[inline]
+fn calculate_cpuct(params: &SearchParams, parent_visits: u32) -> f32 {
+    let parent = parent_visits as f32;
+    match params.cpuct_strategy {
         CpuctStrategy::Constant { c_puct } => c_puct,
         CpuctStrategy::Dynamic { c_init, c_base } => c_init + ((parent + c_base + 1.0) / c_base).ln(),
-    };
-
-    let exploration = c_puct * node.prior * parent.sqrt()
-        / (1.0 + node.visit_count as f32);
-    node.value() + exploration
+    }
 }
 
 /// Select the best child by UCB score.
@@ -533,12 +552,14 @@ impl<G: GameEngine> MctsSearch<G> {
         let best_value = children[best_idx].value;
 
         // Compute PUCT score of best child (with its current visits)
-        let c_puct = match &self.params.cpuct_strategy {
-            CpuctStrategy::Constant { c_puct } => *c_puct,
-            CpuctStrategy::Dynamic { c_init, .. } => *c_init,
-        };
-        let best_puct = best_value + c_puct * children[best_idx].prior
-            * n_total.sqrt() / (1.0 + best_visits as f32);
+        let c_puct = calculate_cpuct(&self.params, parent_visits);
+        let best_puct = calculate_ucb_score_parts(
+            best_value,
+            children[best_idx].prior,
+            best_visits,
+            c_puct,
+            parent_visits,
+        );
 
         // For each other child, subtract forced playouts as long as
         // it doesn't cause their PUCT to exceed the best child's PUCT
@@ -557,8 +578,13 @@ impl<G: GameEngine> MctsSearch<G> {
             for subtract in (1..=max_subtract).rev() {
                 let new_visits = child.visits - subtract;
                 // Check: would PUCT(child) with new_visits still be < best_puct?
-                let child_puct = child.value + c_puct * child.prior
-                    * n_total.sqrt() / (1.0 + new_visits as f32);
+                let child_puct = calculate_ucb_score_parts(
+                    child.value,
+                    child.prior,
+                    new_visits,
+                    c_puct,
+                    parent_visits,
+                );
                 if child_puct < best_puct {
                     adjusted_visits[i] = new_visits;
                     break;
