@@ -154,7 +154,7 @@ impl PyTTTSelfPlaySession {
         let mut searches: Vec<MctsSearch<TicTacToe>> = (0..num_games).map(|_| {
             let mut s = MctsSearch::<TicTacToe>::new(4096);
             s.c_puct = self.c_puct;
-            s.use_forced_playouts = true;
+            s.use_forced_playouts = false;
             s
         }).collect();
         let mut move_counts: Vec<u32> = vec![0; num_games];

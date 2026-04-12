@@ -213,6 +213,7 @@ pub fn play_selfplay_core(
     temp_threshold: u32,
     playout_cap_p: f32,
     fast_cap: usize,
+    use_forced_playouts: bool,
     c_puct: f32,
     dir_alpha: f32,
     dir_epsilon: f32,
@@ -240,7 +241,7 @@ pub fn play_selfplay_core(
         .map(|_| {
             let mut search = MctsSearch::<Game>::new(100_000);
             search.c_puct = c_puct;
-            search.use_forced_playouts = true;
+            search.use_forced_playouts = use_forced_playouts;
             search
         })
         .collect();
