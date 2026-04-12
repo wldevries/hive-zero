@@ -87,14 +87,16 @@ fn best_child_with_forced<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, c_puct
 /// Score for a root child with forced playout logic.
 /// If the child has been visited but is below its forced minimum, return infinity.
 fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_visits: u32, c_puct: f32, n_total: f32) -> f32 {
+    let mut score = ucb_score(child, parent_visits, c_puct);
     if child.visit_count > 0 {
-        let k = 2.0f32;
+        let k = 0.5f32;
         let n_forced = (k * (child.prior * n_total).sqrt()) as u32;
         if child.visit_count < n_forced {
-            return f32::INFINITY;
+            let deficit = (n_forced as i32 - child.visit_count as i32).max(0) as f32;
+            score += 2.0 * deficit;
         }
     }
-    ucb_score(child, parent_visits, c_puct)
+    score
 }
 
 /// Backpropagate a value up the tree.
