@@ -353,7 +353,7 @@ pub struct MctsSearch {
     arena: NodeArena,
     pub c_puct: f32,
     root: NodeId,
-    pub use_forced_playouts: bool,
+    pub forced_playouts: bool,
 }
 
 impl MctsSearch {
@@ -362,7 +362,7 @@ impl MctsSearch {
             arena: NodeArena::new(capacity),
             c_puct: DEFAULT_C_PUCT,
             root: 0,
-            use_forced_playouts: false,
+            forced_playouts: false,
         }
     }
 
@@ -389,7 +389,7 @@ impl MctsSearch {
 
         for _ in 0..batch_size {
             let leaf =
-                select_leaf(&mut self.arena, self.root, self.c_puct, self.use_forced_playouts);
+                select_leaf(&mut self.arena, self.root, self.c_puct, self.forced_playouts);
 
             let board = &self.arena.get(leaf).board;
             if board.is_game_over() {

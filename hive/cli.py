@@ -105,7 +105,7 @@ def main():
         help="Simulations for fast-search turns when playout cap is enabled (default: 20)",
     )
     train_parser.add_argument(
-        "--use-forced-playouts",
+        "--forced-playouts",
         action="store_true",
         help="Use forced playouts Katago style (default: False)",
     )
@@ -529,7 +529,7 @@ def main():
             checkpoint_eval=args.checkpoint_eval,
             playout_cap_p=args.playout_cap_p,
             fast_cap=args.fast_cap,
-            use_forced_playouts=args.use_forced_playouts,
+            forced_playouts=args.forced_playouts,
             replay_window=args.replay_window,
             leaf_batch_size=args.play_batch_sims,
             fixed_batch_size=args.play_batch_size,

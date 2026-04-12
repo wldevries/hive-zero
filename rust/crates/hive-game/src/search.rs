@@ -213,7 +213,7 @@ pub fn play_selfplay_core(
     temp_threshold: u32,
     playout_cap_p: f32,
     fast_cap: usize,
-    use_forced_playouts: bool,
+    forced_playouts: bool,
     c_puct: f32,
     dir_alpha: f32,
     dir_epsilon: f32,
@@ -235,7 +235,7 @@ pub fn play_selfplay_core(
     let policy_size = move_encoding::policy_size(grid_size);
     let search_params = SearchParams::new(
         CpuctStrategy::Constant { c_puct },
-        if use_forced_playouts { ForcedExploration::Soft { selection_k: 0.5, pruning_k: 2.0 } } else { ForcedExploration::None },
+        if forced_playouts { ForcedExploration::Soft { selection_k: 0.5, pruning_k: 2.0 } } else { ForcedExploration::None },
         RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon },
     );
 
