@@ -348,6 +348,18 @@ def main():
         help="Print skipped moves (useful for diagnosing bad SGFs)",
     )
     pretrain_parser.add_argument(
+        "--augment-symmetry",
+        action="store_true",
+        default=True,
+        help="Apply D6 hex symmetry augmentation during training (default: True)",
+    )
+    pretrain_parser.add_argument(
+        "--no-augment-symmetry",
+        dest="augment_symmetry",
+        action="store_false",
+        help="Disable D6 symmetry augmentation",
+    )
+    pretrain_parser.add_argument(
         "--exclude-players",
         nargs="*",
         default=["Dumbot"],
@@ -435,6 +447,7 @@ def main():
             epochs_per_chunk=args.epochs_per_chunk,
             checkpoint_dir=args.checkpoint_dir,
             verbose_samples=args.verbose_samples,
+            augment_symmetry=args.augment_symmetry,
         )
 
     elif args.command == "eval":

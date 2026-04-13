@@ -144,9 +144,24 @@ def _is_base_piece(piece_str: str) -> bool:
 # Single-game converter
 # ---------------------------------------------------------------------------
 
+def _result_from_game_state(state: str) -> str:
+    """Derive 'p0_wins'/'p1_wins'/'draw'/'unknown' from a UHP game state string.
+
+    UHP state format: e.g. 'Base+WhiteWins', 'Base+BlackWins', 'Base+Draw'.
+    White = p0 (first player).
+    """
+    if "WhiteWins" in state:
+        return "p0_wins"
+    elif "BlackWins" in state:
+        return "p1_wins"
+    elif "Draw" in state:
+        return "draw"
+    return "unknown"
+
+
 def game_to_samples(
     sgf_content: str,
-    result: str,
+    result: Optional[str] = None,
     verbose: bool = False,
     game_name: str = "",
     grid_size: int = 23,
@@ -155,7 +170,7 @@ def game_to_samples(
 
     Args:
         sgf_content: Raw SGF text (iso-8859-1 decoded).
-        result: 'p0_wins', 'p1_wins', or 'draw'.
+        result: 'p0_wins', 'p1_wins', 'draw', or None to infer from the SGF.
         grid_size: NN encoding grid size.
 
     Returns:
@@ -170,15 +185,12 @@ def game_to_samples(
     NUM_CHANNELS, _, _ = _load_encoding_consts()
     POLICY_SIZE = NUM_POLICY_CHANNELS * grid_size * grid_size
 
-    if result == "p0_wins":
-        outcome = {"w": 1.0, "b": -1.0}
-    elif result == "p1_wins":
-        outcome = {"w": -1.0, "b": 1.0}
-    else:
-        outcome = {"w": 0.0, "b": 0.0}
-
+    # Defer outcome lookup: collect (board, reserve, policy, turn_color) first,
+    # then resolve values once we know the result (either from the argument or
+    # from the final game state after replay).
+    known_result = result
     game = engine_zero.HiveGame(grid_size=grid_size)
-    samples: list[tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
+    pending: list[tuple[np.ndarray, np.ndarray, np.ndarray, str]] = []
 
     for move_str in parse_moves(sgf_content):
         if game.is_game_over:
@@ -194,7 +206,7 @@ def game_to_samples(
             NUM_CHANNELS, grid_size, grid_size
         )
         reserve = np.array(reserve_arr, dtype=np.float32)
-        value = outcome[game.turn_color]
+        turn_color = game.turn_color  # 'w' or 'b'
 
         # Parse the played move into (piece, from, to).
         try:
@@ -202,31 +214,45 @@ def game_to_samples(
         except ValueError as e:
             if verbose:
                 print(f"  [skip] {game_name}: parse error on {move_str!r}: {e}")
-            break
+            return []
 
         # Reject non-base pieces in Python before hitting Rust.
         if not _is_base_piece(piece_str):
             if verbose:
                 print(f"  [skip] {game_name}: non-base piece {piece_str!r} in {move_str!r}")
-            break
+            return []
 
         primary_idx, secondary_idx = game.encode_move(piece_str, from_pos, to_pos)
         if primary_idx < 0:
             if verbose:
                 print(f"  [skip] {game_name}: move outside encoding grid: {move_str!r}")
-            break
+            return []
 
         policy = np.zeros(POLICY_SIZE, dtype=np.float32)
         policy[primary_idx] = 1.0
         if secondary_idx >= 0:
             policy[secondary_idx] = 1.0
 
-        samples.append((board, reserve, policy, value))
+        pending.append((board, reserve, policy, turn_color))
 
         # Advance the game state.
         game.play_move(piece_str, from_pos, to_pos)
 
-    return samples
+    # Determine result from final game state when not supplied by caller.
+    if known_result is None:
+        known_result = _result_from_game_state(game.state)
+
+    if known_result == "p0_wins":
+        outcome = {"w": 1.0, "b": -1.0}
+    elif known_result == "p1_wins":
+        outcome = {"w": -1.0, "b": 1.0}
+    else:
+        outcome = {"w": 0.0, "b": 0.0}
+
+    return [
+        (board, reserve, policy, outcome[turn_color])
+        for board, reserve, policy, turn_color in pending
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +269,7 @@ def load_filtered_games(
     """Return a filtered list of (zip_file, sgf_name, result) tuples.
 
     Filters: base games, both players ELO ≥ min_elo with ≥ min_games played,
-    outcome determined.
+    decisive outcome only (p0_wins or p1_wins — draws and unknowns excluded).
     """
     qualified: set[str] = set()
     with open(elo_csv, newline="", encoding="utf-8") as f:
@@ -259,7 +285,7 @@ def load_filtered_games(
         for row in csv.DictReader(f):
             if (
                 row["game_type"] == "base"
-                and row["result"] in ("p0_wins", "p1_wins", "draw")
+                and row["result"] in ("p0_wins", "p1_wins")
                 and row["p0"] in qualified
                 and row["p1"] in qualified
                 and row["p0"] not in exclude_players
@@ -341,6 +367,7 @@ class Pretrainer:
         epochs_per_chunk: int = 3,
         checkpoint_dir: str = "checkpoints",
         verbose_samples: bool = False,
+        augment_symmetry: bool = True,
     ) -> None:
         """Pre-train the model.
 
@@ -353,6 +380,7 @@ class Pretrainer:
                 training and clearing.
             epochs_per_chunk: SGD epochs run each time the buffer is trained.
             checkpoint_dir: Directory for per-epoch checkpoints.
+            augment_symmetry: Apply D6 hex symmetry augmentation (12x) during training.
         """
         os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -369,10 +397,12 @@ class Pretrainer:
 
         total_games = len(games)
         print(f"Dataset: {total_games} games | buffer: {buffer_size} | "
-              f"epochs: {num_epochs} | SGD epochs/chunk: {epochs_per_chunk}")
+              f"epochs: {num_epochs} | SGD epochs/chunk: {epochs_per_chunk} | "
+              f"symmetry_aug: {augment_symmetry}")
 
         from ..nn.training import HiveDataset
         dataset = HiveDataset(max_size=buffer_size, grid_size=self.grid_size)
+        dataset.augment_symmetry = augment_symmetry
         chunk_idx = 0
         total_positions = 0
         total_errors = 0
@@ -408,19 +438,19 @@ class Pretrainer:
                         positions_this_epoch += 1
 
                 # Loading progress (overwrite line with \r).
-                if games_done % 100 == 0 or len(dataset) >= buffer_size:
+                if games_done % 100 == 0 or dataset._size >= buffer_size:
                     elapsed_load = time.time() - epoch_start
                     print(
                         f"\r  loading  games={games_done}/{total_games} "
-                        f"buf={len(dataset)}/{buffer_size} "
+                        f"buf={dataset._size}/{buffer_size} "
                         f"[{elapsed_load:.1f}s]",
                         end="", flush=True,
                     )
 
                 # Train when the buffer is full (or at end of epoch).
-                buffer_full = len(dataset) >= buffer_size
+                buffer_full = dataset._size >= buffer_size
                 last_game = games_done == total_games
-                if (buffer_full or last_game) and len(dataset) > 0:
+                if (buffer_full or last_game) and dataset._size > 0:
                         print()  # newline after \r loading line
                         chunk_idx += 1
                         chunk_start = time.time()
@@ -435,7 +465,7 @@ class Pretrainer:
                                 f"loss={_cr(tl)} (pol={_cy(pl)} val={_cy(vl)}) [{elapsed:.1f}s]"
                             )
                         chunk_elapsed = time.time() - chunk_start
-                        chunk_positions = len(dataset)
+                        chunk_positions = dataset._size
                         dataset.clear()
 
                         lr = self.trainer._current_lr
