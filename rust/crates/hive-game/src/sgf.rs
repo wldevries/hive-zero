@@ -105,8 +105,28 @@ fn col_to_index(s: &str) -> i32 {
 }
 
 /// Convert boardspace grid coords to axial hex, relative to the first-move origin.
+///
+/// Boardspace column labels A–Z represent 0–25 and wrap modulo 26 for wide boards
+/// (e.g. one step east of Z=25 is stored as A=26, not as the "1Z" extended notation).
+/// Disambiguate by picking the offset closest to the known origin column.
 #[inline]
 fn boardspace_to_hex(col: i32, row: i32, origin_col: i32, origin_row: i32) -> Hex {
+    // Only apply wrapping for single-letter columns (0–25); extended notation
+    // (negative values from "1A" etc., or >25 from "1Z" etc.) is already unambiguous.
+    let col = if col >= 0 && col <= 25 {
+        let d0 = col - origin_col;
+        let d1 = col + 26 - origin_col;
+        let d2 = col - 26 - origin_col;
+        if d1.abs() < d0.abs() && d1.abs() <= d2.abs() {
+            col + 26
+        } else if d2.abs() < d0.abs() {
+            col - 26
+        } else {
+            col
+        }
+    } else {
+        col
+    };
     let q = (col - origin_col) as i8;
     let r = -(row - origin_row) as i8;
     (q, r)
@@ -348,5 +368,22 @@ mod tests {
         assert_eq!(col_to_index("2A"), -2);
         assert_eq!(col_to_index("1Z"), 26);
         assert_eq!(col_to_index("2Z"), 27);
+    }
+
+    #[test]
+    fn test_boardspace_column_wraparound() {
+        // Normal case: A=0 is close to origin D=3, no wrap needed
+        let h = boardspace_to_hex(0, 9, 3, 9);
+        assert_eq!(h, (-3i8, 0i8));
+
+        // Wrap forward: A is one east of Z=25 when origin is X=23
+        // (the game that triggered this bug: bA2 placed east of bG3 at Z)
+        let h = boardspace_to_hex(0, 12, 23, 9);
+        assert_eq!(h, (3i8, -3i8));
+
+        // Wrap backward: Z=25 is one west of A=0 when origin is E=4
+        // (25 steps right of E is > max diameter 15, so must wrap to -1 steps)
+        let h = boardspace_to_hex(25, 9, 4, 9);
+        assert_eq!(h, (-5i8, 0i8));
     }
 }
