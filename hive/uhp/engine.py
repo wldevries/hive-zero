@@ -20,6 +20,7 @@ class UHPEngine:
         self.model = model
         self.device = device
         self.simulations = simulations
+        self.grid_size = getattr(model, "grid_size", None)
 
     def run(self):
         """Main loop: read commands from stdin, write responses to stdout."""
@@ -77,7 +78,7 @@ class UHPEngine:
             if "+" in args:
                 self._respond("err Expansions not supported")
                 return
-            self.game = HiveGame()
+            self.game = self._create_game()
             self._respond(self.game.game_string)
             return
 
@@ -207,7 +208,7 @@ class UHPEngine:
         if parts[0] != "Base":
             raise ValueError(f"Unsupported game type: {parts[0]}")
 
-        game = HiveGame()
+        game = self._create_game()
         for move_str in parts[3:]:
             move_str = move_str.strip()
             if not move_str:
@@ -215,3 +216,8 @@ class UHPEngine:
             if not game.play_move_uhp(move_str):
                 raise ValueError(f"Invalid move in game string: {move_str}")
         return game
+
+    def _create_game(self) -> HiveGame:
+        if self.grid_size is None:
+            return HiveGame()
+        return HiveGame(grid_size=self.grid_size)
