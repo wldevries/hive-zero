@@ -577,7 +577,11 @@ impl Game {
             self.turn_string(),
         ];
         // Replay moves to format each in context
-        let mut replay = Game::new();
+        let mut replay = if self.tournament_mode {
+            Game::new_tournament_with_grid_size(self.nn_grid_size)
+        } else {
+            Game::new_with_grid_size(self.nn_grid_size)
+        };
         for mv in &self.move_history {
             if mv.is_pass() {
                 parts.push("pass".to_string());
@@ -677,6 +681,7 @@ impl NNGame for Game {
 #[allow(unused_must_use)]
 mod tests {
     use super::*;
+    use crate::uhp::{format_move_uhp, parse_and_play_uhp};
 
     #[test]
     fn test_new_game() {
@@ -869,5 +874,24 @@ mod tests {
 
         game.play_pass();
         assert_eq!(game.state, GameState::Draw);
+    }
+
+    #[test]
+    fn test_game_string_roundtrip_preserves_small_grid_recenter_behavior() {
+        let mut game = Game::new_with_grid_size(7);
+
+        for _ in 0..5 {
+            let mv = game.valid_moves()[0];
+            let uhp = format_move_uhp(&game, &mv);
+            assert!(parse_and_play_uhp(&mut game, &uhp), "failed to play live move {uhp}");
+        }
+
+        let game_string = game.game_string();
+        assert_eq!(game_string, "Base;InProgress;Black[3];wQ;bQ -wQ;wS1 wQ\\;bS1 -bQ;wS2 /wS1");
+
+        let mut replay = Game::new_with_grid_size(7);
+        for move_str in game_string.split(';').skip(3) {
+            assert!(parse_and_play_uhp(&mut replay, move_str), "roundtrip failed on {move_str}");
+        }
     }
 }
