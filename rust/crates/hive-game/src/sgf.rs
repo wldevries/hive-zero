@@ -106,9 +106,10 @@ fn col_to_index(s: &str) -> i32 {
 
 /// Convert boardspace grid coords to axial hex, relative to the first-move origin.
 ///
-/// Boardspace column labels A–Z represent 0–25 and wrap modulo 26 for wide boards
-/// (e.g. one step east of Z=25 is stored as A=26, not as the "1Z" extended notation).
-/// Disambiguate by picking the offset closest to the known origin column.
+/// Boardspace column labels A–Z represent 0–25 and rows 1–26 each form a 26-value
+/// cycle. When the hive grows past the edge of the display, coordinates wrap around
+/// (e.g. one step east of Z=25 becomes A=0, one step above row=1 becomes row=26).
+/// Disambiguate by picking the offset closest to the known origin.
 #[inline]
 fn boardspace_to_hex(col: i32, row: i32, origin_col: i32, origin_row: i32) -> Hex {
     // Only apply wrapping for single-letter columns (0–25); extended notation
@@ -126,6 +127,21 @@ fn boardspace_to_hex(col: i32, row: i32, origin_col: i32, origin_row: i32) -> He
         }
     } else {
         col
+    };
+    // Rows 1–26 also form a 26-value cycle; apply the same wrap disambiguation.
+    let row = if row >= 1 && row <= 26 {
+        let d0 = row - origin_row;
+        let d1 = row + 26 - origin_row;
+        let d2 = row - 26 - origin_row;
+        if d1.abs() < d0.abs() && d1.abs() <= d2.abs() {
+            row + 26
+        } else if d2.abs() < d0.abs() {
+            row - 26
+        } else {
+            row
+        }
+    } else {
+        row
     };
     let q = (col - origin_col) as i8;
     let r = -(row - origin_row) as i8;
@@ -385,5 +401,23 @@ mod tests {
         // (25 steps right of E is > max diameter 15, so must wrap to -1 steps)
         let h = boardspace_to_hex(25, 9, 4, 9);
         assert_eq!(h, (-5i8, 0i8));
+    }
+
+    #[test]
+    fn test_boardspace_row_wraparound() {
+        // Normal case: row=6 relative to origin row=6, no wrap
+        let h = boardspace_to_hex(5, 6, 5, 6);
+        assert_eq!(h, (0i8, 0i8));
+
+        // Wrap backward: row=26 is one above row=1 when origin is row=6
+        // (HV-Cesar1984-SmartBot: wG2 placed at B 26 adjacent to wS2 at C 1)
+        // Without wrap: r = -(26-6) = -20; with wrap: row=26-26=0, r = -(0-6) = 6
+        let h = boardspace_to_hex(2, 26, 5, 6);
+        assert_eq!(h, (-3i8, 6i8));
+
+        // Wrap forward: row=1 is one below row=26 when origin is row=22
+        // (25 steps below origin 22 wraps to one step up)
+        let h = boardspace_to_hex(5, 1, 5, 22);
+        assert_eq!(h, (0i8, -5i8));
     }
 }
