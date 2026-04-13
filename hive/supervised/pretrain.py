@@ -210,14 +210,16 @@ def game_to_samples(
                 print(f"  [skip] {game_name}: non-base piece {piece_str!r} in {move_str!r}")
             break
 
-        move_idx = game.encode_move(piece_str, from_pos, to_pos)
-        if move_idx < 0:
+        primary_idx, secondary_idx = game.encode_move(piece_str, from_pos, to_pos)
+        if primary_idx < 0:
             if verbose:
                 print(f"  [skip] {game_name}: move outside encoding grid: {move_str!r}")
             break
 
         policy = np.zeros(POLICY_SIZE, dtype=np.float32)
-        policy[move_idx] = 1.0
+        policy[primary_idx] = 1.0
+        if secondary_idx >= 0:
+            policy[secondary_idx] = 1.0
 
         samples.append((board, reserve, policy, value))
 

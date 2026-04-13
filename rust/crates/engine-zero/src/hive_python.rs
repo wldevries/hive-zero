@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods};
 
+use core_game::game::PolicyIndex;
 use core_game::mcts::search::{CpuctStrategy, ForcedExploration, RootNoise, SearchParams};
 
 use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
@@ -209,13 +210,33 @@ impl PyGame {
     }
 
     /// Encode a placement move as flat policy index. Returns -1 if out of grid.
-    /// For movement encoding use encode_movement instead.
+    /// For movement encoding use encode_move instead.
     #[pyo3(signature = (piece_str, to_pos))]
     fn encode_placement(&self, piece_str: &str, to_pos: (i8, i8)) -> i64 {
         let piece = Piece::from_str(piece_str).expect("invalid piece string");
         match move_encoding::encode_placement_flat(piece, to_pos, self.game.nn_grid_size) {
             Some(idx) => idx as i64,
             None => -1,
+        }
+    }
+
+    /// Encode any move as (primary_idx, secondary_idx).
+    /// For placements: returns (flat_idx, -1). Returns (-1, -1) if out of grid.
+    /// For movements: returns (src_idx, dst_idx), both >= 0. Returns (-1, -1) if out of grid.
+    #[pyo3(signature = (piece_str, from_pos, to_pos))]
+    fn encode_move(&self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) -> (i64, i64) {
+        let piece = Piece::from_str(piece_str).expect("invalid piece string");
+        let gs = self.game.nn_grid_size;
+        if let Some(from) = from_pos {
+            match move_encoding::encode_movement(from, piece, to_pos, gs) {
+                Some(PolicyIndex::Sum(a, b)) => (a as i64, b as i64),
+                _ => (-1, -1),
+            }
+        } else {
+            match move_encoding::encode_placement_flat(piece, to_pos, gs) {
+                Some(idx) => (idx as i64, -1),
+                None => (-1, -1),
+            }
         }
     }
 
