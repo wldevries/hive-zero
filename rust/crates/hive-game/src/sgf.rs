@@ -84,10 +84,24 @@ fn parse_piece_sgf(s: &str, default_color: PieceColor) -> Option<Piece> {
     Some(Piece::new(color, piece_type, number))
 }
 
-/// Convert a boardspace column letter to a 0-based index ('A'=0, 'B'=1, ...).
+/// Convert a boardspace column label to a 0-based index.
+/// Single letters: 'A'=0 .. 'Z'=25.
+/// Edge overflow uses the edge letter with a numeric prefix:
+/// '1A'=-1, '2A'=-2, ... and '1Z'=26, '2Z'=27, ...
 #[inline]
 fn col_to_index(s: &str) -> i32 {
-    (s.as_bytes()[0].to_ascii_uppercase() - b'A') as i32
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 && bytes[..bytes.len() - 1].iter().all(u8::is_ascii_digit) {
+        let n: i32 = s[..s.len() - 1].parse().unwrap_or(0);
+        let letter = bytes[bytes.len() - 1].to_ascii_uppercase();
+        match letter {
+            b'A' => -n,
+            b'Z' => 25 + n,
+            _ => (letter - b'A') as i32,
+        }
+    } else {
+        (bytes[0].to_ascii_uppercase() - b'A') as i32
+    }
 }
 
 /// Convert boardspace grid coords to axial hex, relative to the first-move origin.
@@ -324,5 +338,15 @@ mod tests {
     fn test_game_type_expansion() {
         assert_eq!(game_type("SU[Hive-ULP]"), "expansion");
         assert_eq!(game_type("some wM1 content"), "expansion");
+    }
+
+    #[test]
+    fn test_col_to_index_edge_overflow() {
+        assert_eq!(col_to_index("A"), 0);
+        assert_eq!(col_to_index("Z"), 25);
+        assert_eq!(col_to_index("1A"), -1);
+        assert_eq!(col_to_index("2A"), -2);
+        assert_eq!(col_to_index("1Z"), 26);
+        assert_eq!(col_to_index("2Z"), 27);
     }
 }
