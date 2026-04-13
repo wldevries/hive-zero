@@ -64,6 +64,9 @@ pub fn parse_uhp_move(game: &Game, move_str: &str) -> Option<Move> {
 
 /// Format a move as UHP MoveString in the context of the given game state.
 pub fn format_move_uhp(game: &Game, mv: &Move) -> String {
+    if mv.is_pass() {
+        return "pass".to_string();
+    }
     let piece = mv.piece.unwrap();
     let piece_str = piece.to_uhp_string();
     let to_pos = mv.to.unwrap();

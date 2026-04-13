@@ -7,6 +7,7 @@ use hive_game::game::Game;
 use hive_game::piece::{PieceColor, PieceType, player_pieces};
 
 use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -386,6 +387,16 @@ fn pct(n: u64, total: u64) -> f64 {
     if total == 0 { 0.0 } else { n as f64 / total as f64 * 100.0 }
 }
 
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
 fn run_stats(games_path: &str) {
     let path = Path::new(games_path);
     if !path.exists() {
@@ -397,6 +408,7 @@ fn run_stats(games_path: &str) {
     let mut replayed_ok: u64 = 0;
     let mut skipped_expansion: u64 = 0;
     let mut errors: u64 = 0;
+    let mut replay_error_log: Vec<String> = Vec::new();
 
     // Results
     let mut white_wins: u64 = 0;
@@ -460,7 +472,7 @@ fn run_stats(games_path: &str) {
             Ok(f) => f,
             Err(e) => { eprintln!("  failed to open {zip_name}: {e}"); continue; }
         };
-        let _ = core_game::sgf::iter_sgf_texts_in_zip(file, |_sgf_name, text| {
+        let _ = core_game::sgf::iter_sgf_texts_in_zip(file, |sgf_name, text| {
             total_games += 1;
             if total_games % 10000 == 0 {
                 eprint!("\r  {} games processed...   ", total_games);
@@ -473,9 +485,26 @@ fn run_stats(games_path: &str) {
             }
 
             let mut game = Game::new();
-            if sgf::replay_into_game(&text, &mut game).is_err() {
-                errors += 1;
-                return;
+            let replay = panic::catch_unwind(AssertUnwindSafe(|| {
+                sgf::replay_into_game(&text, &mut game)
+            }));
+            match replay {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    errors += 1;
+                    replay_error_log.push(format!(
+                        "{zip_name}/{sgf_name}: replay error: {err}"
+                    ));
+                    return;
+                }
+                Err(payload) => {
+                    errors += 1;
+                    replay_error_log.push(format!(
+                        "{zip_name}/{sgf_name}: panic during replay: {}",
+                        panic_payload_to_string(payload)
+                    ));
+                    return;
+                }
             }
             replayed_ok += 1;
 
@@ -658,9 +687,28 @@ fn run_stats(games_path: &str) {
         }
 
         let mut game = Game::new();
-        if sgf::replay_into_game(&text, &mut game).is_err() {
-            errors += 1;
-            continue;
+        let replay = panic::catch_unwind(AssertUnwindSafe(|| {
+            sgf::replay_into_game(&text, &mut game)
+        }));
+        match replay {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                errors += 1;
+                replay_error_log.push(format!(
+                    "{}: replay error: {err}",
+                    sgf_path.display()
+                ));
+                continue;
+            }
+            Err(payload) => {
+                errors += 1;
+                replay_error_log.push(format!(
+                    "{}: panic during replay: {}",
+                    sgf_path.display(),
+                    panic_payload_to_string(payload)
+                ));
+                continue;
+            }
         }
         replayed_ok += 1;
 
@@ -984,6 +1032,20 @@ fn run_stats(games_path: &str) {
         writeln!(f, "Beetle on losing queen: {} ({:.1}% of decisive)",
             beetle_on_queen_wins, pct(beetle_on_queen_wins, decisive)).ok();
         println!("Wrote {}", stats_path.display());
+    }
+
+    if !replay_error_log.is_empty() {
+        let replay_errors_path = path.join("stats_replay_errors.txt");
+        if let Ok(mut f) = std::fs::File::create(&replay_errors_path) {
+            use std::io::Write;
+            writeln!(f, "Hive stats replay errors ({})", replay_error_log.len()).ok();
+            writeln!(f, "===============================").ok();
+            writeln!(f).ok();
+            for line in &replay_error_log {
+                writeln!(f, "{line}").ok();
+            }
+            println!("Wrote {}", replay_errors_path.display());
+        }
     }
 }
 

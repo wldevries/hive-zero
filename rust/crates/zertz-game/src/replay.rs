@@ -588,6 +588,7 @@ pub fn run_stats(games_path: &str) {
             // Replay the game for engine-derived stats
             let replay_result = replay_game(&record);
             if replay_result.error.is_some() {
+                println!("\nError replaying game in {}: {:?}", zip_name, replay_result.error);
                 errors += 1;
                 return;
             }

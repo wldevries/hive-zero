@@ -109,13 +109,28 @@ fn starts_with_ci(s: &str, prefix: &[u8]) -> bool {
 }
 
 /// Build a Move from a piece and boardspace destination coords.
-fn make_move(game: &Game, piece: Piece, col: i32, row: i32, origin: &mut Option<(i32, i32)>) -> Move {
-    let hex = if let Some((oc, or)) = *origin {
+///
+/// `frame_offset` maps SGF coordinates (first-move-relative) into the current
+/// game frame after any recentering shifts that were applied by previous moves.
+fn make_move(
+    game: &Game,
+    piece: Piece,
+    col: i32,
+    row: i32,
+    origin: &mut Option<(i32, i32)>,
+    frame_offset: (i8, i8),
+) -> Move {
+    let sgf_hex = if let Some((oc, or)) = *origin {
         boardspace_to_hex(col, row, oc, or)
     } else {
         *origin = Some((col, row));
         (0i8, 0i8)
     };
+
+    let hex = (
+        sgf_hex.0.saturating_add(frame_offset.0),
+        sgf_hex.1.saturating_add(frame_offset.1),
+    );
 
     if let Some(from) = game.board.piece_position(piece) {
         Move::movement(piece, from, hex)
@@ -147,6 +162,8 @@ fn replay_into_game_inner(
     let mut move_count: usize = 0;
     // Pending move awaiting "done": (piece, dest_col, dest_row)
     let mut pending: Option<(Piece, i32, i32)> = None;
+    // Cumulative recentering shift, so boardspace→axial conversion stays in frame.
+    let mut frame_offset: (i8, i8) = (0, 0);
 
     // Collect all actions first so we can use early-return error propagation.
     let mut actions: Vec<(u8, String)> = Vec::new();
@@ -169,11 +186,13 @@ fn replay_into_game_inner(
         if starts_with_ci(action, b"done") || starts_with_ci(action, b"start") {
             if let Some((piece, dest_col, dest_row)) = pending.take() {
                 if game.is_game_over() { break; }
-                let mv = make_move(game, piece, dest_col, dest_row, &mut origin);
+                let mv = make_move(game, piece, dest_col, dest_row, &mut origin, frame_offset);
                 on_move(game, &mv);
                 game.play_move(&mv).map_err(|msg| {
                     format!("move {} rejected: {} ({:?})", move_count + 1, msg, piece)
                 })?;
+                let (dq, dr) = game.last_recenter_shift();
+                frame_offset = (frame_offset.0.saturating_add(dq), frame_offset.1.saturating_add(dr));
                 move_count += 1;
             }
             continue;
@@ -232,11 +251,13 @@ fn replay_into_game_inner(
                     let dest_col = col_to_index(col_str);
                     let dest_row: i32 = row_str.parse().unwrap_or(0);
                     if game.is_game_over() { break; }
-                    let mv = make_move(game, piece, dest_col, dest_row, &mut origin);
+                    let mv = make_move(game, piece, dest_col, dest_row, &mut origin, frame_offset);
                     on_move(game, &mv);
                     game.play_move(&mv).map_err(|msg| {
                         format!("move {} rejected: {} ({:?})", move_count + 1, msg, piece)
                     })?;
+                    let (dq, dr) = game.last_recenter_shift();
+                    frame_offset = (frame_offset.0.saturating_add(dq), frame_offset.1.saturating_add(dr));
                     move_count += 1;
                 }
             }
@@ -259,11 +280,13 @@ fn replay_into_game_inner(
                     let dest_col = col_to_index(col_str);
                     let dest_row: i32 = row_str.parse().unwrap_or(0);
                     if game.is_game_over() { break; }
-                    let mv = make_move(game, piece, dest_col, dest_row, &mut origin);
+                    let mv = make_move(game, piece, dest_col, dest_row, &mut origin, frame_offset);
                     on_move(game, &mv);
                     game.play_move(&mv).map_err(|msg| {
                         format!("move {} rejected: {} ({:?})", move_count + 1, msg, piece)
                     })?;
+                    let (dq, dr) = game.last_recenter_shift();
+                    frame_offset = (frame_offset.0.saturating_add(dq), frame_offset.1.saturating_add(dr));
                     move_count += 1;
                 }
             }

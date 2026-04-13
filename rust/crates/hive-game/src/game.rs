@@ -545,6 +545,12 @@ impl Game {
         &self.move_history
     }
 
+    /// Return the recentering shift that was applied by the last played move.
+    /// Returns (0, 0) if no moves have been played yet.
+    pub fn last_recenter_shift(&self) -> (i8, i8) {
+        *self.history_shifts.last().unwrap_or(&(0, 0))
+    }
+
     /// Get the last move's source and destination adjusted for that move's recentering shift.
     /// Returns (source_adjusted, dest_adjusted) or (None, None) if no moves.
     pub fn last_move_display_coords(&self) -> (Option<Hex>, Option<Hex>) {
