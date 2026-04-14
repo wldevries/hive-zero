@@ -311,8 +311,9 @@ class ModelEngine:
             board_4d = np.asarray(board_batch)
             reserves = np.asarray(reserve_batch)
             use_pinned = str(device).startswith("cuda")
-            bt_ = torch.from_numpy(board_4d).view(torch.bfloat16)
-            rv_ = torch.from_numpy(reserves).view(torch.bfloat16)
+            # best_move sends plain f32 arrays (not uint16 bf16 bits like selfplay)
+            bt_ = torch.from_numpy(board_4d)
+            rv_ = torch.from_numpy(reserves)
             if use_pinned:
                 bt_ = bt_.pin_memory()
                 rv_ = rv_.pin_memory()
