@@ -366,6 +366,43 @@ def main():
         help="Players to exclude from training data (default: Dumbot)",
     )
 
+    # Battle: two models vs each other
+    battle_parser = subparsers.add_parser(
+        "battle", help="Pit two models against each other"
+    )
+    battle_parser.add_argument("model1", type=str, help="Path to first model checkpoint")
+    battle_parser.add_argument("model2", type=str, help="Path to second model checkpoint")
+    battle_parser.add_argument(
+        "--games", type=int, default=100, help="Number of games to play (default: 100)"
+    )
+    battle_parser.add_argument(
+        "--simulations",
+        type=int,
+        default=None,
+        help="MCTS simulations per move (default: read from checkpoint metadata)",
+    )
+    battle_parser.add_argument(
+        "--device", type=str, default="cuda", help="Device: cuda or cpu (default: cuda)"
+    )
+    battle_parser.add_argument(
+        "--max-moves",
+        type=int,
+        default=200,
+        help="Max moves per game (default: 200)",
+    )
+    battle_parser.add_argument(
+        "--c-puct",
+        type=float,
+        default=1.5,
+        help="PUCT exploration constant (default: 1.5)",
+    )
+    battle_parser.add_argument(
+        "--leaf-batch-size",
+        type=int,
+        default=1,
+        help="Leaf batch size for MCTS inference (default: 1)",
+    )
+
     # Evaluation
     eval_parser = subparsers.add_parser("eval", help="Evaluate model against Mzinga")
     eval_parser.add_argument(
@@ -448,6 +485,20 @@ def main():
             checkpoint_dir=args.checkpoint_dir,
             verbose_samples=args.verbose_samples,
             augment_symmetry=args.augment_symmetry,
+        )
+
+    elif args.command == "battle":
+        from hive.selfplay.battle import run_battle
+
+        run_battle(
+            model1_path=args.model1,
+            model2_path=args.model2,
+            num_games=args.games,
+            simulations=args.simulations,
+            device=_resolve_device(args.device),
+            max_moves=args.max_moves,
+            c_puct=args.c_puct,
+            leaf_batch_size=args.leaf_batch_size,
         )
 
     elif args.command == "eval":
