@@ -34,6 +34,12 @@ def main():
         default=800,
         help="MCTS simulations per move (default: 800)",
     )
+    uhp_parser.add_argument(
+        "--onnx-model",
+        type=str,
+        default=None,
+        help="ONNX model path for Rust-native ORT/QNN inference (export with --batch-size 1 for QNN)",
+    )
 
     # Training
     train_parser = subparsers.add_parser("train", help="Run self-play training")
@@ -620,16 +626,19 @@ def main():
 
         model = None
         device = "cuda"
-        simulations = 800
-        if hasattr(args, "model") and args.model is not None:
+        simulations = getattr(args, "simulations", 800)
+        onnx_path = getattr(args, "onnx_model", None)
+
+        if onnx_path is None and hasattr(args, "model") and args.model is not None:
             from hive.nn.model import load_checkpoint
 
-            device = _resolve_device(args.device if hasattr(args, "device") else "cuda")
+            device = _resolve_device(getattr(args, "device", "cuda"))
             model, _ = load_checkpoint(args.model)
             model.to(device)
             model.eval()
-            simulations = args.simulations if hasattr(args, "simulations") else 800
-        engine = UHPEngine(model=model, device=device, simulations=simulations)
+
+        engine = UHPEngine(model=model, device=device, simulations=simulations,
+                           onnx_path=onnx_path)
         engine.run()
 
 

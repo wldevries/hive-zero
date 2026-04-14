@@ -8,6 +8,7 @@ use core_game::game::PolicyIndex;
 use core_game::mcts::search::{CpuctStrategy, ForcedExploration, RootNoise, SearchParams};
 
 use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
+use crate::inference::HiveInference;
 use hive_game::game::{self, Game};
 use hive_game::move_encoding;
 use hive_game::piece::{Piece, PieceColor, PieceType};
@@ -372,6 +373,44 @@ impl PyGame {
             hive_game::uhp::format_move_uhp(&self.game, &best)
         })
     }
+
+    /// Run MCTS using a pre-loaded ORT/QNN session (no Python eval callback).
+    /// Use `HiveOrtSession` to load the session once; reuse it across calls.
+    #[pyo3(signature = (ort_session, simulations=800, c_puct=1.5))]
+    fn best_move_ort(
+        &mut self,
+        ort_session: &mut PyHiveOrtSession,
+        simulations: usize,
+        c_puct: f32,
+    ) -> PyResult<String> {
+        if self.game.is_game_over() {
+            return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
+        }
+        if self.game.valid_moves().is_empty() {
+            return Ok("pass".to_string());
+        }
+
+        let gs = self.game.nn_grid_size;
+        let engine = &mut ort_session.engine;
+        let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
+            engine
+                .infer_batch(boards, reserves, batch_size, NUM_CHANNELS, gs, RESERVE_SIZE)
+                .map(|r: crate::inference::HiveInferenceResult| (r.policy, r.value))
+                .map_err(|e| e.to_string())
+        });
+        let search_params = SearchParams::new(
+            CpuctStrategy::Constant { c_puct },
+            ForcedExploration::None,
+            RootNoise::None,
+        );
+        let best = best_move_core(&self.game, simulations, &search_params, core_eval)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        Ok(if best.piece.is_none() {
+            "pass".to_string()
+        } else {
+            hive_game::uhp::format_move_uhp(&self.game, &best)
+        })
+    }
 }
 
 /// Compute the 12 D6 symmetry gather-permutation tables for a grid_size x grid_size board.
@@ -419,9 +458,30 @@ fn parse_sgf_moves(content: &str) -> PyResult<Vec<String>> {
     Ok(moves)
 }
 
+/// A loaded ORT/QNN inference session for Hive, kept alive across `best_move_ort`
+/// calls so the QNN graph is compiled only once at construction time.
+///
+/// Export your model with a static batch size of 1 for QNN/HTP:
+///   `uv run python scripts/export_onnx.py model.pt --batch-size 1`
+#[pyclass(name = "HiveOrtSession")]
+pub struct PyHiveOrtSession {
+    engine: crate::inference::HiveOrtEngine,
+}
+
+#[pymethods]
+impl PyHiveOrtSession {
+    #[new]
+    fn new(onnx_path: String) -> PyResult<Self> {
+        let engine = crate::inference::HiveOrtEngine::load(&onnx_path)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyHiveOrtSession { engine })
+    }
+}
+
 /// Register Python module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGame>()?;
+    m.add_class::<PyHiveOrtSession>()?;
     m.add_function(wrap_pyfunction!(parse_sgf_moves, m)?)?;
     m.add_function(wrap_pyfunction!(d6_grid_permutations, m)?)?;
     Ok(())

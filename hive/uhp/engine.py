@@ -14,13 +14,18 @@ ENGINE_VERSION = "0.1.0"
 class UHPEngine:
     """UHP-compliant engine communicating over stdin/stdout."""
 
-    def __init__(self, model=None, device: str = "cpu", simulations: int = 800):
+    def __init__(self, model=None, device: str = "cpu", simulations: int = 800,
+                 onnx_path: str | None = None):
         self.game: Optional[HiveGame] = None
         self._running = True
         self.model = model
         self.device = device
         self.simulations = simulations
         self.grid_size = getattr(model, "grid_size", None)
+        self.ort_session = None
+        if onnx_path is not None:
+            from engine_zero import HiveOrtSession
+            self.ort_session = HiveOrtSession(onnx_path)
 
     def run(self):
         """Main loop: read commands from stdin, write responses to stdout."""
@@ -150,26 +155,30 @@ class UHPEngine:
         if not self.game.valid_moves():
             self._respond("pass")
             return
-        if self.model is None:
+        if self.ort_session is None and self.model is None:
             self._respond("err No model loaded")
             return
 
-        import torch
-        import numpy as np
+        if self.ort_session is not None:
+            move_str = self.game.best_move_ort(self.ort_session, simulations=self.simulations)
+        else:
+            import torch
+            import numpy as np
 
-        model = self.model
-        device = self.device
+            model = self.model
+            device = self.device
 
-        def eval_fn(board_batch, reserve_batch):
-            b = torch.tensor(np.asarray(board_batch)).to(device)
-            r = torch.tensor(np.asarray(reserve_batch)).to(device)
-            with torch.no_grad():
-                policy_logits, values, _ = model(b, r)
-            policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
-            vals = values.cpu().numpy().flatten()
-            return policy.astype(np.float32), vals.astype(np.float32)
+            def eval_fn(board_batch, reserve_batch):
+                b = torch.tensor(np.asarray(board_batch)).to(device)
+                r = torch.tensor(np.asarray(reserve_batch)).to(device)
+                with torch.no_grad():
+                    policy_logits, values, _ = model(b, r)
+                policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
+                vals = values.cpu().numpy().flatten()
+                return policy.astype(np.float32), vals.astype(np.float32)
 
-        move_str = self.game.best_move(eval_fn, simulations=self.simulations)
+            move_str = self.game.best_move(eval_fn, simulations=self.simulations)
+
         self._respond(move_str)
 
     def _cmd_undo(self, args: str):
