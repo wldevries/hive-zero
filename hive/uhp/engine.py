@@ -15,13 +15,13 @@ class UHPEngine:
     """UHP-compliant engine communicating over stdin/stdout."""
 
     def __init__(self, model=None, device: str = "cpu", simulations: int = 800,
-                 onnx_path: str | None = None):
+                 onnx_path: str | None = None, grid_size: int | None = None):
         self.game: Optional[HiveGame] = None
         self._running = True
         self.model = model
         self.device = device
         self.simulations = simulations
-        self.grid_size = getattr(model, "grid_size", None)
+        self.grid_size = grid_size if grid_size is not None else getattr(model, "grid_size", None)
         self.ort_session = None
         if onnx_path is not None:
             from engine_zero import HiveOrtSession

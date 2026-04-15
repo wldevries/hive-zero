@@ -40,6 +40,12 @@ def main():
         default=None,
         help="ONNX model path for Rust-native ORT/QNN inference (export with --batch-size 1 for QNN)",
     )
+    uhp_parser.add_argument(
+        "--grid-size",
+        type=int,
+        default=None,
+        help="NN encoding grid size (must be odd; overrides value stored in checkpoint)",
+    )
 
     # Training
     train_parser = subparsers.add_parser("train", help="Run self-play training")
@@ -637,8 +643,9 @@ def main():
             model.to(device)
             model.eval()
 
+        grid_size = getattr(args, "grid_size", None)
         engine = UHPEngine(model=model, device=device, simulations=simulations,
-                           onnx_path=onnx_path)
+                           onnx_path=onnx_path, grid_size=grid_size)
         engine.run()
 
 
