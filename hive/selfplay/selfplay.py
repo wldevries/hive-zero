@@ -168,13 +168,16 @@ class RustParallelSelfPlay:
 
         pbar = tqdm(total=self.max_moves, unit="turn", desc="  Self-play", leave=False)
 
-        def progress(finished, total, active, moves, resigned, max_turn=0):
+        def progress(finished, total, active, moves, resigned, draws, max_turn=0):
             advance = max_turn - pbar.n
             if advance > 0:
                 pbar.update(advance)
-            pbar.set_postfix(
-                active=f"{active}/{total}", resigned=resigned if resigned else 0
-            )
+            postfix = {"active": f"{active}/{total}"}
+            if resigned:
+                postfix["resigned"] = resigned
+            if draws:
+                postfix["draws"] = draws
+            pbar.set_postfix(postfix)
 
         if onnx_path:
             result = session.play_games(
@@ -563,12 +566,27 @@ class SelfPlayTrainer:
 
             wins_w = result.wins_w
             wins_b = result.wins_b
-            draws = result.draws
+            draws_repetition = result.draws_repetition
+            draws_timeout = result.draws_timeout
+            draws_other = result.draws
+            draws_total = draws_repetition + draws_timeout + draws_other
             resignations = result.resignations
-            resign_suffix = f" (resigned={resignations})" if resignations else ""
-            print(
-                f"  Results: W={_cg(wins_w)} B={_cg(wins_b)} D/unfinished={_cy(draws)}{resign_suffix}"
-            )
+            total_games = wins_w + wins_b + draws_total + resignations
+            parts = [f"W={_cg(wins_w)} B={_cg(wins_b)}"]
+            draw_parts = []
+            if draws_repetition:
+                draw_parts.append(f"rep={_cy(draws_repetition)}")
+            if draws_timeout:
+                draw_parts.append(f"timeout={_cy(draws_timeout)}")
+            if draws_other:
+                draw_parts.append(f"other={_cy(draws_other)}")
+            if draw_parts:
+                parts.append(f"D={_cy(draws_total)} ({', '.join(draw_parts)})")
+            elif draws_total:
+                parts.append(f"D={_cy(draws_total)}")
+            if resignations:
+                parts.append(f"resigned={resignations}")
+            print(f"  Results: {' '.join(parts)}")
 
             # Game length stats
             finished_games_all = result.final_games()
@@ -694,7 +712,7 @@ class SelfPlayTrainer:
             with open(log_path, "a") as f:
                 f.write(
                     f"{generation},MCTS,{simulations},"
-                    f"{wins_w},{wins_b},{draws},{resignations},{total_positions},"
+                    f"{wins_w},{wins_b},{draws_total},{resignations},{total_positions},"
                     f"{len(replay_buffer)},{losses['total_loss']:.6f},"
                     f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
                     f"{losses.get('qd_loss', 0):.6f},"

@@ -14,7 +14,7 @@ use crate::move_encoding::{self, encode_game_move};
 use crate::piece::{Piece, PieceColor, PieceType};
 
 pub type EvalFn<'a> = Box<dyn FnMut(&[f32], &[f32], usize) -> Result<(Vec<f32>, Vec<f32>), String> + 'a>;
-pub type SelfPlayProgressFn<'a> = Box<dyn FnMut(u32, u32, u32, u32, u32, u32) + 'a>;
+pub type SelfPlayProgressFn<'a> = Box<dyn FnMut(u32, u32, u32, u32, u32, u32, u32) + 'a>;
 pub type BattleProgressFn<'a> = Box<dyn FnMut(u32, u32, u32, u32) + 'a>;
 
 #[derive(Clone)]
@@ -44,6 +44,8 @@ pub struct SelfPlayResult {
     pub wins_w: u32,
     pub wins_b: u32,
     pub draws: u32,
+    pub draws_timeout: u32,
+    pub draws_repetition: u32,
     pub resignations: u32,
     pub total_moves: u32,
     pub full_search_turns: u32,
@@ -67,6 +69,7 @@ struct TurnRecord {
     opp_queen_escape: f32,
     my_mobility: f32,
     opp_mobility: f32,
+    position_hash: u64,
 }
 
 fn opposite_color(color: PieceColor) -> PieceColor {
@@ -618,6 +621,7 @@ pub fn play_selfplay_core(
                 opp_queen_escape: queen_escape(&games[game_index], opp_color),
                 my_mobility: piece_mobility(&mut games[game_index], turn_color),
                 opp_mobility: piece_mobility(&mut games[game_index], opp_color),
+                position_hash: games[game_index].position_hash(),
             });
 
             let move_index = if !is_full[index] || temp == 0.0 {
@@ -652,6 +656,15 @@ pub fn play_selfplay_core(
             let total_moves: u32 = move_counts.iter().sum();
             let num_resigned = resigned_as.iter().filter(|entry| entry.is_some()).count() as u32;
             let num_active = active.iter().filter(|&&entry| entry).count() as u32;
+            // Count draws among finished games (repetition + simultaneous queen surrounding).
+            let num_draws_rt = games
+                .iter()
+                .zip(active.iter())
+                .filter(|(g, is_active)| {
+                    !**is_active
+                        && matches!(g.state, GameState::Draw | GameState::DrawByRepetition)
+                })
+                .count() as u32;
             let max_turn = if num_active > 0 {
                 move_counts
                     .iter()
@@ -669,6 +682,7 @@ pub fn play_selfplay_core(
                 num_active,
                 total_moves,
                 num_resigned,
+                num_draws_rt,
                 max_turn,
             );
         }
@@ -691,6 +705,8 @@ pub fn play_selfplay_core(
     let mut wins_w = 0u32;
     let mut wins_b = 0u32;
     let mut draws = 0u32;
+    let mut draws_timeout = 0u32;
+    let mut draws_repetition = 0u32;
     let mut resignations = 0u32;
 
     for game_index in 0..num_games {
@@ -716,8 +732,19 @@ pub fn play_selfplay_core(
                     wins_b += 1;
                     (-1.0f32, 1.0f32, true)
                 }
-                _ => {
+                GameState::DrawByRepetition => {
+                    draws_repetition += 1;
+                    let (white_score, black_score) = games[game_index].heuristic_value();
+                    (white_score, black_score, false)
+                }
+                GameState::Draw => {
                     draws += 1;
+                    let (white_score, black_score) = games[game_index].heuristic_value();
+                    (white_score, black_score, false)
+                }
+                _ => {
+                    // InProgress: game hit move cap (timeout)
+                    draws_timeout += 1;
                     let (white_score, black_score) = games[game_index].heuristic_value();
                     (white_score, black_score, false)
                 }
@@ -728,8 +755,24 @@ pub fn play_selfplay_core(
             continue;
         }
 
+        // For threefold-repetition games, train up to and including the first occurrence
+        // of the specific hash that triggered the draw.  The last entry in repetition_history
+        // is always the triggering hash (its third occurrence was just appended).
+        let truncate_at = if let Some(trigger) = games[game_index].threefold_trigger_hash() {
+            let mut cutoff = 0; // if trigger never appears in MCTS history, skip game
+            for (i, record) in histories[game_index].iter().enumerate() {
+                if record.position_hash == trigger {
+                    cutoff = i + 1;
+                    break;
+                }
+            }
+            cutoff
+        } else {
+            histories[game_index].len()
+        };
+
         let policy_only = !decisive && outcome_w == 0.0;
-        for record in &histories[game_index] {
+        for record in &histories[game_index][..truncate_at] {
             let board = &board_buf[record.board_offset..record.board_offset + board_size];
             let reserve = &reserve_buf[record.reserve_offset..record.reserve_offset + RESERVE_SIZE];
             let value = match record.turn_color {
@@ -789,6 +832,8 @@ pub fn play_selfplay_core(
         wins_w,
         wins_b,
         draws,
+        draws_timeout,
+        draws_repetition,
         resignations,
         total_moves: move_counts.iter().sum(),
         full_search_turns,

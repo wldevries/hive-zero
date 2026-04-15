@@ -14,6 +14,7 @@ pub enum GameState {
     NotStarted,
     InProgress,
     Draw,
+    DrawByRepetition,
     WhiteWins,
     BlackWins,
 }
@@ -24,6 +25,7 @@ impl GameState {
             GameState::NotStarted => "NotStarted",
             GameState::InProgress => "InProgress",
             GameState::Draw => "Draw",
+            GameState::DrawByRepetition => "DrawByRepetition",
             GameState::WhiteWins => "WhiteWins",
             GameState::BlackWins => "BlackWins",
         }
@@ -232,7 +234,7 @@ impl Game {
         let count = self.repetition_counts.entry(key).or_insert(0);
         *count = count.saturating_add(1);
         if *count >= 3 {
-            self.state = GameState::Draw;
+            self.state = GameState::DrawByRepetition;
         }
     }
 
@@ -295,7 +297,22 @@ impl Game {
     }
 
     pub fn is_game_over(&self) -> bool {
-        matches!(self.state, GameState::Draw | GameState::WhiteWins | GameState::BlackWins)
+        matches!(self.state, GameState::Draw | GameState::DrawByRepetition | GameState::WhiteWins | GameState::BlackWins)
+    }
+
+    /// Zobrist hash of the current position (board layout + side to move).
+    pub fn position_hash(&self) -> u64 {
+        self.position_key()
+    }
+
+    /// The hash that triggered `DrawByRepetition` (its third occurrence was the last move played).
+    /// Returns `None` if the game did not end by threefold repetition.
+    pub fn threefold_trigger_hash(&self) -> Option<u64> {
+        if self.state == GameState::DrawByRepetition {
+            self.repetition_history.last().copied()
+        } else {
+            None
+        }
     }
 
     pub fn reserve_has(&self, piece: Piece) -> bool {
@@ -643,7 +660,7 @@ impl GameTrait for Game {
         match self.state {
             GameState::WhiteWins => Outcome::WonBy(Player::Player1),
             GameState::BlackWins => Outcome::WonBy(Player::Player2),
-            GameState::Draw => Outcome::Draw,
+            GameState::Draw | GameState::DrawByRepetition => Outcome::Draw,
             _ => Outcome::Ongoing,
         }
     }
@@ -896,7 +913,7 @@ mod tests {
 
         game.play_pass();
         game.play_pass();
-        assert_eq!(game.state, GameState::Draw);
+        assert_eq!(game.state, GameState::DrawByRepetition);
     }
 
     #[test]
@@ -907,13 +924,13 @@ mod tests {
         game.play_pass();
         game.play_pass();
         game.play_pass();
-        assert_eq!(game.state, GameState::Draw);
+        assert_eq!(game.state, GameState::DrawByRepetition);
 
         game.undo();
         assert_eq!(game.state, GameState::InProgress);
 
         game.play_pass();
-        assert_eq!(game.state, GameState::Draw);
+        assert_eq!(game.state, GameState::DrawByRepetition);
     }
 
     #[test]
