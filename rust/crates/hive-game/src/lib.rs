@@ -7,3 +7,4 @@ pub mod board_encoding;
 pub mod move_encoding;
 pub mod search;
 pub mod sgf;
+mod mcts_tests;

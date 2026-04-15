@@ -350,7 +350,7 @@ impl<G: GameEngine> MctsSearch<G> {
     }
 
     /// Reconstruct the game state at a given node by replaying moves from root.
-    fn reconstruct_game(&self, node_id: NodeId) -> G {
+    pub fn reconstruct_game(&self, node_id: NodeId) -> G {
         // Collect moves from node back to root
         let mut moves = Vec::new();
         let mut current = node_id;

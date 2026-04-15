@@ -683,6 +683,40 @@ impl NNGame for Game {
     }
 }
 
+/// Test helpers: direct board construction that bypasses move validation.
+/// Only compiled for `#[cfg(test)]` so private fields are accessible.
+#[cfg(test)]
+impl Game {
+    /// Build a test position by placing pieces directly on the board, bypassing
+    /// all move-validation rules. Useful for constructing near-terminal positions
+    /// in MCTS tests without requiring a full legal game sequence.
+    ///
+    /// `pieces`: list of (Piece, hex) to place and remove from reserves.
+    /// `turn`: which player is to move.
+    /// `move_count`: sets game.move_count (non-zero marks the state as InProgress).
+    /// `nn_grid_size`: must be odd and ≤ GRID_SIZE (use 7 for fast tests).
+    pub(crate) fn test_position(
+        pieces: &[(Piece, Hex)],
+        turn: PieceColor,
+        move_count: u16,
+        nn_grid_size: usize,
+    ) -> Self {
+        let mut game = Game::new_with_grid_size(nn_grid_size);
+        game.turn_color = turn;
+        game.move_count = move_count;
+        game.state = if move_count > 0 {
+            GameState::InProgress
+        } else {
+            GameState::NotStarted
+        };
+        for &(piece, hex) in pieces {
+            game.board.place_piece(piece, hex).expect("test_position: piece placement failed");
+            game.reserves.remove(piece);
+        }
+        game
+    }
+}
+
 #[cfg(test)]
 #[allow(unused_must_use)]
 mod tests {
