@@ -39,7 +39,7 @@ def _make_eval_fn(model, device):
         with torch.no_grad():
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 policy_logits, values, _ = model(bt, rv)
-        policy = torch.softmax(policy_logits.float(), dim=1).cpu().numpy().astype(np.float32)
+        policy = policy_logits.float().cpu().numpy().astype(np.float32)
         vals = values.float().cpu().numpy().flatten().astype(np.float32)
         return policy, vals
 

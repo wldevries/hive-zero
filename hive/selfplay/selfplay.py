@@ -117,7 +117,7 @@ class RustParallelSelfPlay:
             rv = rv.to(device, non_blocking=use_pinned)
             with torch.no_grad():
                 policy_logits, values, _ = model(bt, rv)
-            policy = torch.softmax(policy_logits.float(), dim=1).cpu().numpy()
+            policy = policy_logits.float().cpu().numpy()
             vals = values.float().cpu().numpy().flatten()
             return policy.astype(np.float32), vals.astype(np.float32)
 
