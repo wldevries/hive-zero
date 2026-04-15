@@ -902,26 +902,21 @@ mod tests {
     }
 
     #[test]
-    fn test_threefold_repetition_draw() {
+    fn test_twofold_repetition_draw() {
         let mut game = Game::new();
 
-        // Two full pass cycles repeat the initial side-to-move position for White 3 times:
-        // initial + after move 2 + after move 4.
-        game.play_pass();
+        // One full pass cycle repeats the initial side-to-move position for White 2 times:
+        // initial + after move 2.
         game.play_pass();
         assert_eq!(game.state, GameState::InProgress);
-
-        game.play_pass();
         game.play_pass();
         assert_eq!(game.state, GameState::DrawByRepetition);
     }
 
     #[test]
-    fn test_undo_clears_threefold_draw_state() {
+    fn test_undo_clears_twofold_draw_state() {
         let mut game = Game::new();
 
-        game.play_pass();
-        game.play_pass();
         game.play_pass();
         game.play_pass();
         assert_eq!(game.state, GameState::DrawByRepetition);
