@@ -6,7 +6,6 @@ use super::node::MctsNode;
 use crate::game::{GameEngine, Outcome, Player, PolicyIndex};
 
 const DEFAULT_C_PUCT: f32 = 1.5;
-const VIRTUAL_LOSS: f32 = -1.0f32;
 
 #[derive(Clone)]
 pub enum CpuctStrategy {
@@ -188,33 +187,44 @@ fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_visits: u32, n_t
 
 /// Backpropagate a value up the tree.
 /// `value` is from the perspective of the player to move at `node_id`.
-/// Each node stores value from its parent's player's perspective, so the
-/// initial value is negated and sign flips at each level going up.
+/// Each node stores value from its parent's player's perspective.
+/// Sign flips only when crossing a player boundary (parent.turn_player != node.turn_player),
+/// which correctly handles same-player consecutive turns (e.g. Zertz mid-captures).
 fn backpropagate<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, value: f32) {
-    let mut value = -value; // negate: store from parent's perspective
+    // Invariant: `value` is from the current node's player's perspective.
+    // Transform to parent's perspective before storing, carry that value up.
     let mut node_id = node_id;
+    let mut value = value;
     loop {
+        let (parent, store_value) = {
+            let node = arena.get(node_id);
+            let sv = match node.parent {
+                None => -value, // root convention: root_value() negates to recover root player's return
+                Some(pid) => {
+                    if arena.get(pid).turn_player == node.turn_player { value } else { -value }
+                }
+            };
+            (node.parent, sv)
+        };
         let node = arena.get_mut(node_id);
         node.visit_count += 1;
-        node.value_sum += value;
-        value = -value;
-        match node.parent {
-            Some(parent) => node_id = parent,
+        node.value_sum += store_value;
+        match parent {
             None => break,
+            Some(pid) => { value = store_value; node_id = pid; }
         }
     }
 }
 
-/// Apply virtual loss: increment visit_count and add a pessimistic placeholder to
-/// value_sum up the tree. This deters subsequent selections from taking the same
-/// path within a batch. The placeholder is corrected by correct_virtual_loss.
+/// Apply virtual loss: increment visit_count and subtract 1.0 from value_sum at every
+/// node up the tree. Subtracting 1.0 is pessimistic from every node's parent's perspective
+/// regardless of player, deterring subsequent batch selections from taking the same path.
+/// The placeholder is corrected by correct_virtual_loss.
 fn apply_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, mut node_id: NodeId) {
-    let mut virtual_loss = VIRTUAL_LOSS;
     loop {
         let node = arena.get_mut(node_id);
         node.visit_count += 1;
-        node.value_sum += virtual_loss;
-        virtual_loss = -virtual_loss;
+        node.value_sum -= 1.0;
         match node.parent {
             Some(parent) => node_id = parent,
             None => break,
@@ -222,22 +232,30 @@ fn apply_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, mut node_id: NodeId) {
     }
 }
 
-/// Correct virtual loss by replacing the placeholder with the real value.
+/// Correct virtual loss by replacing the -1.0 placeholder with the real backed-up value.
 /// Does NOT increment visit_count (already done by apply_virtual_loss).
 /// `real_value` is from the perspective of the player to move at `node_id`.
+/// Uses the same player-aware sign logic as backpropagate.
 fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real_value: f32) {
-    let mut real_value = -real_value; // negate: store from parent's perspective
-    let mut virtual_loss = VIRTUAL_LOSS;
     let mut node_id = node_id;
+    let mut value = real_value;
     loop {
+        let (parent, store_value) = {
+            let node = arena.get(node_id);
+            let sv = match node.parent {
+                None => -value,
+                Some(pid) => {
+                    if arena.get(pid).turn_player == node.turn_player { value } else { -value }
+                }
+            };
+            (node.parent, sv)
+        };
         let node = arena.get_mut(node_id);
-        // Subtract the virtual placeholder and add the real value.
-        node.value_sum += real_value - virtual_loss;
-        real_value = -real_value;
-        virtual_loss = -virtual_loss;
-        match node.parent {
-            Some(parent) => node_id = parent,
+        // +1.0 undoes the apply_virtual_loss placeholder; store_value adds the real backed-up value.
+        node.value_sum += 1.0 + store_value;
+        match parent {
             None => break,
+            Some(pid) => { value = store_value; node_id = pid; }
         }
     }
 }
