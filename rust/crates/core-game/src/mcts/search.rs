@@ -245,7 +245,8 @@ fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real
 /// Terminal game value from a perspective.
 pub fn terminal_value(outcome: Outcome, perspective: Player) -> f32 {
     match outcome {
-        Outcome::Draw | Outcome::Ongoing => 0.0,
+        Outcome::Ongoing => 0.0,
+        Outcome::Draw => 0.05, // causes contempt for draw state for the player playing the last move
         Outcome::WonBy(winner) => {
             if winner == perspective { 1.0 } else { -1.0 }
         }

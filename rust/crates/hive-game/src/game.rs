@@ -233,7 +233,7 @@ impl Game {
         self.repetition_history.push(key);
         let count = self.repetition_counts.entry(key).or_insert(0);
         *count = count.saturating_add(1);
-        if *count >= 3 {
+        if *count >= 2 {
             self.state = GameState::DrawByRepetition;
         }
     }
@@ -305,7 +305,7 @@ impl Game {
         self.position_key()
     }
 
-    /// The hash that triggered `DrawByRepetition` (its third occurrence was the last move played).
+    /// The hash that triggered `DrawByRepetition` (its second occurrence was the last move played).
     /// Returns `None` if the game did not end by threefold repetition.
     pub fn threefold_trigger_hash(&self) -> Option<u64> {
         if self.state == GameState::DrawByRepetition {
