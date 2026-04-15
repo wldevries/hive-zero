@@ -77,7 +77,7 @@ fn calculate_ucb_score<M: Copy>(node: &MctsNode<M>, c_puct: f32, parent_visits: 
 }
 
 #[inline]
-fn calculate_ucb_score_parts(
+pub fn calculate_ucb_score_parts(
     value: f32,
     prior: f32,
     visit_count: u32,
@@ -85,8 +85,13 @@ fn calculate_ucb_score_parts(
     parent_visits: u32,
 ) -> f32 {
     let parent = parent_visits as f32;
-    let exploration = c_puct * prior * parent.sqrt() / (1.0 + visit_count as f32);
+    let exploration = calculate_ucb_exploration(prior, visit_count, c_puct, parent);
     value + exploration
+}
+
+#[inline]
+pub fn calculate_ucb_exploration(prior: f32, visit_count: u32, c_puct: f32, parent_visits: f32) -> f32 {
+    c_puct * prior * parent_visits.sqrt() / (1.0 + visit_count as f32)
 }
 
 #[inline]
@@ -238,7 +243,7 @@ fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real
 }
 
 /// Terminal game value from a perspective.
-fn terminal_value(outcome: Outcome, perspective: Player) -> f32 {
+pub fn terminal_value(outcome: Outcome, perspective: Player) -> f32 {
     match outcome {
         Outcome::Draw | Outcome::Ongoing => 0.0,
         Outcome::WonBy(winner) => {
