@@ -4,7 +4,8 @@
 /// the parent is expanded. Expansion just stores (move, prior) edges.
 /// This avoids cloning 1000+ boards for Zertz's large move space.
 
-use core_game::game::{Game, Outcome, Player};
+use core_game::game::{Game, Player};
+use core_game::mcts::search::{calculate_ucb_exploration, terminal_value};
 
 use super::arena::{NodeArena, NodeId};
 use super::node::{Edge, MctsNode};
@@ -24,7 +25,6 @@ const VIRTUAL_LOSS: f32 = -1.0;
 fn pick_best_edge(arena: &NodeArena, node_id: NodeId, c_puct: f32, forced: bool) -> usize {
     let node = arena.get(node_id);
     let parent_visits = node.visit_count;
-    let sqrt_parent = (parent_visits as f32).sqrt();
     let n_total = parent_visits as f32;
 
     let mut best_idx = 0;
@@ -39,7 +39,7 @@ fn pick_best_edge(arena: &NodeArena, node_id: NodeId, c_puct: f32, forced: bool)
             None => (0, 0.0),
         };
 
-        let exploration = c_puct * edge.prior * sqrt_parent / (1.0 + child_visits as f32);
+        let exploration = calculate_ucb_exploration(edge.prior, child_visits, c_puct, parent_visits as f32);
 
         let score = if forced && child_visits > 0 {
             let k = 2.0f32;
@@ -194,16 +194,6 @@ fn correct_virtual_loss(arena: &mut NodeArena, node_id: NodeId, real_value: f32)
                 node_id = parent_id;
             }
             None => break,
-        }
-    }
-}
-
-/// Terminal game value from a player's perspective.
-fn terminal_value(outcome: Outcome, perspective: Player) -> f32 {
-    match outcome {
-        Outcome::Draw | Outcome::Ongoing => 0.0,
-        Outcome::WonBy(winner) => {
-            if winner == perspective { 1.0 } else { -1.0 }
         }
     }
 }

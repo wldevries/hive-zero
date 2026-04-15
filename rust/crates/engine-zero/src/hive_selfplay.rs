@@ -127,9 +127,9 @@ fn make_selfplay_progress<'py>(
     progress_fn: Option<&'py Bound<'py, PyAny>>,
 ) -> Option<search::SelfPlayProgressFn<'py>> {
     progress_fn.map(|progress_fn| {
-        Box::new(move |finished, total, active, total_moves, resigned, max_turn| {
+        Box::new(move |finished, total, active, total_moves, resigned, draws, max_turn| {
             progress_fn
-                .call1((finished, total, active, total_moves, resigned, max_turn))
+                .call1((finished, total, active, total_moves, resigned, draws, max_turn))
                 .ok();
             py.check_signals().ok();
         }) as search::SelfPlayProgressFn<'py>
@@ -167,6 +167,8 @@ fn into_py_selfplay_result(result: search::SelfPlayResult) -> PySelfPlayResult {
         wins_w: result.wins_w,
         wins_b: result.wins_b,
         draws: result.draws,
+        draws_timeout: result.draws_timeout,
+        draws_repetition: result.draws_repetition,
         resignations: result.resignations,
         total_moves: result.total_moves,
         full_search_turns: result.full_search_turns,
@@ -207,6 +209,8 @@ pub struct PySelfPlayResult {
     wins_w: u32,
     wins_b: u32,
     draws: u32,
+    draws_timeout: u32,
+    draws_repetition: u32,
     resignations: u32,
     total_moves: u32,
     full_search_turns: u32,
@@ -270,6 +274,10 @@ impl PySelfPlayResult {
     fn wins_b(&self) -> u32 { self.wins_b }
     #[getter]
     fn draws(&self) -> u32 { self.draws }
+    #[getter]
+    fn draws_timeout(&self) -> u32 { self.draws_timeout }
+    #[getter]
+    fn draws_repetition(&self) -> u32 { self.draws_repetition }
     #[getter]
     fn resignations(&self) -> u32 { self.resignations }
     #[getter]

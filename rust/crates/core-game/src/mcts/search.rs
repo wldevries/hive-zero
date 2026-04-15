@@ -77,7 +77,7 @@ fn calculate_ucb_score<M: Copy>(node: &MctsNode<M>, c_puct: f32, parent_visits: 
 }
 
 #[inline]
-fn calculate_ucb_score_parts(
+pub fn calculate_ucb_score_parts(
     value: f32,
     prior: f32,
     visit_count: u32,
@@ -85,8 +85,13 @@ fn calculate_ucb_score_parts(
     parent_visits: u32,
 ) -> f32 {
     let parent = parent_visits as f32;
-    let exploration = c_puct * prior * parent.sqrt() / (1.0 + visit_count as f32);
+    let exploration = calculate_ucb_exploration(prior, visit_count, c_puct, parent);
     value + exploration
+}
+
+#[inline]
+pub fn calculate_ucb_exploration(prior: f32, visit_count: u32, c_puct: f32, parent_visits: f32) -> f32 {
+    c_puct * prior * parent_visits.sqrt() / (1.0 + visit_count as f32)
 }
 
 #[inline]
@@ -238,7 +243,7 @@ fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real
 }
 
 /// Terminal game value from a perspective.
-fn terminal_value(outcome: Outcome, perspective: Player) -> f32 {
+pub fn terminal_value(outcome: Outcome, perspective: Player) -> f32 {
     match outcome {
         Outcome::Draw | Outcome::Ongoing => 0.0,
         Outcome::WonBy(winner) => {
@@ -267,19 +272,35 @@ fn expand_with_policy<G: GameEngine>(
         return;
     }
 
-    let mut total_prior = 0.0f32;
-    let mut first_child_id: Option<NodeId> = None;
-    let mut prev_child_id: Option<NodeId> = None;
-    let mut child_count = 0u16;
-
-    for &(enc, mv) in &indexed_moves {
-        let prior = match enc {
+    // Compute raw scores (logit or logit-sum) per legal move, then softmax
+    // over legal moves only. This is correct whether the policy vector contains
+    // raw logits (ORT path, TicTacToe) or pre-softmaxed probabilities (legacy
+    // Hive Python path) — equal inputs still produce equal priors via softmax.
+    let mut scores: Vec<f32> = indexed_moves.iter()
+        .map(|&(enc, _)| match enc {
             PolicyIndex::Single(idx) => policy[idx],
             PolicyIndex::Sum(a, b) => policy[a] + policy[b],
-        };
-        total_prior += prior;
+        })
+        .collect();
 
-        let child_id = arena.alloc(Some(node_id), mv, prior, child_turn);
+    let max_score = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mut total = 0.0f32;
+    for s in &mut scores {
+        *s = (*s - max_score).exp();
+        total += *s;
+    }
+    if total > 0.0 {
+        for s in &mut scores {
+            *s /= total;
+        }
+    }
+
+    let mut first_child_id: Option<NodeId> = None;
+    let mut prev_child_id: Option<NodeId> = None;
+    let child_count = indexed_moves.len() as u16;
+
+    for (i, &(_, mv)) in indexed_moves.iter().enumerate() {
+        let child_id = arena.alloc(Some(node_id), mv, scores[i], child_turn);
 
         if first_child_id.is_none() {
             first_child_id = Some(child_id);
@@ -288,17 +309,6 @@ fn expand_with_policy<G: GameEngine>(
             arena.get_mut(prev).next_sibling = Some(child_id);
         }
         prev_child_id = Some(child_id);
-        child_count += 1;
-    }
-
-    // Normalize priors
-    if total_prior > 0.0 {
-        let mut child_id = first_child_id;
-        while let Some(cid) = child_id {
-            let child = arena.get_mut(cid);
-            child.prior /= total_prior;
-            child_id = child.next_sibling;
-        }
     }
 
     arena.get_mut(node_id).first_child = first_child_id;
@@ -340,7 +350,7 @@ impl<G: GameEngine> MctsSearch<G> {
     }
 
     /// Reconstruct the game state at a given node by replaying moves from root.
-    fn reconstruct_game(&self, node_id: NodeId) -> G {
+    pub fn reconstruct_game(&self, node_id: NodeId) -> G {
         // Collect moves from node back to root
         let mut moves = Vec::new();
         let mut current = node_id;
