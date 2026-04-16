@@ -184,6 +184,12 @@ pub struct Game {
     repetition_history: Vec<u64>,
 }
 
+// Heuristic weights and scaling constants
+const HEURISTIC_DANGER_WEIGHT: f32 = 1.0;
+const HEURISTIC_ESCAPE_WEIGHT: f32 = 1.0;
+const HEURISTIC_MOBILITY_WEIGHT: f32 = 0.2;
+const HEURISTIC_TOTAL_SCALE: f32 = 1.0;
+
 impl Game {
     const ZOBRIST_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -532,30 +538,101 @@ impl Game {
         }
     }
 
+    pub fn queen_danger(&self, color: PieceColor) -> f32 {
+        let queen = Piece::new(color, PieceType::Queen, 1);
+        match self.board.piece_position(queen) {
+            None => 0.0,
+            Some(pos) => {
+                let neighbors = hex_neighbors(pos)
+                    .iter()
+                    .filter(|&&neighbor| self.board.is_occupied(neighbor))
+                    .count() as f32;
+                (neighbors / 6.0).min(1.0)
+            }
+        }
+    }
+
+    pub fn queen_escape(&self, color: PieceColor) -> f32 {
+        let queen = Piece::new(color, PieceType::Queen, 1);
+        match self.board.piece_position(queen) {
+            None => 0.0,
+            Some(pos) => {
+                if self.board.top_piece(pos) != Some(queen) {
+                    return 0.0;
+                }
+                if self.board.stack_height(pos) == 1 {
+                    let articulation_points = self.board.articulation_points();
+                    if articulation_points.contains(&pos) {
+                        return 0.0;
+                    }
+                }
+
+                let mut count = 0u32;
+                for &neighbor in hex_neighbors(pos).iter() {
+                    if !self.board.is_occupied(neighbor) && self.board.can_slide(pos, neighbor) {
+                        if hex_neighbors(neighbor)
+                            .iter()
+                            .any(|&adjacent| adjacent != pos && self.board.is_occupied(adjacent))
+                        {
+                            count += 1;
+                        }
+                    }
+                }
+                // Most perimeter pieces have exactly 2 slide options; 0 is "dead/pinned".
+                (count as f32 / 2.0).min(1.0)
+            }
+        }
+    }
+
+    pub fn piece_mobility(&self, color: PieceColor) -> f32 {
+        let on_board = self.board.pieces_on_board(color);
+        if on_board.is_empty() {
+            return 0.0;
+        }
+        if !self.queen_placed(color) {
+            return 0.0;
+        }
+
+        let articulation_points = self.board.articulation_points();
+        let mut mobile = 0u32;
+        // Rules require &mut Board to check move legality by temporary placement
+        let mut board_clone = self.board.clone();
+        for &piece in &on_board {
+            let moves = crate::rules::get_moves(piece, &mut board_clone, &articulation_points);
+            if !moves.is_empty() {
+                mobile += 1;
+            }
+        }
+        mobile as f32 / on_board.len() as f32
+    }
+
     /// Heuristic evaluation for unfinished games.
     /// Returns (white_score, black_score) in range [-1, 1].
-    /// Based on queen neighbor pressure and piece mobility.
+    /// Based on queen danger, escape mobility, and overall piece mobility.
     pub fn heuristic_value(&self) -> (f32, f32) {
-        let wq = Piece::new(PieceColor::White, PieceType::Queen, 1);
-        let bq = Piece::new(PieceColor::Black, PieceType::Queen, 1);
+        // Queen danger: neighbors/6 (0-1, higher is worse)
+        let w_danger = self.queen_danger(PieceColor::White);
+        let b_danger = self.queen_danger(PieceColor::Black);
 
-        // Queen neighbor counts (0-6, 6 = surrounded = loss)
-        let w_queen_neighbors = self.board.piece_position(wq).map_or(0, |pos| {
-            hex_neighbors(pos).iter().filter(|&&n| self.board.is_occupied(n)).count()
-        }) as f32;
-        let b_queen_neighbors = self.board.piece_position(bq).map_or(0, |pos| {
-            hex_neighbors(pos).iter().filter(|&&n| self.board.is_occupied(n)).count()
-        }) as f32;
+        // Queen escape: legal slide destinations / 2 (0-1, higher is better)
+        let w_escape = self.queen_escape(PieceColor::White);
+        let b_escape = self.queen_escape(PieceColor::Black);
 
-        // Queen danger: neighbors/6
-        let w_danger = w_queen_neighbors / 6.0;
-        let b_danger = b_queen_neighbors / 6.0;
+        // Piece mobility: fraction of pieces on board that can move (0-1, higher is better)
+        let w_mob = self.piece_mobility(PieceColor::White);
+        let b_mob = self.piece_mobility(PieceColor::Black);
 
-        // Score: opponent danger minus own danger, clamped to [-1, 1]
-        let w_score = (b_danger - w_danger).clamp(-1.0, 1.0);
-        let b_score = (w_danger - b_danger).clamp(-1.0, 1.0);
+        let rel_danger = b_danger - w_danger;
+        let rel_escape = w_escape - b_escape;
+        let rel_mobility = w_mob - b_mob;
 
-        (w_score, b_score)
+        let w_score = (HEURISTIC_TOTAL_SCALE * (
+            HEURISTIC_DANGER_WEIGHT * rel_danger +
+            HEURISTIC_ESCAPE_WEIGHT * rel_escape +
+            HEURISTIC_MOBILITY_WEIGHT * rel_mobility
+        )).clamp(-1.0, 1.0);
+
+        (w_score, -w_score)
     }
 
     pub fn move_history(&self) -> &[Move] {

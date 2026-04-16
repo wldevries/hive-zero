@@ -79,71 +79,6 @@ fn opposite_color(color: PieceColor) -> PieceColor {
     }
 }
 
-fn queen_danger(game: &Game, color: PieceColor) -> f32 {
-    let queen = Piece::new(color, PieceType::Queen, 1);
-    match game.board.piece_position(queen) {
-        None => 0.0,
-        Some(pos) => {
-            let neighbors = hex_neighbors(pos)
-                .iter()
-                .filter(|&&neighbor| game.board.is_occupied(neighbor))
-                .count() as f32;
-            (neighbors / 6.0).min(1.0)
-        }
-    }
-}
-
-fn queen_escape(game: &Game, color: PieceColor) -> f32 {
-    let queen = Piece::new(color, PieceType::Queen, 1);
-    match game.board.piece_position(queen) {
-        None => 0.0,
-        Some(pos) => {
-            if game.board.top_piece(pos) != Some(queen) {
-                return 0.0;
-            }
-            if game.board.stack_height(pos) == 1 {
-                let articulation_points = game.board.articulation_points();
-                if articulation_points.contains(&pos) {
-                    return 0.0;
-                }
-            }
-
-            let mut count = 0u32;
-            for &neighbor in hex_neighbors(pos).iter() {
-                if !game.board.is_occupied(neighbor) && game.board.can_slide(pos, neighbor) {
-                    if hex_neighbors(neighbor)
-                        .iter()
-                        .any(|&adjacent| adjacent != pos && game.board.is_occupied(adjacent))
-                    {
-                        count += 1;
-                    }
-                }
-            }
-            count as f32 / 6.0
-        }
-    }
-}
-
-fn piece_mobility(game: &mut Game, color: PieceColor) -> f32 {
-    let on_board = game.board.pieces_on_board(color);
-    if on_board.is_empty() {
-        return 0.0;
-    }
-    if !game.queen_placed(color) {
-        return 0.0;
-    }
-
-    let articulation_points = game.board.articulation_points();
-    let mut mobile = 0u32;
-    for &piece in &on_board {
-        let moves = crate::rules::get_moves(piece, &mut game.board, &articulation_points);
-        if !moves.is_empty() {
-            mobile += 1;
-        }
-    }
-    mobile as f32 / on_board.len() as f32
-}
-
 pub fn best_move_core(
     game: &Game,
     simulations: usize,
@@ -616,12 +551,12 @@ pub fn play_selfplay_core(
                 turn_color,
                 is_value_only,
                 policy_vector,
-                my_queen_danger: queen_danger(&games[game_index], turn_color),
-                opp_queen_danger: queen_danger(&games[game_index], opp_color),
-                my_queen_escape: queen_escape(&games[game_index], turn_color),
-                opp_queen_escape: queen_escape(&games[game_index], opp_color),
-                my_mobility: piece_mobility(&mut games[game_index], turn_color),
-                opp_mobility: piece_mobility(&mut games[game_index], opp_color),
+                my_queen_danger: games[game_index].queen_danger(turn_color),
+                opp_queen_danger: games[game_index].queen_danger(opp_color),
+                my_queen_escape: games[game_index].queen_escape(turn_color),
+                opp_queen_escape: games[game_index].queen_escape(opp_color),
+                my_mobility: games[game_index].piece_mobility(turn_color),
+                opp_mobility: games[game_index].piece_mobility(opp_color),
                 position_hash: games[game_index].position_hash(),
             });
 
