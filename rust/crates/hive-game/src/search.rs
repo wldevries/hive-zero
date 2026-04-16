@@ -755,10 +755,10 @@ pub fn play_selfplay_core(
             continue;
         }
 
-        // For threefold-repetition games, train up to and including the first occurrence
+        // For repetition-ended games, train up to and including the first occurrence
         // of the specific hash that triggered the draw.  The last entry in repetition_history
-        // is always the triggering hash (its third occurrence was just appended).
-        let truncate_at = if let Some(trigger) = games[game_index].threefold_trigger_hash() {
+        // is always the triggering hash (its second occurrence was just appended).
+        let truncate_at = if let Some(trigger) = games[game_index].repetition_trigger_hash() {
             let mut cutoff = 0; // if trigger never appears in MCTS history, skip game
             for (i, record) in histories[game_index].iter().enumerate() {
                 if record.position_hash == trigger {

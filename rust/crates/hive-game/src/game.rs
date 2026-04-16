@@ -228,7 +228,7 @@ impl Game {
         key
     }
 
-    fn record_position_and_check_threefold(&mut self) {
+    fn record_position_and_check_repetition(&mut self) {
         let key = self.position_key();
         self.repetition_history.push(key);
         let count = self.repetition_counts.entry(key).or_insert(0);
@@ -306,8 +306,8 @@ impl Game {
     }
 
     /// The hash that triggered `DrawByRepetition` (its second occurrence was the last move played).
-    /// Returns `None` if the game did not end by threefold repetition.
-    pub fn threefold_trigger_hash(&self) -> Option<u64> {
+    /// Returns `None` if the game did not end by position repetition.
+    pub fn repetition_trigger_hash(&self) -> Option<u64> {
         if self.state == GameState::DrawByRepetition {
             self.repetition_history.last().copied()
         } else {
@@ -456,7 +456,7 @@ impl Game {
 
         self.check_game_end();
         if self.state == GameState::InProgress {
-            self.record_position_and_check_threefold();
+            self.record_position_and_check_repetition();
         }
         Ok(())
     }
