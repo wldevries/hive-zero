@@ -338,8 +338,7 @@ impl Game {
         !self.reserves.has(queen)
     }
 
-    fn must_place_queen(&self) -> bool {
-        let color = self.turn_color;
+    fn must_place_queen_for(&self, color: PieceColor) -> bool {
         let queen = Piece::new(color, PieceType::Queen, 1);
         if !self.reserves.has(queen) {
             return false; // already placed
@@ -352,6 +351,10 @@ impl Game {
         };
 
         player_moves >= 3
+    }
+
+    fn must_place_queen(&self) -> bool {
+        self.must_place_queen_for(self.turn_color)
     }
 
     /// Return all valid moves as Vec<Move>.
@@ -585,25 +588,44 @@ impl Game {
     }
 
     pub fn piece_mobility(&self, color: PieceColor) -> f32 {
+        let mut mobile_count = 0u32;
         let on_board = self.board.pieces_on_board(color);
-        if on_board.is_empty() {
-            return 0.0;
-        }
-        if !self.queen_placed(color) {
+        let in_reserve = self.reserves.pieces_in_reserve(color);
+        let total_pieces = (on_board.len() + in_reserve.len()) as f32;
+
+        if total_pieces == 0.0 {
             return 0.0;
         }
 
-        let articulation_points = self.board.articulation_points();
-        let mut mobile = 0u32;
-        // Rules require &mut Board to check move legality by temporary placement
-        let mut board_clone = self.board.clone();
-        for &piece in &on_board {
-            let moves = crate::rules::get_moves(piece, &mut board_clone, &articulation_points);
-            if !moves.is_empty() {
-                mobile += 1;
+        // 1. Check movement mobility for pieces already on board
+        // (Only possible if queen is already placed and we're not forced to place queen)
+        if self.queen_placed(color) && !self.must_place_queen_for(color) {
+            let articulation_points = self.board.articulation_points();
+            let mut board_clone = self.board.clone();
+            for &piece in &on_board {
+                let moves = crate::rules::get_moves(piece, &mut board_clone, &articulation_points);
+                if !moves.is_empty() {
+                    mobile_count += 1;
+                }
             }
         }
-        mobile as f32 / on_board.len() as f32
+
+        // 2. Check placement mobility for pieces in reserve
+        if !in_reserve.is_empty() {
+            let placement_hexes = crate::rules::get_placements(color, &self.board);
+            if !placement_hexes.is_empty() {
+                if self.must_place_queen_for(color) {
+                    // Only the queen can be placed
+                    mobile_count += 1;
+                } else {
+                    // All pieces in reserve are "mobile" (can be placed)
+                    mobile_count += in_reserve.len() as u32;
+                }
+            }
+        }
+
+        // Normalize by total pieces available to this player
+        (mobile_count as f32 / total_pieces).min(1.0)
     }
 
     /// Heuristic evaluation for unfinished games.
