@@ -280,6 +280,12 @@ def main():
         help="Exclude positions from games that hit the move limit (timeouts) from training",
     )
     train_parser.add_argument(
+        "--use-heuristic",
+        action="store_true",
+        default=False,
+        help="Use heuristic value for draw/timeout training targets",
+    )
+    train_parser.add_argument(
         "--augment-symmetry",
         action="store_true",
         help="Apply random D6 hex symmetry augmentation during training (12x effective data)",
@@ -625,6 +631,7 @@ def main():
             comment=args.comment,
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
+            use_heuristic=args.use_heuristic,
         )
     else:
         # Default: UHP engine
