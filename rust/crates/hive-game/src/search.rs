@@ -235,6 +235,9 @@ pub fn play_selfplay_core(
 
     let mut full_search_turns = 0u32;
     let mut total_turns = 0u32;
+    // True once reroot has been called for a game; the arena is warm and no root
+    // inference is needed.  Reset to false when a game ends or plays a pass.
+    let mut search_warm = vec![false; num_games];
 
     while active.iter().any(|&is_active| is_active) {
         let mut rng = rand::rng();
@@ -311,6 +314,8 @@ pub fn play_selfplay_core(
             vec![true; num_search_games]
         };
 
+        // Encode boards for ALL mcts_games — needed for training data regardless of
+        // whether we do a fresh init or reuse the existing tree.
         let mut turn_board_offsets = Vec::with_capacity(num_search_games);
         let mut turn_reserve_offsets = Vec::with_capacity(num_search_games);
         for &game_index in &mcts_games {
@@ -328,25 +333,34 @@ pub fn play_selfplay_core(
             turn_reserve_offsets.push(reserve_offset);
         }
 
-        let mut flat_boards = Vec::with_capacity(num_search_games * board_size);
-        let mut flat_reserves = Vec::with_capacity(num_search_games * RESERVE_SIZE);
-        for index in 0..num_search_games {
-            flat_boards.extend_from_slice(
-                &board_buf[turn_board_offsets[index]..turn_board_offsets[index] + board_size],
-            );
-            flat_reserves.extend_from_slice(
-                &reserve_buf[turn_reserve_offsets[index]..turn_reserve_offsets[index] + RESERVE_SIZE],
-            );
-        }
-        let (init_policies, init_values) = eval_fn(&flat_boards, &flat_reserves, num_search_games)?;
+        // Fresh games need a root NN inference to seed the tree.
+        // Warm games already have an expanded root from the previous ply's reroot.
+        let fresh: Vec<usize> = (0..num_search_games)
+            .filter(|&i| !search_warm[mcts_games[i]])
+            .collect();
 
+        if !fresh.is_empty() {
+            let mut flat_boards = Vec::with_capacity(fresh.len() * board_size);
+            let mut flat_reserves = Vec::with_capacity(fresh.len() * RESERVE_SIZE);
+            for &fi in &fresh {
+                let bo = turn_board_offsets[fi];
+                let ro = turn_reserve_offsets[fi];
+                flat_boards.extend_from_slice(&board_buf[bo..bo + board_size]);
+                flat_reserves.extend_from_slice(&reserve_buf[ro..ro + RESERVE_SIZE]);
+            }
+            let (init_policies, _) = eval_fn(&flat_boards, &flat_reserves, fresh.len())?;
+            for (batch_i, &fi) in fresh.iter().enumerate() {
+                let game_index = mcts_games[fi];
+                let policy = &init_policies[batch_i * policy_size..(batch_i + 1) * policy_size];
+                searches[game_index].params = search_params.clone();
+                searches[game_index].init(&games[game_index], policy);
+            }
+        }
+
+        // Apply Dirichlet to full-search games (both fresh and warm).
         for (index, &game_index) in mcts_games.iter().enumerate() {
-            let search = &mut searches[game_index];
-            search.params = search_params.clone();
-            let policy = &init_policies[index * policy_size..(index + 1) * policy_size];
-            search.init(&games[game_index], policy);
             if is_full[index] {
-                search.apply_root_dirichlet(dir_alpha, dir_epsilon);
+                searches[game_index].apply_root_dirichlet(dir_alpha, dir_epsilon);
             }
         }
 
@@ -445,7 +459,7 @@ pub fn play_selfplay_core(
             }
 
             if let Some(threshold) = resign_threshold {
-                let value = init_values[index];
+                let value = searches[game_index].root_value();
                 if value < threshold && move_counts[game_index] >= resign_min_moves {
                     resign_counters[game_index] += 1;
                 } else {
@@ -573,11 +587,13 @@ pub fn play_selfplay_core(
             };
 
             let (mv, _) = &dist[move_index];
+            let mv = *mv;
             if mv.is_pass() {
                 games[game_index].play_pass();
+                search_warm[game_index] = false;
             } else {
                 games[game_index]
-                    .play_move(mv)
+                    .play_move(&mv)
                     .map_err(|e| e.to_string())?;
             }
 
@@ -585,6 +601,11 @@ pub fn play_selfplay_core(
             if games[game_index].is_game_over() || move_counts[game_index] >= max_moves {
                 active[game_index] = false;
                 finished_count += 1;
+                search_warm[game_index] = false;
+            } else if !mv.is_pass() {
+                // Reroot to the chosen move: preserves expanded nodes (saves NN calls)
+                // while resetting visit stats for a clean search next ply.
+                search_warm[game_index] = searches[game_index].reroot(mv);
             }
         }
 

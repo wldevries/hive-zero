@@ -19,6 +19,7 @@ fn run_mcts_demo(simulations: u32) {
         cap_source: &uniform_buf[PLACE_HEAD_SIZE..PLACE_HEAD_SIZE + CAP_HEAD_SIZE],
         cap_dest: &uniform_buf[PLACE_HEAD_SIZE + CAP_HEAD_SIZE..],
     };
+    // TODO: use search.reroot() between moves to carry forward warm visit statistics
     let mut search = mcts::search::MctsSearch::new(100_000);
     search.init(&board, &heads);
 

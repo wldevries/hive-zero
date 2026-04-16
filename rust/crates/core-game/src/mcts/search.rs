@@ -62,17 +62,27 @@ impl Default for SearchParams {
     }
 }
 
+/// Extract the Dirichlet epsilon from search params (0.0 if no noise).
+#[inline]
+fn dir_epsilon(params: &SearchParams) -> f32 {
+    match params.root_noise {
+        RootNoise::Dirichlet { epsilon, .. } => epsilon,
+        RootNoise::None => 0.0,
+    }
+}
+
 /// UCB score for child selection.
 /// `node.value()` is from the parent's player's perspective, so it is added
 /// directly without sign adjustment. See docs/mcts_value_convention.md.
 fn ucb_score<M: Copy>(node: &MctsNode<M>, parent_visits: u32, params: &SearchParams) -> f32 {
     let c_puct = calculate_cpuct(params, parent_visits);
-    calculate_ucb_score(node, c_puct, parent_visits)
+    let eps = dir_epsilon(params);
+    calculate_ucb_score(node, c_puct, parent_visits, eps)
 }
 
 #[inline]
-fn calculate_ucb_score<M: Copy>(node: &MctsNode<M>, c_puct: f32, parent_visits: u32) -> f32 {
-    calculate_ucb_score_parts(node.value(), node.prior, node.visit_count, c_puct, parent_visits)
+fn calculate_ucb_score<M: Copy>(node: &MctsNode<M>, c_puct: f32, parent_visits: u32, eps: f32) -> f32 {
+    calculate_ucb_score_parts(node.value(), node.prior(eps), node.visit_count, c_puct, parent_visits)
 }
 
 #[inline]
@@ -103,16 +113,17 @@ fn calculate_cpuct(params: &SearchParams, parent_visits: u32) -> f32 {
 }
 
 /// Select the best child by UCB score.
-fn best_child<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params: &SearchParams) -> NodeId {
+fn best_child<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params: &SearchParams, eps: f32) -> NodeId {
     let node = arena.get(node_id);
     let parent_visits = node.visit_count;
+    let c_puct = calculate_cpuct(params, parent_visits);
     let mut best_id = node.first_child.expect("no children");
-    let mut best_score = ucb_score(arena.get(best_id), parent_visits, params);
+    let mut best_score = calculate_ucb_score(arena.get(best_id), c_puct, parent_visits, eps);
 
     let mut current = arena.get(best_id).next_sibling;
     while let Some(child_id) = current {
         let child = arena.get(child_id);
-        let score = ucb_score(child, parent_visits, params);
+        let score = calculate_ucb_score(child, c_puct, parent_visits, eps);
         if score > best_score {
             best_score = score;
             best_id = child_id;
@@ -127,6 +138,7 @@ fn best_child<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params: &SearchPar
 /// If forced_playouts is true, at the root level, children with fewer visits
 /// than their forced minimum get infinite urgency (KataGo forced playouts).
 fn select_leaf<M: Copy>(arena: &NodeArena<M>, root: NodeId, params: &SearchParams) -> NodeId {
+    let eps = dir_epsilon(params);
     let mut node_id = root;
     let mut is_root = true;
     loop {
@@ -136,11 +148,11 @@ fn select_leaf<M: Copy>(arena: &NodeArena<M>, root: NodeId, params: &SearchParam
         }
         if is_root {
             node_id = match params.forced_exploration {
-                ForcedExploration::None => best_child(arena, node_id, params),
-                ForcedExploration::Soft { selection_k, .. } => best_child_with_forced(arena, node_id, params, selection_k),
+                ForcedExploration::None => best_child(arena, node_id, params, eps),
+                ForcedExploration::Soft { selection_k, .. } => best_child_with_forced(arena, node_id, params, eps, selection_k),
             };
         } else {
-            node_id = best_child(arena, node_id, params);
+            node_id = best_child(arena, node_id, params, eps);
         }
         is_root = false;
     }
@@ -150,18 +162,18 @@ fn select_leaf<M: Copy>(arena: &NodeArena<M>, root: NodeId, params: &SearchParam
 /// been visited at least once. A child with visit_count < n_forced gets
 /// infinite urgency so it is always selected first.
 /// n_forced(c) = k * sqrt(P_noised(c) * N_total), k=2
-fn best_child_with_forced<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params: &SearchParams, k: f32) -> NodeId {
+fn best_child_with_forced<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params: &SearchParams, eps: f32, k: f32) -> NodeId {
     let node = arena.get(node_id);
     let parent_visits = node.visit_count;
     let n_total = parent_visits as f32;
 
     let mut best_id = node.first_child.expect("no children");
-    let mut best_score = child_score_with_forced(arena.get(best_id), parent_visits, n_total, params, k);
+    let mut best_score = child_score_with_forced(arena.get(best_id), parent_visits, n_total, params, eps, k);
 
     let mut current = arena.get(best_id).next_sibling;
     while let Some(child_id) = current {
         let child = arena.get(child_id);
-        let score = child_score_with_forced(child, parent_visits, n_total, params, k);
+        let score = child_score_with_forced(child, parent_visits, n_total, params, eps, k);
         if score > best_score {
             best_score = score;
             best_id = child_id;
@@ -174,10 +186,10 @@ fn best_child_with_forced<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params
 
 /// Score for a root child with forced playout logic.
 /// If the child has been visited but is below its forced minimum, return infinity.
-fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_visits: u32, n_total: f32, params: &SearchParams, k: f32) -> f32 {
+fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_visits: u32, n_total: f32, params: &SearchParams, eps: f32, k: f32) -> f32 {
     let mut score = ucb_score(child, parent_visits, params);
     if child.visit_count > 0 {
-        let n_forced = (k * (child.prior * n_total).sqrt()) as u32;
+        let n_forced = (k * (child.prior(eps) * n_total).sqrt()) as u32;
         if child.visit_count < n_forced {
             score = f32::INFINITY;
         }
@@ -319,7 +331,7 @@ fn expand_with_policy<G: GameEngine>(
     let child_count = indexed_moves.len() as u16;
 
     for (i, &(_, mv)) in indexed_moves.iter().enumerate() {
-        let child_id = arena.alloc(Some(node_id), mv, scores[i], child_turn);
+        let child_id = arena.alloc(Some(node_id), mv, scores[i], child_turn); // scores[i] is policy_prior
 
         if first_child_id.is_none() {
             first_child_id = Some(child_id);
@@ -459,15 +471,17 @@ impl<G: GameEngine> MctsSearch<G> {
         }
     }
 
-    /// Apply Dirichlet noise to root children priors.
+    /// Apply Dirichlet noise to root children.
+    /// Stores raw noise samples in `dirichlet_noise`; `policy_prior` is untouched.
+    /// Also records (alpha, epsilon) in `self.params.root_noise` so that UCB's
+    /// `prior(dir_epsilon)` computation is always consistent with the stored noise.
     /// alpha: concentration parameter (e.g. 0.3 for Hive)
     /// epsilon: noise weight (e.g. 0.25)
     pub fn apply_root_dirichlet(&mut self, alpha: f32, epsilon: f32) {
         use rand_distr::Distribution;
         use rand_distr::multi::Dirichlet;
 
-        let root = self.arena.get(self.root);
-        let child_count = root.child_count as usize;
+        let child_count = self.arena.get(self.root).child_count as usize;
         if child_count == 0 {
             return;
         }
@@ -480,14 +494,50 @@ impl<G: GameEngine> MctsSearch<G> {
         let mut rng = rand::rng();
         let noise: Vec<f32> = dirichlet.sample(&mut rng);
 
+        // Record epsilon so UCB reads the same value during this search.
+        self.params.root_noise = RootNoise::Dirichlet { alpha, epsilon };
+
         let mut child_id = self.arena.get(self.root).first_child;
         let mut i = 0;
         while let Some(cid) = child_id {
             let child = self.arena.get_mut(cid);
-            child.prior = (1.0 - epsilon) * child.prior + epsilon * noise[i];
+            child.dirichlet_noise = noise[i];
             child_id = child.next_sibling;
             i += 1;
         }
+    }
+
+    /// Advance the root to the child reached by `mv`, preserving the subtree.
+    ///
+    /// Visit statistics (`visit_count`, `value_sum`) are kept intact so the next
+    /// search starts warm — `simulations` acts as an incremental budget on top of
+    /// whatever the subtree already accumulated.  Only `dirichlet_noise` on the
+    /// new root itself is cleared (cosmetic: the root's prior is never read by UCB).
+    /// Call `apply_root_dirichlet` afterwards to apply fresh noise to the new
+    /// root's children before searching.
+    ///
+    /// Returns `true` on success, `false` if `mv` was not among the root's children
+    /// (caller should fall back to a fresh `init`).
+    pub fn reroot(&mut self, mv: G::Move) -> bool
+    where
+        G::Move: PartialEq,
+    {
+        self.stashed_leaves.clear();
+
+        let mut current = self.arena.get(self.root).first_child;
+        while let Some(cid) = current {
+            let next = self.arena.get(cid).next_sibling;
+            if self.arena.get(cid).move_from_parent == mv {
+                let node = self.arena.get_mut(cid);
+                node.parent = None;
+                node.dirichlet_noise = 0.0; // root's prior is never read by UCB
+                self.root = cid;
+                self.root_game.as_mut().unwrap().play_move(&mv).ok();
+                return true;
+            }
+            current = next;
+        }
+        false
     }
 
     /// Get the best move by visit count.
@@ -548,6 +598,7 @@ impl<G: GameEngine> MctsSearch<G> {
         let n_total = parent_visits as f32;
 
         // Collect children: (move, raw_visits, prior, value)
+        let eps = dir_epsilon(&self.params);
         struct ChildInfo<M: Copy> {
             mv: M,
             visits: u32,
@@ -561,7 +612,7 @@ impl<G: GameEngine> MctsSearch<G> {
             children.push(ChildInfo {
                 mv: child.move_from_parent,
                 visits: child.visit_count,
-                prior: child.prior,
+                prior: child.prior(eps),
                 value: child.value(),
             });
             child_id = child.next_sibling;

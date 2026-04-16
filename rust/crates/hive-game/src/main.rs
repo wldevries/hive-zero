@@ -260,6 +260,7 @@ fn run_mcts(simulations: u32, batch_size: usize) {
     let mut game = Game::new();
     let ps = game.policy_size();
     let uniform_policy = vec![1.0 / ps as f32; ps];
+    // TODO: use search.reroot() between moves to carry forward warm visit statistics
     let mut search = MctsSearch::<Game>::new(100_000);
     search.init(&game, &uniform_policy);
 

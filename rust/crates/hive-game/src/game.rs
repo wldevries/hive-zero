@@ -35,7 +35,7 @@ impl GameState {
 /// A move in the game: (piece, from_pos, to_pos).
 /// from_pos is None for placement moves.
 /// piece is None for pass moves (to_pos is also meaningless).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Move {
     pub piece: Option<Piece>,
     pub from: Option<Hex>,

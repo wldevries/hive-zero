@@ -25,8 +25,8 @@ impl<M: Copy> NodeArena<M> {
     }
 
     /// Allocate a new node. Returns its ID.
-    pub fn alloc(&mut self, parent: Option<NodeId>, mv: M, prior: f32, turn_player: Player) -> NodeId {
-        let node = MctsNode::new(parent, mv, prior, turn_player);
+    pub fn alloc(&mut self, parent: Option<NodeId>, mv: M, policy_prior: f32, turn_player: Player) -> NodeId {
+        let node = MctsNode::new(parent, mv, policy_prior, turn_player);
         if let Some(id) = self.free_list.pop() {
             self.nodes[id as usize] = node;
             id
