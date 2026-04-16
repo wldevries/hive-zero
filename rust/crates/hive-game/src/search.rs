@@ -228,6 +228,7 @@ pub fn play_selfplay_core(
     random_opening_moves_min: u32,
     random_opening_moves_max: u32,
     skip_timeout_games: bool,
+    use_heuristic: bool,
     grid_size: usize,
     mut eval_fn: EvalFn<'_>,
     mut progress_fn: Option<SelfPlayProgressFn<'_>>,
@@ -734,18 +735,30 @@ pub fn play_selfplay_core(
                 }
                 GameState::DrawByRepetition => {
                     draws_repetition += 1;
-                    let (white_score, black_score) = games[game_index].heuristic_value();
+                    let (white_score, black_score) = if use_heuristic {
+                        games[game_index].heuristic_value()
+                    } else {
+                        (0.0, 0.0)
+                    };
                     (white_score, black_score, false)
                 }
                 GameState::Draw => {
                     draws += 1;
-                    let (white_score, black_score) = games[game_index].heuristic_value();
+                    let (white_score, black_score) = if use_heuristic {
+                        games[game_index].heuristic_value()
+                    } else {
+                        (0.0, 0.0)
+                    };
                     (white_score, black_score, false)
                 }
                 _ => {
                     // InProgress: game hit move cap (timeout)
                     draws_timeout += 1;
-                    let (white_score, black_score) = games[game_index].heuristic_value();
+                    let (white_score, black_score) = if use_heuristic {
+                        games[game_index].heuristic_value()
+                    } else {
+                        (0.0, 0.0)
+                    };
                     (white_score, black_score, false)
                 }
             }

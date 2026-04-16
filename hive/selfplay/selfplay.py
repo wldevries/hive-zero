@@ -68,6 +68,7 @@ class RustParallelSelfPlay:
         fixed_batch_size: int | None = None,
         random_opening_moves: int | tuple[int, int] = 0,
         skip_timeout_games: bool = False,
+        use_heuristic: bool = False,
         **kwargs,
     ):
         self.model = model
@@ -89,6 +90,7 @@ class RustParallelSelfPlay:
         self.fixed_batch_size = fixed_batch_size
         self.random_opening_moves = random_opening_moves
         self.skip_timeout_games = skip_timeout_games
+        self.use_heuristic = use_heuristic
 
     def _eval_fn(self):
         """Return a callable for Rust's GPU inference callback."""
@@ -163,6 +165,7 @@ class RustParallelSelfPlay:
             if isinstance(self.random_opening_moves, tuple)
             else self.random_opening_moves,
             skip_timeout_games=self.skip_timeout_games,
+            use_heuristic=self.use_heuristic,
             grid_size=grid_size,
         )
 
@@ -291,6 +294,7 @@ class SelfPlayTrainer:
         augment_symmetry: bool = False,
         comment: str = "",
         use_ort: bool = False,
+        use_heuristic: bool = False,
         value_loss_scale: float = 1.0,
     ):
         """Run the full training loop.
@@ -483,6 +487,7 @@ class SelfPlayTrainer:
                 fixed_batch_size=fixed_batch_size,
                 random_opening_moves=random_opening_moves,
                 skip_timeout_games=skip_timeout_games,
+                use_heuristic=use_heuristic,
             )
 
             ort_path = None
@@ -1106,6 +1111,12 @@ def main():
     parser.add_argument("--blocks", type=int, default=6)
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--parallel", type=int, default=8)
+    parser.add_argument(
+        "--use-heuristic",
+        action="store_true",
+        default=False,
+        help="Use heuristic value for draw/timeout training targets",
+    )
     args = parser.parse_args()
 
     trainer = SelfPlayTrainer(
@@ -1120,6 +1131,7 @@ def main():
         simulations=args.simulations,
         epochs_per_gen=args.epochs,
         batch_size=args.batch_size,
+        use_heuristic=args.use_heuristic,
     )
 
 

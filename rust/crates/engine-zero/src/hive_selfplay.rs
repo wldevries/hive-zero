@@ -29,6 +29,7 @@ struct SelfPlayConfig {
     random_opening_moves_min: u32,
     random_opening_moves_max: u32,
     skip_timeout_games: bool,
+    use_heuristic: bool,
     grid_size: usize,
     fixed_batch_size: Option<usize>,
 }
@@ -331,6 +332,7 @@ impl PySelfPlaySession {
         random_opening_moves_min = 0,
         random_opening_moves_max = 0,
         skip_timeout_games = false,
+        use_heuristic = false,
         grid_size = 23,
         fixed_batch_size = None,
     ))]
@@ -354,6 +356,7 @@ impl PySelfPlaySession {
         random_opening_moves_min: u32,
         random_opening_moves_max: u32,
         skip_timeout_games: bool,
+        use_heuristic: bool,
         grid_size: usize,
         fixed_batch_size: Option<usize>,
     ) -> Self {
@@ -378,6 +381,7 @@ impl PySelfPlaySession {
                 random_opening_moves_min,
                 random_opening_moves_max,
                 skip_timeout_games,
+                use_heuristic,
                 grid_size,
                 fixed_batch_size,
             },
@@ -443,6 +447,7 @@ impl PySelfPlaySession {
                 cfg.random_opening_moves_min,
                 cfg.random_opening_moves_max,
                 cfg.skip_timeout_games,
+                cfg.use_heuristic,
                 cfg.grid_size,
                 core_eval,
                 progress_core,
@@ -492,6 +497,7 @@ impl PySelfPlaySession {
                 cfg.random_opening_moves_min,
                 cfg.random_opening_moves_max,
                 cfg.skip_timeout_games,
+                cfg.use_heuristic,
                 cfg.grid_size,
                 core_eval,
                 progress_core,
