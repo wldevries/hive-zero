@@ -34,7 +34,7 @@ from ..nn.training import Trainer, YinshDataset
 LOG_HEADER = (
     "gen,epoch,"
     "simulations,games,positions,buffer,"
-    "wins_p1,wins_p2,draws,"
+    "wins_p1,wins_p2,draws,timeouts,"
     "avg_game_len,med_game_len,min_game_len,max_game_len,"
     "loss,policy_loss,value_loss,"
     "lr,duration_s,comment\n"
@@ -241,10 +241,12 @@ class SelfPlayTrainer:
             p1 = result.wins_p1
             p2 = result.wins_p2
             d = result.draws
+            to = result.timeouts
             lengths = list(result.game_lengths)
 
             print(
-                f"  Results: white={_cg(f'{p1}')}  black={_cr(f'{p2}')}  D/timeout={_cy(f'{d}')}"
+                f"  Results: white={_cg(f'{p1}')}  black={_cr(f'{p2}')}  "
+                f"draw={_cy(f'{d}')}  timeout={_cy(f'{to}')}"
             )
 
             if lengths:
@@ -315,7 +317,7 @@ class SelfPlayTrainer:
                     f.write(
                         f"{generation},{epoch + 1},"
                         f"{simulations},{games_per_gen},{result.num_samples},{len(dataset)},"
-                        f"{result.wins_p1},{result.wins_p2},{result.draws},"
+                        f"{result.wins_p1},{result.wins_p2},{result.draws},{result.timeouts},"
                         f"{avg_gl},{med_gl},{min_gl},{max_gl},"
                         f"{losses['total_loss']:.6f},"
                         f"{losses['policy_loss']:.6f},"

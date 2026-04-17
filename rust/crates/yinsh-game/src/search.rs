@@ -237,7 +237,12 @@ pub struct SelfPlayResult {
 
     pub wins_p1: u32,
     pub wins_p2: u32,
+    /// Real draws — game ended naturally with equal scores (marker exhaustion at 0-0,
+    /// 1-1, etc.). Distinguished from `timeouts`.
     pub draws: u32,
+    /// Games aborted because they hit the move cap (`max_moves`). These are NOT
+    /// real Yinsh draws and should be treated separately when tuning.
+    pub timeouts: u32,
     pub total_moves: u32,
     pub game_lengths: Vec<u32>,
     pub decisive_lengths: Vec<u32>,
@@ -471,9 +476,8 @@ pub fn play_selfplay_core(
                             result.sample_summaries.push(label);
                         }
                     }
-                    _ => {
-                        result.draws += 1;
-                    }
+                    Outcome::Draw => result.draws += 1,
+                    Outcome::Ongoing => result.timeouts += 1,
                 }
             }
         }

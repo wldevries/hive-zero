@@ -137,6 +137,7 @@ impl PyYinshSelfPlayResult {
     #[getter] fn wins_p1(&self) -> u32 { self.inner.wins_p1 }
     #[getter] fn wins_p2(&self) -> u32 { self.inner.wins_p2 }
     #[getter] fn draws(&self) -> u32 { self.inner.draws }
+    #[getter] fn timeouts(&self) -> u32 { self.inner.timeouts }
     #[getter] fn total_moves(&self) -> u32 { self.inner.total_moves }
     #[getter] fn game_lengths(&self) -> Vec<u32> { self.inner.game_lengths.clone() }
     #[getter] fn decisive_lengths(&self) -> Vec<u32> { self.inner.decisive_lengths.clone() }
