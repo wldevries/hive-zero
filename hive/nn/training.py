@@ -177,10 +177,24 @@ class HiveDataset(Dataset):
             padded_p = np.concatenate([pf, np.zeros((NUM_PLACE_CHANNELS, 1), dtype=np.float32)], axis=1)
             place = padded_p[:, perm].reshape(-1)
 
-            # Movement pairs: apply perm to src and dst cells
+            # Movement pairs: apply perm, filter pairs that map outside the grid
+            # (perm sentinel = gc for cells outside grid after rotation)
             if n_mv > 0:
-                mv_src[:n_mv] = perm[mv_src[:n_mv]]
-                mv_dst[:n_mv] = perm[mv_dst[:n_mv]]
+                new_src = perm[mv_src[:n_mv]]
+                new_dst = perm[mv_dst[:n_mv]]
+                valid = (new_src < gc) & (new_dst < gc)
+                n_valid = int(valid.sum())
+                if n_valid < n_mv:
+                    valid_probs = mv_prob[:n_mv][valid]
+                    prob_sum = valid_probs.sum()
+                    mv_src[:n_valid] = new_src[valid]
+                    mv_dst[:n_valid] = new_dst[valid]
+                    mv_prob[:n_valid] = valid_probs / prob_sum if prob_sum > 0 else valid_probs
+                    mv_prob[n_valid:n_mv] = 0.0
+                    n_mv = n_valid
+                else:
+                    mv_src[:n_mv] = new_src
+                    mv_dst[:n_mv] = new_dst
         else:
             board = board.copy()
             place = place.copy()
