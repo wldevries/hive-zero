@@ -10,16 +10,14 @@ graph TD
     CAT --> INPUT["(B, 28, 7, 7)"]
 
     INPUT --> IC["Input Conv2d(28 → C, 3x3) + BN + ReLU"]
-    IC --> RB["4 × ResBlock<br/>Conv3x3 + BN + ReLU + Conv3x3 + BN + skip"]
+    IC --> RB["N × ResBlock<br/>Conv3x3 + BN + ReLU + Conv3x3 + BN + skip"]
     RB --> TRUNK["Trunk Output<br/>(B, C, 7, 7)"]
 
     TRUNK --> PH_PLACE["Place Head<br/>Conv1x1(C → 4)"]
-    TRUNK --> PH_SRC["Cap Source Head<br/>Conv1x1(C → 1)"]
-    TRUNK --> PH_DST["Cap Dest Head<br/>Conv1x1(C → 1)"]
+    TRUNK --> PH_CAP["Cap Dir Head<br/>Conv1x1(C → 6)"]
 
     PH_PLACE --> PO_PLACE["Place logits<br/>(B, 196)"]:::output
-    PH_SRC --> PO_SRC["Cap source logits<br/>(B, 49)"]:::output
-    PH_DST --> PO_DST["Cap dest logits<br/>(B, 49)"]:::output
+    PH_CAP --> PO_CAP["Cap dir logits<br/>(B, 294)"]:::output
 
     TRUNK --> VC["Conv1x1(C → 1) + BN + ReLU"]
     VC --> VF["Flatten → (B, 49)"]
@@ -77,27 +75,29 @@ N × ResBlock:
 ```
 Output: `(B, C, 7, 7)`
 
-Current training config: **C=128, N=4** (4 residual blocks, 128 channels)
+Default model config: **C=64, N=6** (6 residual blocks, 64 channels)
 
-## Policy Heads (3 conv1x1 heads)
+## Policy Heads (2 conv1x1 heads)
 
-All heads operate directly on the trunk output.
+Both heads operate directly on the trunk output.
 
 | Head | Conv2d | Output | Purpose |
 |------|--------|--------|---------|
 | **Place** | `(C → 4, 1x1)` | `(B, 196)` | ch 0-2: place White/Grey/Black ball, ch 3: remove ring |
-| **Cap Source** | `(C → 1, 1x1)` | `(B, 49)` | which marble starts a capture hop |
-| **Cap Dest** | `(C → 1, 1x1)` | `(B, 49)` | where the marble lands |
+| **Cap Dir** | `(C → 6, 1x1)` | `(B, 294)` | one channel per hex direction (E=0, NE=1, NW=2, W=3, SW=4, SE=5); logit at source cell |
 
 ### Move prior computation (Rust MCTS)
 Scores are sums of head logits per move type, then softmax over legal moves:
 - `Place(color, pos, remove)`: `place[color, pos] + place[3, remove]`
 - `PlaceOnly(color, pos)`: `place[color, pos]`
-- `Capture(from, to)`: `cap_source[from] + cap_dest[to]`
-- Mid-capture continuation: `cap_dest[to]` only
+- `Capture(from, dir)`: `cap_dir[dir, from]` (direction of the 2-cell jump)
+- Mid-capture continuation: `cap_dir[dir, from]` (same — only first jump of chain is scored)
+
+### Symmetry augmentation
+D6 symmetry requires permuting both spatial positions and direction channels for the cap_dir head. Direction channel `d` maps to `sym.transform_dir(d)` under each of the 12 D6 symmetries.
 
 ### Policy loss
-Independent cross-entropy per head. Mid-capture turns only train cap_dest.
+Independent soft cross-entropy per head (place, cap_dir). Mid-capture turns only train the cap_dir head.
 
 ## Value Head
 
@@ -112,7 +112,7 @@ Linear(256 → 1) + tanh                   → (B, 1)
 Output range: `[-1, 1]`
 
 ### Value loss
-MSE: `(predicted - target)^2`, weighted 5x in total loss.
+MSE: `(predicted - target)^2`
 
 ## Total Loss
 ```
@@ -130,10 +130,20 @@ loss = policy_loss + 1.0 * value_loss
 | c_puct | 1.5 |
 | Playout cap randomization | Yes (KataGo-style) |
 
-## Parameter Count (C=128, N=4)
-- Input conv: 28 × 128 × 3 × 3 = 32,256
-- Per ResBlock: 2 × (128 × 128 × 3 × 3) = 294,912 → 4 blocks = 1,179,648
-- BatchNorm (trunk): (128 × 2) × (4+1) = 1,280
-- Policy heads: 128×4 + 128×1 + 128×1 + biases = 768 + 6 = 774
-- Value head: 128×1×1 + 49×256 + 256×1 + BN = 128 + 12,544 + 256 + 2 = 12,930
-- **Total: ~1.2M parameters**
+## Parameter Count (C=64, N=6)
+- Input conv: 28 × 64 × 3 × 3 = 16,128 + BN(64) = 16,256
+- Per ResBlock: 2 × (64 × 64 × 3 × 3) + BN ≈ 73,984 → 6 blocks = 443,904
+- Policy place: 64 × 4 + 4 = 260
+- Policy cap_dir: 64 × 6 + 6 = 390
+- Value head: Conv(64→1) + BN(1) + Linear(49→256) + Linear(256→1) ≈ 13,123
+- **Total: ~474K parameters**
+
+For C=128, N=4 (larger training config): ~1.2M parameters.
+
+## Training data storage
+The flat `POLICY_SIZE = 4440` format is used only for storing MCTS visit distributions, **not** as NN output:
+- `[0, 4107)`: Place — `color * 37² + place_at * 37 + remove`
+- `[4107, 4218)`: PlaceOnly — `4107 + color * 37 + place_at`
+- `[4218, 4440)`: Capture — `4218 + direction * 37 + from`
+
+Visit distributions in this flat format are marginalized at training time into per-head targets (`place` and `cap_dir`).

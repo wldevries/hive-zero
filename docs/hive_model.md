@@ -15,11 +15,11 @@ graph TD
 
     TRUNK --> PC["Conv1x1(C → C) + BN + ReLU"]
     PC --> PPL["Conv1x1(C → 5)<br/>place head (B, 5, G, G)"]
-    PC --> PSR["Conv1x1(C → 1)<br/>src head (B, 1, G, G)"]
-    PC --> PDT["Conv1x1(C → 5)<br/>dst head (B, 5, G, G)"]
-    PPL --> PFLAT["Concat + Flatten<br/>(B, 11·G·G)"]:::output
-    PSR --> PFLAT
-    PDT --> PFLAT
+    PC --> PQ["Conv1x1(C → D)<br/>Q head (B, D, G, G)"]
+    PC --> PK["Conv1x1(C → D)<br/>K head (B, D, G, G)"]
+    PPL --> PFLAT["Concat + Flatten<br/>(B, (5+2D)·G²)"]:::output
+    PQ --> PFLAT
+    PK --> PFLAT
 
     TRUNK --> VC["Conv1x1(C → 1) + BN + ReLU"]
     VC --> VF["Flatten → (B, G·G)"]
@@ -80,36 +80,40 @@ Output: `(B, C, G, G)`
 
 Default config: **C=128, N=10** (10 residual blocks, 128 channels)
 
-## Policy Head
+## Policy Head (bilinear Q·K)
 
-Three separate output heads off a shared conv+BN layer, concatenated into a flat vector:
+Three output heads off a shared conv+BN layer, concatenated into a flat vector:
 
 ```
 Conv2d(C -> C, 1x1) + BN + ReLU           -> (B, C, G, G)
   ├── Conv2d(C -> 5, 1x1)  place head     -> (B, 5, G, G)   [placement: piece_type × dest]
-  ├── Conv2d(C -> 1, 1x1)  src head       -> (B, 1, G, G)   [movement source]
-  └── Conv2d(C -> 5, 1x1)  dst head       -> (B, 5, G, G)   [movement dest: piece_type × dest]
-Concat + Flatten                          -> (B, 11*G*G)
+  ├── Conv2d(C -> D, 1x1)  Q head         -> (B, D, G, G)   [movement source embeddings]
+  └── Conv2d(C -> D, 1x1)  K head         -> (B, D, G, G)   [movement dest embeddings]
+Concat + Flatten                          -> (B, (5+2D)*G²)
 ```
 
-### Policy layout (flat vector of size 11·G·G)
+**D = BILINEAR_DIM = 8** (embedding dimension for Q·K movement head)
+
+### Policy layout (flat vector of size (5+2D)·G²)
 
 | Range | Head | Content |
 |-------|------|---------|
 | `[0 .. 5·G²)` | place | Placement logits: `type_idx * G² + dest_cell` |
-| `[5·G² .. 6·G²)` | src | Movement source logit: `src_cell` |
-| `[6·G² .. 11·G²)` | dst | Movement dest logit: `type_idx * G² + dest_cell` |
+| `[5·G² .. (5+D)·G²)` | Q | Source embeddings: `d * G² + src_cell` for d in [0, D) |
+| `[(5+D)·G² .. (5+2D)·G²)` | K | Dest embeddings: `d * G² + dst_cell` for d in [0, D) |
+
+Default policy size (D=8, G=17): 21 × 17 × 17 = **6,069**
 
 ### MCTS prior computation
-- **Placement**(type, dest): `prior = policy[type * G² + dest_cell]`
-- **Movement**(src, piece, dest): `prior = policy[5*G² + src_cell] + policy[6*G² + type*G² + dest_cell]`
+- **Placement**(type, dest): `prior = place_logits[type * G² + dest_cell]`
+- **Movement**(src, dest): `prior = Q[src] · K[dst] / sqrt(D)`
+  where `Q[src] = (policy[5·G² + 0·G² + src], ..., policy[5·G² + (D-1)·G² + src])` — a D-dim vector.
 
-The type-conditioned destination allows the network to independently learn that "ant arrives here" vs "queen arrives here" have different strategic value.
-
-Default policy size: 11 × 23 × 23 = **5,819**
+The bilinear formulation allows arbitrary rank-D joint distributions over (src, dst) pairs, eliminating the rank-1 independence assumption of the old factorized head.
 
 ### Policy loss
-Three independent soft cross-entropy losses (place head, src head, dst head), summed. Zero-target entries contribute zero loss. Movement training data is marginalized: visit counts accumulate to both the src cell and the (type, dest) cell.
+- **Placement**: soft cross-entropy over the 5·G² placement logits.
+- **Movement**: soft cross-entropy over bilinear scores for all legal (src, dst) pairs. Training targets are sparse joint visit-count distributions — **not** marginalized into separate src/dst slices. Positions with no movement (pure placement turn) contribute zero movement loss.
 
 ## Value Head
 
@@ -164,11 +168,11 @@ loss = policy_loss + value_loss + aux_loss
 | c_puct | 1.5 |
 | Playout cap randomization | Yes (KataGo-style) |
 
-## Parameter Count (C=128, N=10, G=17)
-- Input conv: 34 x 128 x 3 x 3 = 39,168
-- Per ResBlock: 2 x (128 x 128 x 3 x 3) = 294,912 → 10 blocks = 2,949,120
-- BatchNorm (trunk): (128 x 2) x (10+1) = 2,816
-- Policy head: 128x128x1 + BN(128) + Conv(128→5) + Conv(128→1) + Conv(128→5) = 16,384 + 256 + 645 + 129 + 645 = 18,059
-- Value head: 128x1x1 + 289x256 + 256x1 + BN = 128 + 73,984 + 256 + 2 = 74,370
-- Aux head: 128x1x1 + 289x64 + 64x6 + BN = 128 + 18,496 + 384 + 2 = 19,010
-- **Total: ~3.1M parameters** (input conv 39,168 vs old 33,408; difference negligible at scale)
+## Parameter Count (C=128, N=10, G=17, D=8)
+- Input conv: 34 × 128 × 3 × 3 = 39,168
+- Per ResBlock: 2 × (128 × 128 × 3 × 3) = 294,912 → 10 blocks = 2,949,120
+- BatchNorm (trunk): (128 × 2) × (10+1) = 2,816
+- Policy head: Conv(128→128×1×1)=16,384 + BN(128)=256 + place(128→5)=645 + Q(128→8)=1,032 + K(128→8)=1,032 = 19,349
+- Value head: 128×1×1 + 289×256 + 256×1 + BN = 128 + 73,984 + 256 + 2 = 74,370
+- Aux head: 128×1×1 + 289×64 + 64×6 + BN = 128 + 18,496 + 384 + 2 = 19,010
+- **Total: ~3.1M parameters**
