@@ -106,8 +106,8 @@ balanced outcomes are harder to predict — fix is higher simulation count.
 ## Package Manager
 Use `uv` for all dependency management. Do NOT use pip directly.
 ```bash
-uv run python main.py             # Start UHP engine (default)
-uv run python main.py train       # Run self-play training
+uv run hive                       # Start UHP engine (default)
+uv run hive train                 # Run self-play training
 uv run python -m pytest tests/    # Run tests
 ```
 
@@ -116,7 +116,7 @@ The Rust code is built as a PyO3 extension module via maturin. The package name 
 but the module is imported as `engine_zero` (set via `[lib] name` in Cargo.toml).
 
 `uv run` automatically rebuilds when Rust source files change (via `cache-keys` in pyproject.toml).
-Just run `uv run python main.py ...` after editing — no manual rebuild needed.
+Just run `uv run hive ...` after editing — no manual rebuild needed.
 
 ## Testing
 ```bash
