@@ -6,7 +6,7 @@ export class ZertzGame {
     [Symbol.dispose](): void;
     /**
      * NN-guided MCTS. eval_fn receives (boards, reserves, n) and returns
-     * [place, cap_source, cap_dest, value] as Float32Arrays.
+     * [place, cap_dir, value] as Float32Arrays.
      * Run this in a Web Worker to avoid blocking the main thread.
      */
     best_move(eval_fn: Function, simulations: number, c_puct: number): string;
@@ -15,7 +15,7 @@ export class ZertzGame {
      *
      * `eval_fn(boards: Float32Array, reserves: Float32Array, n: number)`
      * must return a **Promise** resolving to
-     * `[place: Float32Array, cap_source: Float32Array, cap_dest: Float32Array, value: Float32Array]`.
+     * `[place: Float32Array, cap_dir: Float32Array, value: Float32Array]`.
      *
      * Returns a `Promise<{move: string, value: number}>`.
      * Run this in a Web Worker or via `await` in an async context.
@@ -98,7 +98,6 @@ export interface InitOutput {
     readonly __wbg_zertzgame_free: (a: number, b: number) => void;
     readonly board_cell_count: () => number;
     readonly board_flat_size: () => number;
-    readonly cap_head_size: () => number;
     readonly hex_coords: () => [number, number];
     readonly place_head_size: () => number;
     readonly reserve_size: () => number;
@@ -116,8 +115,9 @@ export interface InitOutput {
     readonly zertzgame_play: (a: number, b: number, c: number) => [number, number];
     readonly zertzgame_supply_counts: (a: number) => [number, number];
     readonly zertzgame_valid_moves: (a: number) => any;
-    readonly wasm_bindgen__convert__closures_____invoke__h16d11d9a0c5bd96a: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen__convert__closures_____invoke__h31b189bcbc434bb6: (a: number, b: number, c: any, d: any) => void;
+    readonly cap_head_size: () => number;
+    readonly wasm_bindgen__convert__closures_____invoke__hd10fdb5c86eeeeff: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen__convert__closures_____invoke__h013024c876e5b773: (a: number, b: number, c: any, d: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

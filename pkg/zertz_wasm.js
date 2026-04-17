@@ -13,7 +13,7 @@ export class ZertzGame {
     }
     /**
      * NN-guided MCTS. eval_fn receives (boards, reserves, n) and returns
-     * [place, cap_source, cap_dest, value] as Float32Arrays.
+     * [place, cap_dir, value] as Float32Arrays.
      * Run this in a Web Worker to avoid blocking the main thread.
      * @param {Function} eval_fn
      * @param {number} simulations
@@ -43,7 +43,7 @@ export class ZertzGame {
      *
      * `eval_fn(boards: Float32Array, reserves: Float32Array, n: number)`
      * must return a **Promise** resolving to
-     * `[place: Float32Array, cap_source: Float32Array, cap_dest: Float32Array, value: Float32Array]`.
+     * `[place: Float32Array, cap_dir: Float32Array, value: Float32Array]`.
      *
      * Returns a `Promise<{move: string, value: number}>`.
      * Run this in a Web Worker or via `await` in an async context.
@@ -321,7 +321,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return wasm_bindgen__convert__closures_____invoke__h31b189bcbc434bb6(a, state0.b, arg0, arg1);
+                        return wasm_bindgen__convert__closures_____invoke__h013024c876e5b773(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -383,8 +383,8 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 42, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h16d11d9a0c5bd96a);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 44, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hd10fdb5c86eeeeff);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0) {
@@ -413,15 +413,15 @@ function __wbg_get_imports() {
     };
 }
 
-function wasm_bindgen__convert__closures_____invoke__h16d11d9a0c5bd96a(arg0, arg1, arg2) {
-    const ret = wasm.wasm_bindgen__convert__closures_____invoke__h16d11d9a0c5bd96a(arg0, arg1, arg2);
+function wasm_bindgen__convert__closures_____invoke__hd10fdb5c86eeeeff(arg0, arg1, arg2) {
+    const ret = wasm.wasm_bindgen__convert__closures_____invoke__hd10fdb5c86eeeeff(arg0, arg1, arg2);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
 }
 
-function wasm_bindgen__convert__closures_____invoke__h31b189bcbc434bb6(arg0, arg1, arg2, arg3) {
-    wasm.wasm_bindgen__convert__closures_____invoke__h31b189bcbc434bb6(arg0, arg1, arg2, arg3);
+function wasm_bindgen__convert__closures_____invoke__h013024c876e5b773(arg0, arg1, arg2, arg3) {
+    wasm.wasm_bindgen__convert__closures_____invoke__h013024c876e5b773(arg0, arg1, arg2, arg3);
 }
 
 const ZertzGameFinalization = (typeof FinalizationRegistry === 'undefined')

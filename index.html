@@ -28,6 +28,7 @@ svg { display: block; }
   #panel-marbles{ grid-column: 1 / -1; }
   #panel-log    { grid-column: 1 / -1; }
   #panel-ai     { grid-column: 1 / -1; }
+  #panel-eval   { grid-column: 1 / -1; }
   #panel-syslog { grid-column: 1 / -1; }
   #play-log-wrap { max-height: 200px; }
 }
@@ -104,6 +105,16 @@ svg { display: block; }
 .model-badge.none     { background: #2a2a3a; color: #8899bb; }
 
 #value-row { display: flex; align-items: center; justify-content: space-between; font-size: 0.8rem; color: #8899bb; margin-top: 6px; display: none; }
+
+/* Eval graph */
+#eval-svg { display: block; width: 100%; height: 72px; }
+
+/* Captured marble dots in play log */
+.mb { display: inline-block; width: 7px; height: 7px; border-radius: 50%; vertical-align: middle; margin: 0 1px; }
+.mb-w { background: #d0d0d0; }
+.mb-g { background: #777; }
+.mb-b { background: #3a3a3a; outline: 1px solid #666; }
+.captured-balls { margin-left: 4px; }
 #value-bar-wrap { flex: 1; margin-left: 8px; height: 6px; background: #0d1b30; border-radius: 3px; overflow: hidden; }
 #value-bar { height: 100%; width: 50%; background: #60d090; border-radius: 3px; transition: width 0.3s, background 0.3s; }
 
@@ -254,6 +265,11 @@ svg { display: block; }
     <button id="return-btn">&#8617; Return to current</button>
   </div>
 
+  <div class="panel" id="panel-eval">
+    <h2>Evaluation</h2>
+    <svg id="eval-svg" viewBox="0 0 200 72" preserveAspectRatio="none"></svg>
+  </div>
+
   <div class="panel" id="panel-ai">
     <h2>AI</h2>
 
@@ -367,6 +383,7 @@ let pendingCaptureMoves = [];
 // ── play log history ──────────────────────────────────────────────────────────
 let moveHistory = [];   // [{ player, displayStr, rawMoves: string[] }, ...]
 let historyView = null; // null = live; or { turnIdx, cellStates, supply, caps, outcome, player, lastMoveInfo }
+let evalPoints  = [];   // [{ turnNum, p1Adv }] — turnNum = moveHistory.length when recorded
 
 // ── SVG setup ─────────────────────────────────────────────────────────────────
 const svgNS = 'http://www.w3.org/2000/svg';
@@ -588,6 +605,7 @@ function updateBoard() {
     : `AI Move${aiLabel ? ' (' + aiLabel + ')' : ''}`;
 
   renderLastMove(isHistory ? historyView.lastMoveInfo : undefined);
+  renderEvalGraph();
 }
 
 // ── interaction ───────────────────────────────────────────────────────────────
@@ -624,13 +642,13 @@ function playMove(mv) {
         return;
       }
       lastMoveInfo = computeLastMoveInfo(pendingCaptureMoves);
-      logMove(capChainPlayer, formatCaptureChain(pendingCaptureMoves), pendingCaptureMoves.map(p => p.mv));
+      logMove(capChainPlayer, formatCaptureChain(pendingCaptureMoves), pendingCaptureMoves.map(p => p.mv), lastMoveInfo?.capturedBalls);
       pendingCaptureMoves = [];
       capChainPlayer = null;
     } else {
       pendingCaptureMoves = [];
       lastMoveInfo = computeLastMoveInfo([{ mv, statesBefore }]);
-      logMove(playerBefore, mv.trim(), [mv.trim()]);
+      logMove(playerBefore, mv.trim(), [mv.trim()], lastMoveInfo?.capturedBalls);
     }
     resetPhase();
     handleMidCapture();
@@ -826,12 +844,8 @@ async function ortEvalBatch(boards, reserves, n) {
   const boardTensor   = new ort.Tensor('float32', boardData,   [n, BOARD_CHANNELS, GRID, GRID]);
   const reserveTensor = new ort.Tensor('float32', reserveData, [n, RES_SIZE]);
   const outputs = await ortSession.run({ board: boardTensor, reserve: reserveTensor });
-  return [
-    new Float32Array(outputs.place.data.buffer,      outputs.place.data.byteOffset,      outputs.place.data.byteLength      / 4),
-    new Float32Array(outputs.cap_source.data.buffer,  outputs.cap_source.data.byteOffset,  outputs.cap_source.data.byteLength  / 4),
-    new Float32Array(outputs.cap_dest.data.buffer,    outputs.cap_dest.data.byteOffset,    outputs.cap_dest.data.byteLength    / 4),
-    new Float32Array(outputs.value.data.buffer,       outputs.value.data.byteOffset,       outputs.value.data.byteLength       / 4),
-  ];
+  const toF32 = (t) => new Float32Array(t.data.buffer, t.data.byteOffset, t.data.byteLength / 4);
+  return [toF32(outputs.place), toF32(outputs.cap_dir), toF32(outputs.value)];
 }
 
 // ── model loading ─────────────────────────────────────────────────────────────
@@ -890,6 +904,107 @@ function showValue(v) {
   label.textContent = (v >= 0 ? '+' : '') + v.toFixed(2);
 }
 
+// ── eval graph ────────────────────────────────────────────────────────────────
+function recordEval(turnNum, p1Adv) {
+  evalPoints.push({ turnNum, p1Adv });
+}
+
+function renderEvalGraph() {
+  const svgEl = document.getElementById('eval-svg');
+  if (!svgEl) return;
+  const W = 200, H = 72, PAD = 5;
+  const iW = W - 2 * PAD, iH = H - 2 * PAD;
+  const zeroY = PAD + iH / 2;
+  svgEl.innerHTML = '';
+
+  const bg = document.createElementNS(svgNS, 'rect');
+  bg.setAttribute('x', 0); bg.setAttribute('y', 0);
+  bg.setAttribute('width', W); bg.setAttribute('height', H);
+  bg.setAttribute('fill', '#0d1b30');
+  svgEl.appendChild(bg);
+
+  const zl = document.createElementNS(svgNS, 'line');
+  zl.setAttribute('x1', PAD); zl.setAttribute('y1', zeroY);
+  zl.setAttribute('x2', PAD + iW); zl.setAttribute('y2', zeroY);
+  zl.setAttribute('stroke', '#2a3a5e'); zl.setAttribute('stroke-width', '1');
+  svgEl.appendChild(zl);
+
+  const mkTxt = (x, y, txt, fill) => {
+    const t = document.createElementNS(svgNS, 'text');
+    t.setAttribute('x', x); t.setAttribute('y', y);
+    t.setAttribute('fill', fill); t.setAttribute('font-size', '7');
+    t.setAttribute('font-family', 'system-ui,sans-serif');
+    t.textContent = txt; return t;
+  };
+  svgEl.appendChild(mkTxt(PAD + 1, PAD + 8, 'P1', '#446688'));
+  svgEl.appendChild(mkTxt(PAD + 1, PAD + iH - 2, 'P2', '#664433'));
+
+  if (evalPoints.length === 0) return;
+
+  const maxTurn = Math.max(moveHistory.length, evalPoints[evalPoints.length - 1].turnNum + 1, 1);
+  const toXY = (turnNum, p1Adv) => ({
+    x: PAD + (turnNum / maxTurn) * iW,
+    y: PAD + ((1 - p1Adv) / 2) * iH,
+  });
+  const pts = evalPoints.map(ep => toXY(ep.turnNum, ep.p1Adv));
+
+  if (pts.length >= 2) {
+    const uid = 'eg' + Math.random().toString(36).slice(2, 8);
+    const defs = document.createElementNS(svgNS, 'defs');
+    [[`${uid}a`, 0, zeroY], [`${uid}b`, zeroY, H - zeroY]].forEach(([id, y, h]) => {
+      const cp = document.createElementNS(svgNS, 'clipPath'); cp.id = id;
+      const r = document.createElementNS(svgNS, 'rect');
+      r.setAttribute('x', 0); r.setAttribute('y', y);
+      r.setAttribute('width', W); r.setAttribute('height', h);
+      cp.appendChild(r); defs.appendChild(cp);
+    });
+    svgEl.appendChild(defs);
+
+    const closedPts = [
+      `${pts[0].x.toFixed(1)},${zeroY.toFixed(1)}`,
+      ...pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`),
+      `${pts[pts.length - 1].x.toFixed(1)},${zeroY.toFixed(1)}`,
+    ].join(' ');
+    [['a', '#1a4080'], ['b', '#7a2a10']].forEach(([s, fill]) => {
+      const poly = document.createElementNS(svgNS, 'polygon');
+      poly.setAttribute('points', closedPts); poly.setAttribute('fill', fill);
+      poly.setAttribute('opacity', '0.7'); poly.setAttribute('clip-path', `url(#${uid}${s})`);
+      svgEl.appendChild(poly);
+    });
+
+    const pl = document.createElementNS(svgNS, 'polyline');
+    pl.setAttribute('points', pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' '));
+    pl.setAttribute('fill', 'none'); pl.setAttribute('stroke', '#7799cc');
+    pl.setAttribute('stroke-width', '1.5'); pl.setAttribute('stroke-linejoin', 'round');
+    svgEl.appendChild(pl);
+  }
+
+  // Current-position marker
+  const curTurn = historyView !== null ? historyView.turnIdx + 1 : moveHistory.length;
+  const markerX = PAD + (curTurn / Math.max(moveHistory.length, 1)) * iW;
+  const ml = document.createElementNS(svgNS, 'line');
+  ml.setAttribute('x1', markerX.toFixed(1)); ml.setAttribute('y1', PAD);
+  ml.setAttribute('x2', markerX.toFixed(1)); ml.setAttribute('y2', PAD + iH);
+  ml.setAttribute('stroke', '#556688'); ml.setAttribute('stroke-width', '1');
+  ml.setAttribute('stroke-dasharray', '3,2');
+  svgEl.appendChild(ml);
+
+  // Dot at the nearest recorded eval to the current turn
+  if (evalPoints.length > 0) {
+    const nearest = evalPoints.reduce((b, e) =>
+      Math.abs(e.turnNum - curTurn) < Math.abs(b.turnNum - curTurn) ? e : b);
+    if (Math.abs(nearest.turnNum - curTurn) <= 1) {
+      const { x, y } = toXY(nearest.turnNum, nearest.p1Adv);
+      const dot = document.createElementNS(svgNS, 'circle');
+      dot.setAttribute('cx', x.toFixed(1)); dot.setAttribute('cy', y.toFixed(1));
+      dot.setAttribute('r', '3');
+      dot.setAttribute('fill', nearest.p1Adv >= 0 ? '#7bbfff' : '#ff9966');
+      dot.setAttribute('stroke', '#0d1b30'); dot.setAttribute('stroke-width', '1.5');
+      svgEl.appendChild(dot);
+    }
+  }
+}
+
 // ── AI ────────────────────────────────────────────────────────────────────────
 let aiRunning = false;
 
@@ -907,6 +1022,7 @@ async function triggerAiMove() {
 
   const aiPlayer = humanPlayer !== null ? (1 - humanPlayer) : game.next_player();
   const aiMoves  = [];
+  let firstIter = true;
   try {
     do {
       const t0 = performance.now();
@@ -918,6 +1034,7 @@ async function triggerAiMove() {
         const result = await game.best_move_nn(ortEvalBatch, sims, 1.5);
         mv = result.move;
         showValue(result.value);
+        if (firstIter) recordEval(moveHistory.length, (aiPlayer === 0 ? 1 : -1) * result.value);
         const ms = (performance.now() - t0).toFixed(0);
         mv = applyColorPreference(game.valid_moves(), mv);
         log(`AI (NN): ${mv}  val=${result.value.toFixed(2)}  ${sims} sims  ${ms}ms`);
@@ -932,6 +1049,7 @@ async function triggerAiMove() {
       game.play(mv);
       aiMoves.push({ mv, statesBefore });
       resetPhase();
+      firstIter = false;
     } while (game.is_mid_capture());
 
     lastMoveInfo = computeLastMoveInfo(aiMoves);
@@ -940,7 +1058,16 @@ async function triggerAiMove() {
     const moveStr = aiMoves[0].mv.trim().startsWith('CAP')
       ? formatCaptureChain(aiMoves)
       : aiMoves[0].mv.trim();
-    logMove(aiPlayer, moveStr, aiMoves.map(a => a.mv));
+    logMove(aiPlayer, moveStr, aiMoves.map(a => a.mv), lastMoveInfo?.capturedBalls);
+
+    // Quick 1-sim eval for the position after the AI's move (= what the human now faces)
+    if (ortSession !== null && game.outcome() === 'ongoing') {
+      try {
+        const qr = await game.best_move_nn(ortEvalBatch, 1, 1.5);
+        const np = game.next_player();
+        recordEval(moveHistory.length, (np === 0 ? 1 : -1) * qr.value);
+      } catch (_) {}
+    }
 
     updateBoard();
   } catch (e) {
@@ -967,7 +1094,15 @@ document.getElementById('return-btn').addEventListener('click', () => returnToCu
 });
 
 // ── play log ──────────────────────────────────────────────────────────────────
-function logMove(player, moveStr, rawMoves) {
+function marbleDotsHtml(capturedBalls) {
+  if (!capturedBalls || capturedBalls.length === 0) return '';
+  const cls = { 2: 'mb-w', 3: 'mb-g', 4: 'mb-b' };
+  return '<span class="captured-balls">' +
+    capturedBalls.map(b => `<span class="mb ${cls[b.color] || 'mb-g'}"></span>`).join('') +
+    '</span>';
+}
+
+function logMove(player, moveStr, rawMoves, capturedBalls) {
   const turnIdx = moveHistory.length;
   moveHistory.push({ player, displayStr: moveStr, rawMoves: rawMoves || [moveStr] });
 
@@ -976,7 +1111,8 @@ function logMove(player, moveStr, rawMoves) {
   const row = table.insertRow(-1);  // append at bottom
   const cls = player === 0 ? 'p1-cell' : 'p2-cell';
   const plr = player === 0 ? 'P1' : 'P2';
-  row.innerHTML = `<td class="turn-num">${turnNumber}</td><td class="${cls}">${plr}</td><td class="move-cell">${moveStr}</td>`;
+  const capHtml = marbleDotsHtml(capturedBalls);
+  row.innerHTML = `<td class="turn-num">${turnNumber}</td><td class="${cls}">${plr}</td><td class="move-cell">${moveStr}${capHtml}</td>`;
   row.addEventListener('click', () => showHistoryTurn(turnIdx));
   // Auto-scroll to bottom only when not viewing history
   if (historyView === null) {
@@ -1062,7 +1198,7 @@ async function main() {
   handleMidCapture();
   // Don't call updateBoard yet — wait for player selection
   // But do start loading the model in parallel
-  loadModel('./zertz_b6_c64.onnx');
+  loadModel('./zertz_b6_c64_new_cap_pol_2.onnx');
 }
 
 main().catch(console.error);
