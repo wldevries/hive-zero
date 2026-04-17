@@ -17,11 +17,11 @@ pub const COL_OFFSETS: [usize; 11] = [0, 4, 11, 19, 28, 38, 47, 57, 66, 74, 81];
 
 /// 6 hex neighbor directions as (dcol, drow).
 pub const DIRECTIONS: [(i8, i8); 6] = [
-    (0, 1), (0, -1), (1, 0), (-1, 0), (1, -1), (-1, 1),
+    (0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (-1, -1),
 ];
 
 /// 3 row directions for 5-in-a-row detection (the positive half of DIRECTIONS).
-pub const ROW_DIRS: [(i8, i8); 3] = [(0, 1), (1, 0), (1, -1)];
+pub const ROW_DIRS: [(i8, i8); 3] = [(0, 1), (1, 0), (1, 1)];
 
 /// All 85 valid cells, ordered by (col, row).
 pub const ALL_CELLS: [(u8, u8); BOARD_SIZE] = {

@@ -3,9 +3,20 @@ name = "yinsh-game"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["replay"]
+replay = ["dep:zip", "core-game/zip-sgf"]
+
 [dependencies]
 core-game = { path = "../core-game", default-features = false }
+zip = { version = "2", optional = true }
+clap = { workspace = true }
 
 [lib]
 name = "yinsh_game"
 path = "src/lib.rs"
+
+[[bin]]
+name = "yinsh-tools"
+path = "src/main.rs"
+required-features = ["replay"]

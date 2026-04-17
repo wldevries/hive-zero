@@ -49,7 +49,6 @@ pub struct YinshBoard {
     pub outcome: Outcome,
     pub phase: Phase,
     pub pending_rows: Vec<(usize, usize)>,
-    pub pending_rings: Vec<Player>,
     pub deferred_rows: Vec<(usize, usize)>,
     pub deferred_player: Option<Player>,
     pub original_mover: Option<Player>,
@@ -74,7 +73,6 @@ impl YinshBoard {
             outcome: Outcome::Ongoing,
             phase: Phase::Setup,
             pending_rows: Vec::new(),
-            pending_rings: Vec::new(),
             deferred_rows: Vec::new(),
             deferred_player: None,
             original_mover: None,
@@ -315,10 +313,10 @@ impl YinshBoard {
         }
         self.markers_in_pool += 5;
 
-        // This player owes a ring removal
-        self.pending_rings.push(me);
-
-        // Re-filter pending_rows (some may no longer be valid after marker removal)
+        // Re-filter pending_rows: the row we just claimed is now gone (its markers
+        // are Empty), and other rows that overlapped with it may no longer be
+        // valid. Per yinsh rule G.5, intersecting rows cost only one ring because
+        // the intersecting row falls off after the first is claimed.
         let marker = self.my_marker(me);
         let cells_snapshot = self.cells;
         self.pending_rows.retain(|&(s, d)| {
@@ -331,12 +329,8 @@ impl YinshBoard {
             })
         });
 
-        if self.pending_rows.is_empty() {
-            // Move to RemoveRing phase
-            self.phase = Phase::RemoveRing;
-            self.next_player = self.pending_rings[0];
-        }
-        // Else stay in RemoveRow with same player
+        // Each row claim is paired with a ring removal (yinsh rule G.3).
+        self.phase = Phase::RemoveRing;
         Ok(())
     }
 
@@ -357,25 +351,24 @@ impl YinshBoard {
             Player::Player2 => self.black_score,
         };
         if score >= WIN_SCORE {
+            // Per yinsh rule H.1, the game ends the instant a 3rd ring comes off,
+            // even if pending rows remain unclaimed.
             self.outcome = Outcome::WonBy(me);
             return Ok(());
         }
 
-        // Pop this player's pending ring removal
-        self.pending_rings.remove(0);
-
-        if !self.pending_rings.is_empty() {
-            // Next ring removal
-            self.next_player = self.pending_rings[0];
+        if !self.pending_rows.is_empty() {
+            // More rows still pending for this player — claim the next one.
+            self.phase = Phase::RemoveRow;
         } else if !self.deferred_rows.is_empty() {
-            // Load opponent's deferred rows
+            // Current player done; opponent now claims their own (deferred) rows.
             let opp = self.deferred_player.expect("deferred_rows without deferred_player");
             self.pending_rows = std::mem::take(&mut self.deferred_rows);
             self.deferred_player = None;
             self.phase = Phase::RemoveRow;
             self.next_player = opp;
         } else {
-            // All removals done: back to Normal, opponent of original mover's turn
+            // All removals done: back to Normal, opponent of original mover's turn.
             let mover = self.original_mover.expect("no original_mover during removal");
             self.phase = Phase::Normal;
             self.next_player = mover.opposite();
