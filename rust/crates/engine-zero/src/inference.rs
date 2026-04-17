@@ -186,6 +186,89 @@ impl HiveOrtEngine {
     }
 }
 
+/// ONNX Runtime inference engine for Yinsh.
+/// Single flat policy output `policy[B, POLICY_SIZE]` and `value[B, 1]`.
+pub struct YinshOrtEngine {
+    session: Session,
+    num_channels: usize,
+    grid_size: usize,
+    reserve_size: usize,
+    policy_size: usize,
+}
+
+impl YinshOrtEngine {
+    pub fn load(onnx_path: &str) -> Result<Self, ort::Error> {
+        prepend_qnn_dir_to_path();
+        ort::init_from(find_onnxruntime_dylib())?.commit();
+        register_qnn_plugin();
+
+        let session = Session::builder()?
+            .with_execution_providers([
+                ort::ep::CUDA::default().build(),
+                ort::ep::QNN::default()
+                    .with_backend_path(find_qnn_htp_dll())
+                    .with_htp_fp16_precision(true)
+                    .with_htp_graph_finalization_optimization_mode(3)
+                    .build(),
+            ])?
+            .commit_from_file(onnx_path)?;
+
+        // Pull dimensions from the yinsh_game crate so they cannot drift from
+        // the Rust encoding.
+        let num_channels = yinsh_game::board_encoding::NUM_CHANNELS;
+        let grid_size = yinsh_game::hex::GRID_SIZE;
+        let reserve_size = yinsh_game::board_encoding::RESERVE_SIZE;
+        let policy_size = yinsh_game::move_encoding::POLICY_SIZE;
+
+        Ok(Self {
+            session,
+            num_channels,
+            grid_size,
+            reserve_size,
+            policy_size,
+        })
+    }
+
+    /// Returns `(policy_flat[B*POLICY_SIZE], value_flat[B])`.
+    pub fn infer_batch(
+        &mut self,
+        boards: &[f32],
+        reserves: &[f32],
+        batch_size: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>), String> {
+        let board_tensor = Tensor::from_array((
+            [batch_size, self.num_channels, self.grid_size, self.grid_size],
+            boards.to_vec(),
+        ))
+        .map_err(|e| e.to_string())?;
+        let reserve_tensor = Tensor::from_array((
+            [batch_size, self.reserve_size],
+            reserves.to_vec(),
+        ))
+        .map_err(|e| e.to_string())?;
+
+        let outputs = self
+            .session
+            .run(ort::inputs![
+                "board" => board_tensor,
+                "reserve" => reserve_tensor,
+            ])
+            .map_err(|e| e.to_string())?;
+
+        let (_, policy_data) = outputs["policy"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?;
+        let (_, value_data) = outputs["value"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?;
+
+        debug_assert_eq!(policy_data.len(), batch_size * self.policy_size);
+        debug_assert_eq!(value_data.len(), batch_size);
+
+        Ok((policy_data.to_vec(), value_data.to_vec()))
+    }
+}
+
 /// ONNX Runtime inference engine for Zertz.
 pub struct ZertzOrtEngine {
     session: Session,

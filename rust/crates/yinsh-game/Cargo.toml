@@ -9,6 +9,8 @@ replay = ["dep:zip", "core-game/zip-sgf"]
 
 [dependencies]
 core-game = { path = "../core-game", default-features = false }
+rand = { workspace = true }
+rand_distr = { workspace = true }
 zip = { version = "2", optional = true }
 clap = { workspace = true }
 
