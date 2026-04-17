@@ -1023,6 +1023,10 @@ async function triggerAiMove() {
   const aiPlayer = humanPlayer !== null ? (1 - humanPlayer) : game.next_player();
   const aiMoves  = [];
   let firstIter = true;
+  // Q at the chosen edge's child, from the *next* player's perspective.
+  // Saved on each iteration of the capture chain; only the last one (after the
+  // chain terminates) is meaningful as "the position the opponent now faces".
+  let lastChosenChildValue = null;
   try {
     do {
       const t0 = performance.now();
@@ -1035,6 +1039,7 @@ async function triggerAiMove() {
         mv = result.move;
         showValue(result.value);
         if (firstIter) recordEval(moveHistory.length, (aiPlayer === 0 ? 1 : -1) * result.value);
+        lastChosenChildValue = result.chosen_child_value;
         const ms = (performance.now() - t0).toFixed(0);
         mv = applyColorPreference(game.valid_moves(), mv);
         log(`AI (NN): ${mv}  val=${result.value.toFixed(2)}  ${sims} sims  ${ms}ms`);
@@ -1060,13 +1065,12 @@ async function triggerAiMove() {
       : aiMoves[0].mv.trim();
     logMove(aiPlayer, moveStr, aiMoves.map(a => a.mv), lastMoveInfo?.capturedBalls);
 
-    // Quick 1-sim eval for the position after the AI's move (= what the human now faces)
-    if (ortSession !== null && game.outcome() === 'ongoing') {
-      try {
-        const qr = await game.best_move_nn(ortEvalBatch, 1, 1.5);
-        const np = game.next_player();
-        recordEval(moveHistory.length, (np === 0 ? 1 : -1) * qr.value);
-      } catch (_) {}
+    // Post-move eval (= position the human now faces). Reuses the AI's own MCTS
+    // stats — no extra inference pass. chosen_child_value is already from the
+    // next player's perspective (same convention as `result.value`).
+    if (ortSession !== null && game.outcome() === 'ongoing' && lastChosenChildValue !== null) {
+      const np = game.next_player();
+      recordEval(moveHistory.length, (np === 0 ? 1 : -1) * lastChosenChildValue);
     }
 
     updateBoard();

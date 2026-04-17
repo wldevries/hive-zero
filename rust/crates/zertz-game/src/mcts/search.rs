@@ -620,6 +620,48 @@ impl MctsSearch {
     pub fn root_value(&self) -> f32 {
         -self.arena.get(self.root).value()
     }
+
+    /// Q value of the child reached by the best-visited edge, from the parent's
+    /// (root's) perspective. Following the same convention as `MctsNode::value()`,
+    /// this is positive when the move is good for the player that just played it.
+    /// Returns `None` if no child edge has ever been visited.
+    pub fn best_child_value(&self) -> Option<f32> {
+        let root = self.arena.get(self.root);
+        let mut best_visits = 0u32;
+        let mut best_value = None;
+        for edge in &root.edges {
+            if let Some(cid) = edge.child_id {
+                let c = self.arena.get(cid);
+                if c.visit_count > best_visits {
+                    best_visits = c.visit_count;
+                    best_value = Some(c.value());
+                }
+            }
+        }
+        best_value
+    }
+
+    /// Advance the root to the child reached by `mv`, preserving the subtree.
+    ///
+    /// Visit statistics are kept intact so the next search starts warm.
+    /// Returns `true` on success, `false` if `mv` was not among the root's edges
+    /// or was never expanded (caller should fall back to a fresh `init`).
+    /// Detached sibling subtrees are NOT freed — the arena grows until the next `init`.
+    pub fn reroot(&mut self, mv: crate::zertz::ZertzMove) -> bool {
+        let root_edges = &self.arena.get(self.root).edges;
+        let target_child = root_edges.iter()
+            .find(|e| e.mv == mv)
+            .and_then(|e| e.child_id);
+
+        let Some(new_root) = target_child else {
+            return false;
+        };
+
+        self.arena.get_mut(new_root).parent = None;
+        self.arena.get_mut(new_root).move_from_parent = None;
+        self.root = new_root;
+        true
+    }
 }
 
 #[cfg(test)]

@@ -10,6 +10,9 @@
 //! must return `[place: Float32Array, cap_dir: Float32Array, value: Float32Array]`
 //! with lengths `n * PLACE_HEAD_SIZE`, `n * CAP_HEAD_SIZE`, `n`.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use js_sys::{Array, Float32Array, Function};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -98,31 +101,48 @@ async fn call_js_eval_async(
 }
 
 /// Async MCTS loop driven by an ORT-Web eval callback (returns Promise per batch).
-/// Mirrors best_move_core but with .await at each NN batch call.
+/// Warm: reuses any subtree in `state.tree` from the previous search (rerooted in `play()`).
+/// Writes the (grown) search tree back into `state.tree` on completion so the next
+/// `play()` can reroot it. No Dirichlet noise — best_move is for inference, not self-play.
 async fn best_move_nn_impl(
-    board: ZertzBoard,
+    state: Rc<RefCell<InnerState>>,
     eval_fn: Function,
     simulations: usize,
     c_puct: f32,
 ) -> Result<JsValue, JsValue> {
-    if board.outcome() != Outcome::Ongoing {
-        return Err(JsValue::from_str("Game is already over"));
-    }
-
-    // Evaluate root position.
-    let mut board_buf = vec![0f32; BOARD_FLAT];
-    let mut reserve_buf = vec![0f32; RESERVE_SIZE];
-    encode_board(&board, &mut board_buf, &mut reserve_buf);
-    let (root_place, root_cap_dir, _) =
-        call_js_eval_async(&eval_fn, &board_buf, &reserve_buf, 1).await?;
-
-    let root_heads = PolicyHeads {
-        place: &root_place,
-        cap_dir: &root_cap_dir,
+    // Snapshot the current board + take the warm tree (if any) out of the RefCell
+    // so we don't hold a borrow across `.await` points.
+    let (board, mut search_opt) = {
+        let mut state_ref = state.borrow_mut();
+        if state_ref.board.outcome() != Outcome::Ongoing {
+            return Err(JsValue::from_str("Game is already over"));
+        }
+        (state_ref.board.clone(), state_ref.tree.take())
     };
-    let mut search = MctsSearch::new(simulations + 64);
+
+    let mut search = match search_opt.take() {
+        Some(s) => s,
+        None => {
+            // Cold start: initial NN eval on the root, then build a fresh tree.
+            let mut board_buf = vec![0f32; BOARD_FLAT];
+            let mut reserve_buf = vec![0f32; RESERVE_SIZE];
+            encode_board(&board, &mut board_buf, &mut reserve_buf);
+            let (root_place, root_cap_dir, _) =
+                call_js_eval_async(&eval_fn, &board_buf, &reserve_buf, 1).await?;
+
+            let root_heads = PolicyHeads {
+                place: &root_place,
+                cap_dir: &root_cap_dir,
+            };
+            // ~80 MCTS searches per game (60 plies + capture sub-moves) × sims per search
+            let capacity = simulations.saturating_mul(80);
+            let mut s = MctsSearch::new(capacity);
+            s.c_puct = c_puct;
+            s.init(&board, &root_heads);
+            s
+        }
+    };
     search.c_puct = c_puct;
-    search.init(&board, &root_heads);
 
     let batch = 16usize;
     let mut done = 0usize;
@@ -170,11 +190,35 @@ async fn best_move_nn_impl(
         .map(|(mv, _)| *mv)
         .unwrap_or(ZertzMove::Pass);
 
-    // Also surface the root value estimate (negated because root stores opponent's perspective).
-    let root_value = -search.root_value();
+    // Q-value for the chosen edge's child, from the root (current player) perspective.
+    // Child nodes store value from the parent's player's perspective, so this is
+    // positive when the chosen move is good for the player who just played it.
+    let chosen_child_q = search.best_child_value().unwrap_or(0.0);
+
+    // `root_value()` already returns the root player's own expected return
+    // (positive = winning for the player about to move). JS multiplies by
+    // `(aiPlayer === 0 ? 1 : -1)` to convert to P1-advantage, so hand it over
+    // in the AI's frame without further negation.
+    let root_value = search.root_value();
+
+    // `chosen_child_value` is from the *next* player's perspective:
+    //   chosen_child_q  = E[return for player-who-just-moved]  = +1 if they win
+    //   -chosen_child_q = E[return for next-player]            = -1 if they lose
+    // JS converts to P1-advantage via `(next_player === 0 ? 1 : -1) * chosen_child_value`,
+    // i.e. it treats the returned number as being in next_player's frame.
+    let chosen_child_value = -chosen_child_q;
+
+    // Store the (possibly grown) tree back into state so the next play() can reroot it.
+    state.borrow_mut().tree = Some(search);
+
     let obj = js_sys::Object::new();
     js_sys::Reflect::set(&obj, &JsValue::from_str("move"), &JsValue::from_str(&move_to_str(best)))?;
     js_sys::Reflect::set(&obj, &JsValue::from_str("value"), &JsValue::from_f64(root_value as f64))?;
+    js_sys::Reflect::set(
+        &obj,
+        &JsValue::from_str("chosen_child_value"),
+        &JsValue::from_f64(chosen_child_value as f64),
+    )?;
     Ok(JsValue::from(obj))
 }
 
@@ -212,37 +256,61 @@ fn random_rollout_value(board: &ZertzBoard, rollouts: usize, rng: &mut impl rand
 // ZertzGame
 // ---------------------------------------------------------------------------
 
+/// Internal state shared between sync methods and the async best_move future.
+/// Wrapped in an Rc<RefCell<...>> so the future can take the search out, await,
+/// and write it back without a live borrow across await points.
+struct InnerState {
+    board: ZertzBoard,
+    /// Warm MCTS tree, kept alive across moves for reuse. `play()` reroots it
+    /// to the chosen child (or clears it if the move isn't in the tree yet).
+    tree: Option<MctsSearch>,
+}
+
 #[wasm_bindgen]
 pub struct ZertzGame {
-    board: ZertzBoard,
+    state: Rc<RefCell<InnerState>>,
 }
 
 #[wasm_bindgen]
 impl ZertzGame {
     #[wasm_bindgen(constructor)]
     pub fn new() -> ZertzGame {
-        ZertzGame { board: ZertzBoard::default() }
+        ZertzGame {
+            state: Rc::new(RefCell::new(InnerState {
+                board: ZertzBoard::default(),
+                tree: None,
+            })),
+        }
     }
 
     /// All legal moves as a JS Array of strings.
     pub fn valid_moves(&self) -> Array {
-        self.board.legal_moves().into_iter()
+        self.state.borrow().board.legal_moves().into_iter()
             .map(|mv| JsValue::from_str(&move_to_str(mv)))
             .collect()
     }
 
     /// Apply a move string. Throws on error.
+    /// If a warm MCTS tree exists, reroot it to the chosen child; drop the tree
+    /// if the move wasn't in the root's edges (caller should rebuild next search).
     pub fn play(&mut self, move_str: &str) -> Result<(), JsValue> {
         let mv = str_to_move(move_str).map_err(|e| JsValue::from_str(&e))?;
-        self.board.play(mv).map_err(|e| JsValue::from_str(&e))
+        let mut st = self.state.borrow_mut();
+        st.board.play(mv).map_err(|e| JsValue::from_str(&e))?;
+        if let Some(tree) = st.tree.as_mut() {
+            if !tree.reroot(mv) {
+                st.tree = None;
+            }
+        }
+        Ok(())
     }
 
     /// ASCII board string for debugging.
-    pub fn board_str(&self) -> String { format!("{}", self.board) }
+    pub fn board_str(&self) -> String { format!("{}", self.state.borrow().board) }
 
     /// "ongoing" | "p1" | "p2" | "draw"
     pub fn outcome(&self) -> String {
-        match self.board.outcome() {
+        match self.state.borrow().board.outcome() {
             Outcome::Ongoing => "ongoing".into(),
             Outcome::WonBy(Player::Player1) => "p1".into(),
             Outcome::WonBy(Player::Player2) => "p2".into(),
@@ -252,7 +320,7 @@ impl ZertzGame {
 
     /// 0 = Player1, 1 = Player2.
     pub fn next_player(&self) -> u8 {
-        match self.board.next_player() { Player::Player1 => 0, Player::Player2 => 1 }
+        match self.state.borrow().board.next_player() { Player::Player1 => 0, Player::Player2 => 1 }
     }
 
     /// Cell state for each of the 37 board positions (same order as hex_coords()).
@@ -262,7 +330,7 @@ impl ZertzGame {
     ///   3 = grey marble
     ///   4 = black marble
     pub fn cell_states(&self) -> Vec<u8> {
-        self.board.rings().iter().map(|r| match r {
+        self.state.borrow().board.rings().iter().map(|r| match r {
             Ring::Removed        => 0,
             Ring::Empty          => 1,
             Ring::Occupied(m)    => 2 + m.index() as u8,
@@ -270,22 +338,23 @@ impl ZertzGame {
     }
 
     /// Shared marble supply remaining: [white, grey, black].
-    pub fn supply_counts(&self) -> Vec<u8> { self.board.supply().to_vec() }
+    pub fn supply_counts(&self) -> Vec<u8> { self.state.borrow().board.supply().to_vec() }
 
     /// Captured marbles: [p1_white, p1_grey, p1_black, p2_white, p2_grey, p2_black].
     pub fn capture_counts(&self) -> Vec<u8> {
-        let c = self.board.captures();
+        let st = self.state.borrow();
+        let c = st.board.captures();
         vec![c[0][0], c[0][1], c[0][2], c[1][0], c[1][1], c[1][2]]
     }
 
     /// True when we're in the middle of a capture chain (same player must continue capturing).
-    pub fn is_mid_capture(&self) -> bool { self.board.is_mid_capture() }
+    pub fn is_mid_capture(&self) -> bool { self.state.borrow().board.is_mid_capture() }
 
     /// Encode the current position: [board: Float32Array, reserve: Float32Array].
     pub fn encode(&self) -> Array {
         let mut board_buf = vec![0f32; BOARD_FLAT];
         let mut reserve_buf = vec![0f32; RESERVE_SIZE];
-        encode_board(&self.board, &mut board_buf, &mut reserve_buf);
+        encode_board(&self.state.borrow().board, &mut board_buf, &mut reserve_buf);
         Array::of2(
             &Float32Array::from(board_buf.as_slice()),
             &Float32Array::from(reserve_buf.as_slice()),
@@ -306,7 +375,8 @@ impl ZertzGame {
             Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
                 call_js_eval(&wrapped.0, boards, reserves, n)
             });
-        let mv = best_move_core(&self.board, simulations, c_puct, core_eval)
+        let board = self.state.borrow().board.clone();
+        let mv = best_move_core(&board, simulations, c_puct, core_eval)
             .map_err(|e| JsValue::from_str(&e))?;
         Ok(move_to_str(mv))
     }
@@ -317,7 +387,13 @@ impl ZertzGame {
     /// must return a **Promise** resolving to
     /// `[place: Float32Array, cap_dir: Float32Array, value: Float32Array]`.
     ///
-    /// Returns a `Promise<{move: string, value: number}>`.
+    /// Returns a `Promise<{move: string, value: number, chosen_child_value: number}>`.
+    ///   `value`              — root Q, from the current (root) player's perspective.
+    ///   `chosen_child_value` — Q at the post-move position, from the *next* player's
+    ///                          perspective (mirrors `value` one ply later). Use this
+    ///                          to score the position the opponent is about to face
+    ///                          without a separate inference pass.
+    ///
     /// Run this in a Web Worker or via `await` in an async context.
     pub fn best_move_nn(
         &self,
@@ -325,8 +401,8 @@ impl ZertzGame {
         simulations: usize,
         c_puct: f32,
     ) -> js_sys::Promise {
-        let board = self.board.clone();
-        wasm_bindgen_futures::future_to_promise(best_move_nn_impl(board, eval_fn, simulations, c_puct))
+        let state = self.state.clone();
+        wasm_bindgen_futures::future_to_promise(best_move_nn_impl(state, eval_fn, simulations, c_puct))
     }
 
     /// Random-rollout MCTS — no neural network needed.
@@ -339,9 +415,13 @@ impl ZertzGame {
         rollouts_per_leaf: usize,
         c_puct: f32,
     ) -> Result<String, JsValue> {
-        if self.board.outcome() != Outcome::Ongoing {
-            return Err(JsValue::from_str("Game is already over"));
-        }
+        let board = {
+            let st = self.state.borrow();
+            if st.board.outcome() != Outcome::Ongoing {
+                return Err(JsValue::from_str("Game is already over"));
+            }
+            st.board.clone()
+        };
 
         let uniform = vec![0.0f32; POLICY_HEADS_TOTAL];
         let root_heads = PolicyHeads {
@@ -351,7 +431,7 @@ impl ZertzGame {
 
         let mut search = MctsSearch::new(simulations + 128);
         search.c_puct = c_puct;
-        search.init(&self.board, &root_heads);
+        search.init(&board, &root_heads);
 
         let mut rng = rand::rng();
         let batch = 8usize;

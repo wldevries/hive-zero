@@ -56,7 +56,7 @@ pub fn best_move_core(
     };
 
     search.init(board, &root_heads);
-    search.apply_root_dirichlet(0.3, 0.25);
+    // No Dirichlet noise at inference time — Dirichlet is for self-play exploration only.
 
     // Simulation rounds (batch_size=8)
     let batch = 8usize;
@@ -118,7 +118,9 @@ pub fn play_battle_core(
     let half = num_games / 2;
 
     let mut boards: Vec<ZertzBoard> = (0..num_games).map(|_| ZertzBoard::default()).collect();
-    let arena_capacity = simulations + 64;
+    // Warm MCTS: trees are rerooted after each move and reused. Capacity sized for
+    // ~80 MCTS searches per game (60 plies + capture sub-moves) × sims per search.
+    let arena_capacity = simulations.saturating_mul(80);
     let mut searches: Vec<MctsSearch> = (0..num_games).map(|_| {
         let mut s = MctsSearch::new(arena_capacity);
         s.c_puct = c_puct;
@@ -127,6 +129,9 @@ pub fn play_battle_core(
     let mut active = vec![true; num_games];
     let mut move_counts = vec![0u32; num_games];
     let mut finished_count = 0u32;
+    // True once a game's tree has been rerooted and its root is already expanded with
+    // priors from the previous search; such games skip the root NN eval + init().
+    let mut search_warm: Vec<bool> = vec![false; num_games];
 
     let mut total_moves = 0u32;
     let mut wins_model1 = 0u32;
@@ -171,28 +176,39 @@ pub fn play_battle_core(
         if mcts_games.is_empty() { break; }
         let n = mcts_games.len();
 
-        let root_syms: Vec<D6Symmetry> = (0..n).map(|_| D6Symmetry::random(&mut rng)).collect();
-        let mut flat_boards = vec![0f32; n * BOARD_FLAT];
-        let mut flat_reserves = vec![0f32; n * RESERVE_SIZE];
-        let mut fn1_flags: Vec<bool> = Vec::with_capacity(n);
-        for (i, &gi) in mcts_games.iter().enumerate() {
-            encode_board(&boards[gi], &mut flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT], &mut flat_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE]);
-            apply_d6_sym_spatial(&mut flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT], root_syms[i], NUM_CHANNELS, GRID_SIZE);
-            fn1_flags.push(use_fn1_for(gi, boards[gi].next_player()));
-        }
+        // Only cold games need a root NN eval + init(). Warm games already have
+        // an expanded root from the previous ply's reroot().
+        let cold: Vec<usize> = (0..n)
+            .filter(|&i| !search_warm[mcts_games[i]])
+            .collect();
 
-        let (mut init_place, mut init_cap_dir, _) = call_evals(&flat_boards, &flat_reserves, &fn1_flags, n)?;
-        for i in 0..n {
-            let inv = root_syms[i].inverse();
-            apply_d6_sym_spatial(&mut init_place[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE], inv, place_channels, GRID_SIZE);
-            apply_d6_sym_cap_dir(&mut init_cap_dir[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE], inv);
-        }
-        for (i, &gi) in mcts_games.iter().enumerate() {
-            let heads = PolicyHeads {
-                place: &init_place[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE],
-                cap_dir: &init_cap_dir[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE],
-            };
-            searches[gi].init(&boards[gi], &heads);
+        if !cold.is_empty() {
+            let nc = cold.len();
+            let root_syms: Vec<D6Symmetry> = (0..nc).map(|_| D6Symmetry::random(&mut rng)).collect();
+            let mut flat_boards = vec![0f32; nc * BOARD_FLAT];
+            let mut flat_reserves = vec![0f32; nc * RESERVE_SIZE];
+            let mut fn1_flags: Vec<bool> = Vec::with_capacity(nc);
+            for (k, &ci) in cold.iter().enumerate() {
+                let gi = mcts_games[ci];
+                encode_board(&boards[gi], &mut flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], &mut flat_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE]);
+                apply_d6_sym_spatial(&mut flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], root_syms[k], NUM_CHANNELS, GRID_SIZE);
+                fn1_flags.push(use_fn1_for(gi, boards[gi].next_player()));
+            }
+
+            let (mut init_place, mut init_cap_dir, _) = call_evals(&flat_boards, &flat_reserves, &fn1_flags, nc)?;
+            for k in 0..nc {
+                let inv = root_syms[k].inverse();
+                apply_d6_sym_spatial(&mut init_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE], inv, place_channels, GRID_SIZE);
+                apply_d6_sym_cap_dir(&mut init_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE], inv);
+            }
+            for (k, &ci) in cold.iter().enumerate() {
+                let gi = mcts_games[ci];
+                let heads = PolicyHeads {
+                    place: &init_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE],
+                    cap_dir: &init_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
+                };
+                searches[gi].init(&boards[gi], &heads);
+            }
         }
 
         let mut game_sims = vec![0usize; n];
@@ -268,6 +284,7 @@ pub fn play_battle_core(
                 active[gi] = false;
                 finished_count += 1;
                 game_lengths.push(move_counts[gi]);
+                search_warm[gi] = false;
                 match boards[gi].outcome() {
                     Outcome::WonBy(winner) => {
                         let model1_won = (gi < half) == (winner == Player::Player1);
@@ -282,6 +299,10 @@ pub fn play_battle_core(
                     }
                     _ => { draws += 1; }
                 }
+            } else {
+                // Reroot to preserve the subtree for the chosen move.
+                // Falls back to a cold init next ply if the move wasn't expanded.
+                search_warm[gi] = searches[gi].reroot(mv);
             }
         }
 
@@ -341,7 +362,9 @@ pub fn play_selfplay_core(
     let use_playout_cap = playout_cap_p > 0.0;
 
     let mut boards: Vec<ZertzBoard> = (0..num_games).map(|_| ZertzBoard::default()).collect();
-    let arena_capacity = simulations + 64;
+    // Warm MCTS: trees are rerooted after each move and reused. Capacity sized for
+    // ~80 MCTS searches per game (60 plies + capture sub-moves) × sims per search.
+    let arena_capacity = simulations.saturating_mul(80);
     let mut searches: Vec<MctsSearch> = (0..num_games).map(|_| {
         let mut s = MctsSearch::new(arena_capacity);
         s.c_puct = c_puct;
@@ -350,6 +373,9 @@ pub fn play_selfplay_core(
     let mut move_counts: Vec<u32> = vec![0; num_games];
     let mut active: Vec<bool> = vec![true; num_games];
     let mut finished_count: u32 = 0;
+    // True once a game's tree has been rerooted and its root is already expanded with
+    // priors from the previous search; such games skip the root NN eval + init().
+    let mut search_warm: Vec<bool> = vec![false; num_games];
 
     let mut histories: Vec<Vec<(usize, usize, Player, bool, bool, bool, Vec<f32>)>> = (0..num_games).map(|_| Vec::new()).collect();
     let mut board_buf: Vec<f32> = Vec::new();
@@ -387,36 +413,59 @@ pub fn play_selfplay_core(
         let sim_caps: Vec<usize> = is_full.iter().map(|&f| if f { simulations } else { fast_cap }).collect();
         full_search_turns += is_full.iter().filter(|&&f| f).count() as u32;
 
-        // Encode positions with random D6 symmetry
-        let root_syms: Vec<D6Symmetry> = (0..n).map(|_| D6Symmetry::random(&mut rng)).collect();
+        // Encode positions into the training buffer for ALL active games (warm or cold).
         let mut turn_board_offsets: Vec<usize> = Vec::with_capacity(n);
         let mut turn_reserve_offsets: Vec<usize> = Vec::with_capacity(n);
-        let mut flat_boards = vec![0f32; n * BOARD_FLAT];
-        let mut flat_reserves = vec![0f32; n * RESERVE_SIZE];
-        for (i, &gi) in mcts_games.iter().enumerate() {
+        for &gi in mcts_games.iter() {
             let boff = board_buf.len();
             board_buf.resize(boff + BOARD_FLAT, 0.0);
             let roff = reserve_buf.len();
             reserve_buf.resize(roff + RESERVE_SIZE, 0.0);
             encode_board(&boards[gi], &mut board_buf[boff..boff + BOARD_FLAT], &mut reserve_buf[roff..roff + RESERVE_SIZE]);
-            encode_board(&boards[gi], &mut flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT], &mut flat_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE]);
-            apply_d6_sym_spatial(&mut flat_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT], root_syms[i], NUM_CHANNELS, GRID_SIZE);
             turn_board_offsets.push(boff);
             turn_reserve_offsets.push(roff);
         }
 
-        // Initial NN eval for roots
-        let (mut init_place, mut init_cap_dir, _) = eval_fn(&flat_boards, &flat_reserves, n)?;
-        for i in 0..n {
-            let inv = root_syms[i].inverse();
-            apply_d6_sym_spatial(&mut init_place[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE], inv, PLACE_HEAD_SIZE / (GRID_SIZE * GRID_SIZE), GRID_SIZE);
-            apply_d6_sym_cap_dir(&mut init_cap_dir[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE], inv);
+        // Only cold games need a root NN eval + init(). Warm games already have
+        // an expanded root with priors from the previous ply's reroot().
+        let cold: Vec<usize> = (0..n)
+            .filter(|&i| !search_warm[mcts_games[i]])
+            .collect();
+
+        if !cold.is_empty() {
+            let nc = cold.len();
+            let root_syms: Vec<D6Symmetry> = (0..nc).map(|_| D6Symmetry::random(&mut rng)).collect();
+            let mut flat_boards = vec![0f32; nc * BOARD_FLAT];
+            let mut flat_reserves = vec![0f32; nc * RESERVE_SIZE];
+            for (k, &ci) in cold.iter().enumerate() {
+                let gi = mcts_games[ci];
+                encode_board(&boards[gi], &mut flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], &mut flat_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE]);
+                apply_d6_sym_spatial(&mut flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], root_syms[k], NUM_CHANNELS, GRID_SIZE);
+            }
+
+            // Initial NN eval for cold roots
+            let (mut init_place, mut init_cap_dir, _) = eval_fn(&flat_boards, &flat_reserves, nc)?;
+            for k in 0..nc {
+                let inv = root_syms[k].inverse();
+                apply_d6_sym_spatial(&mut init_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE], inv, PLACE_HEAD_SIZE / (GRID_SIZE * GRID_SIZE), GRID_SIZE);
+                apply_d6_sym_cap_dir(&mut init_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE], inv);
+            }
+
+            for (k, &ci) in cold.iter().enumerate() {
+                let gi = mcts_games[ci];
+                let heads = PolicyHeads {
+                    place: &init_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE],
+                    cap_dir: &init_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
+                };
+                searches[gi].init(&boards[gi], &heads);
+            }
         }
 
+        // Apply fresh Dirichlet noise to every full-search root (both warm and cold).
         for (i, &gi) in mcts_games.iter().enumerate() {
-            let heads = PolicyHeads { place: &init_place[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE], cap_dir: &init_cap_dir[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE] };
-            searches[gi].init(&boards[gi], &heads);
-            if is_full[i] { searches[gi].apply_root_dirichlet(dir_alpha, dir_epsilon); }
+            if is_full[i] {
+                searches[gi].apply_root_dirichlet(dir_alpha, dir_epsilon);
+            }
         }
 
         // Simulation rounds
@@ -512,6 +561,7 @@ pub fn play_selfplay_core(
             if boards[gi].outcome() != Outcome::Ongoing || move_counts[gi] >= max_moves {
                 active[gi] = false;
                 finished_count += 1;
+                search_warm[gi] = false;
                 let len = move_counts[gi];
                 game_lengths.push(len);
                 isolation_captures += boards[gi].isolation_captures.iter().flat_map(|p| p.iter()).map(|&c| c as u32).sum::<u32>();
@@ -533,6 +583,10 @@ pub fn play_selfplay_core(
                     }
                     _ => { draws += 1; }
                 }
+            } else {
+                // Reroot to preserve the subtree for the chosen move.
+                // Falls back to a cold init next ply if the move wasn't expanded.
+                search_warm[gi] = searches[gi].reroot(mv);
             }
         }
 
