@@ -1,10 +1,10 @@
 /// YINSH game state and rules.
 
-use core_game::game::{Game, Outcome, Player};
+use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex};
 use core_game::symmetry::UnitSymmetry;
 
 use crate::hex::{
-    BOARD_SIZE, DIRECTIONS, ROW_DIRS, cell_index_i8, index_to_cell, is_valid_i8,
+    BOARD_SIZE, DIRECTIONS, GRID_SIZE, ROW_DIRS, cell_index_i8, index_to_cell, is_valid_i8,
 };
 
 pub const INITIAL_MARKERS: u8 = 51;
@@ -416,6 +416,22 @@ impl Game for YinshBoard {
     fn play_move(&mut self, mv: &YinshMove) -> Result<(), String> { self.apply_move(*mv) }
     fn pass_move() -> YinshMove { YinshMove::Pass }
     fn is_pass(mv: &YinshMove) -> bool { matches!(mv, YinshMove::Pass) }
+}
+
+impl NNGame for YinshBoard {
+    const BOARD_CHANNELS: usize = crate::board_encoding::NUM_CHANNELS;
+    const RESERVE_SIZE: usize = crate::board_encoding::RESERVE_SIZE;
+    const NUM_POLICY_CHANNELS: usize = crate::move_encoding::NUM_POLICY_CHANNELS;
+
+    fn grid_size(&self) -> usize { GRID_SIZE }
+
+    fn encode_board(&self, board_out: &mut [f32], reserve_out: &mut [f32]) {
+        crate::board_encoding::encode_board(self, board_out, reserve_out);
+    }
+
+    fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(PolicyIndex, YinshMove)>) {
+        crate::move_encoding::get_legal_move_mask(self)
+    }
 }
 
 #[cfg(test)]
