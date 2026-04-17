@@ -59,12 +59,22 @@ pub trait Game: Clone + Send {
 
 /// How to extract a scalar prior from the flat policy vector.
 ///
-/// `Single(idx)`: `prior = policy[idx]`
-/// `Sum(a, b)`:   `prior = policy[a] + policy[b]` (factorized logits, e.g. src + dst)
+/// `Single(idx)`:    `prior = policy[idx]`
+/// `Sum(a, b)`:      `prior = policy[a] + policy[b]` (factorized logits, legacy)
+/// `DotProduct`:     `prior = Q[src] · K[dst] / sqrt(embed_dim)` (bilinear head)
+///   Q[src] = policy[q_offset + 0*g2 + src_cell .. q_offset + (embed_dim-1)*g2 + src_cell]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolicyIndex {
     Single(usize),
     Sum(usize, usize),
+    DotProduct {
+        q_offset: usize,
+        k_offset: usize,
+        src_cell: usize,
+        dst_cell: usize,
+        embed_dim: usize,
+        g2: usize,
+    },
 }
 
 /// Neural network encoding trait — tensor encoding and policy masks for AlphaZero training.

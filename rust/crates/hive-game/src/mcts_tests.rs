@@ -58,14 +58,14 @@ mod tests {
             use core_game::game::PolicyIndex;
             match enc {
                 PolicyIndex::Single(idx) => policy[*idx] += weight,
-                // Only write to the destination index (b), not the source (a).
-                // expand_with_policy computes prior = policy[a] + policy[b]; by leaving
-                // all source indices at zero, total_mcts_prior = Σ policy = 1.0, so
-                // the winning move's effective MCTS prior ≈ WIN_BOOST / total_moves rather
-                // than being diluted by the many movements sharing the same source hex.
-                PolicyIndex::Sum(_a, b) => {
-                    policy[*b] += weight;
+                // For bilinear head: set Q and K embeddings for src and dst such that
+                // the dot product Q[src]·K[dst] is boosted for the winning move.
+                // Simplest oracle: set Q[src][0] = K[dst][0] = sqrt(weight), others = 0.
+                PolicyIndex::DotProduct { q_offset, k_offset, src_cell, dst_cell, .. } => {
+                    policy[q_offset + src_cell] = weight.sqrt();
+                    policy[k_offset + dst_cell] = weight.sqrt();
                 }
+                PolicyIndex::Sum(_, _) => {} // legacy, unused for Hive
             }
         }
 
@@ -418,6 +418,7 @@ mod tests {
                 match enc {
                     PolicyIndex::Single(i) => eprintln!("  Single({i}): p={:.6}", policy[*i]),
                     PolicyIndex::Sum(a, b) => eprintln!("  Sum({a},{b}): p[a]={:.6} p[b]={:.6} sum={:.6}", policy[*a], policy[*b], policy[*a]+policy[*b]),
+                    PolicyIndex::DotProduct { src_cell, dst_cell, .. } => eprintln!("  DotProduct(src={src_cell},dst={dst_cell})"),
                 }
             }
         }

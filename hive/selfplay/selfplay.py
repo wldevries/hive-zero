@@ -539,17 +539,25 @@ class SelfPlayTrainer:
             (
                 boards,
                 reserves,
-                policies,
+                place_targets,
                 values,
                 value_only_flags,
                 policy_only_flags,
                 aux_targets,
+                movement_srcs,
+                movement_dsts,
+                movement_probs,
+                num_movements,
             ) = result.training_data()
             # aux_targets is [N, 6]: [my_qd, opp_qd, my_qe, opp_qe, my_mob, opp_mob]
             replay_buffer.add_batch(
                 boards,
                 reserves,
-                policies,
+                place_targets,
+                movement_srcs,
+                movement_dsts,
+                movement_probs,
+                num_movements,
                 values,
                 value_only_flags,
                 policy_only_flags,

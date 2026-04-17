@@ -204,6 +204,7 @@ impl PyGame {
             let (primary, secondary) = match *enc {
                 PolicyIndex::Single(idx) => (idx, None),
                 PolicyIndex::Sum(a, b) => (a, Some(b)),
+                PolicyIndex::DotProduct { src_cell, dst_cell, .. } => (src_cell, Some(dst_cell)),
             };
             (primary, secondary, piece_str, mv.from, mv.to.unwrap())
         }).collect();
@@ -222,15 +223,16 @@ impl PyGame {
     }
 
     /// Encode any move as (primary_idx, secondary_idx).
-    /// For placements: returns (flat_idx, -1). Returns (-1, -1) if out of grid.
-    /// For movements: returns (src_idx, dst_idx), both >= 0. Returns (-1, -1) if out of grid.
+    /// For placements: returns (flat_idx, -1) where flat_idx ∈ [0, 5*G²). Returns (-1, -1) if out of grid.
+    /// For movements: returns (src_cell, dst_cell) where both are flat cell indices ∈ [0, G²).
+    ///   Returns (-1, -1) if out of grid or non-base piece.
     #[pyo3(signature = (piece_str, from_pos, to_pos))]
     fn encode_move(&self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) -> (i64, i64) {
         let piece = Piece::from_str(piece_str).expect("invalid piece string");
         let gs = self.game.nn_grid_size;
         if let Some(from) = from_pos {
             match move_encoding::encode_movement(from, piece, to_pos, gs) {
-                Some(PolicyIndex::Sum(a, b)) => (a as i64, b as i64),
+                Some(PolicyIndex::DotProduct { src_cell, dst_cell, .. }) => (src_cell as i64, dst_cell as i64),
                 _ => (-1, -1),
             }
         } else {

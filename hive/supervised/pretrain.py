@@ -44,7 +44,7 @@ def _load_encoding_consts() -> tuple[int, int, int]:
         from ..encoding.board_encoder import NUM_CHANNELS, GRID_SIZE
         from ..encoding.move_encoder import POLICY_SIZE
         _NUM_CHANNELS, _GRID_SIZE, _POLICY_SIZE = NUM_CHANNELS, GRID_SIZE, POLICY_SIZE
-    return _NUM_CHANNELS, _GRID_SIZE, _POLICY_SIZE
+    return _NUM_CHANNELS, _GRID_SIZE, _POLICY_SIZE  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ def game_to_samples(
     verbose: bool = False,
     game_name: str = "",
     grid_size: int = 23,
-) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, float]]:
+) -> list[tuple]:
     """Convert one SGF game to a list of training samples.
 
     Args:
@@ -174,23 +174,24 @@ def game_to_samples(
         grid_size: NN encoding grid size.
 
     Returns:
-        List of (board_tensor, reserve_vector, policy_target, value_target).
+        List of (board_tensor, reserve_vector, place_target,
+                 movement_src, movement_dst, movement_probs, value_target).
           board_tensor  : shape (NUM_CHANNELS, grid_size, grid_size), float32
           reserve_vector: shape (RESERVE_SIZE,), float32
-          policy_target : shape (POLICY_SIZE,), float32 one-hot
+          place_target  : shape (5*G²,), float32 one-hot on placement, zeros for movements
+          movement_src  : list[int] — [src_cell] for movements, [] for placements
+          movement_dst  : list[int] — [dst_cell] for movements, [] for placements
+          movement_probs: list[float] — [1.0] for movements, [] for placements
           value_target  : float, ∈ {-1.0, 0.0, +1.0}
     """
     import engine_zero
-    from ..encoding.move_encoder import NUM_POLICY_CHANNELS
+    from ..encoding.move_encoder import NUM_PLACE_CHANNELS
     NUM_CHANNELS, _, _ = _load_encoding_consts()
-    POLICY_SIZE = NUM_POLICY_CHANNELS * grid_size * grid_size
+    place_size = NUM_PLACE_CHANNELS * grid_size * grid_size
 
-    # Defer outcome lookup: collect (board, reserve, policy, turn_color) first,
-    # then resolve values once we know the result (either from the argument or
-    # from the final game state after replay).
     known_result = result
     game = engine_zero.HiveGame(grid_size=grid_size)
-    pending: list[tuple[np.ndarray, np.ndarray, np.ndarray, str]] = []
+    pending: list[tuple] = []
 
     for move_str in parse_moves(sgf_content):
         if game.is_game_over:
@@ -228,12 +229,20 @@ def game_to_samples(
                 print(f"  [skip] {game_name}: move outside encoding grid: {move_str!r}")
             return []
 
-        policy = np.zeros(POLICY_SIZE, dtype=np.float32)
-        policy[primary_idx] = 1.0
-        if secondary_idx >= 0:
-            policy[secondary_idx] = 1.0
+        place_target = np.zeros(place_size, dtype=np.float32)
+        if from_pos is None:
+            # Placement: primary_idx is a flat index into [0, 5*G²)
+            place_target[primary_idx] = 1.0
+            mv_src: list[int] = []
+            mv_dst: list[int] = []
+            mv_probs: list[float] = []
+        else:
+            # Movement: encode_move returns (src_cell, dst_cell) in [0, G²)
+            mv_src = [int(primary_idx)]
+            mv_dst = [int(secondary_idx)]
+            mv_probs = [1.0]
 
-        pending.append((board, reserve, policy, turn_color))
+        pending.append((board, reserve, place_target, mv_src, mv_dst, mv_probs, turn_color))
 
         # Advance the game state.
         game.play_move(piece_str, from_pos, to_pos)
@@ -250,8 +259,8 @@ def game_to_samples(
         outcome = {"w": 0.0, "b": 0.0}
 
     return [
-        (board, reserve, policy, outcome[turn_color])
-        for board, reserve, policy, turn_color in pending
+        (board, reserve, place_target, mv_src, mv_dst, mv_probs, outcome[turn_color])
+        for board, reserve, place_target, mv_src, mv_dst, mv_probs, turn_color in pending
     ]
 
 
@@ -432,8 +441,8 @@ class Pretrainer:
                         errors_this_epoch += 1
                         samples = []
 
-                    for board, reserve, policy, value in samples:
-                        dataset.add_sample(board, reserve, policy, float(value))
+                    for board, reserve, place_target, mv_src, mv_dst, mv_probs, value in samples:
+                        dataset.add_sample(board, reserve, place_target, mv_src, mv_dst, mv_probs, float(value))
                         total_positions += 1
                         positions_this_epoch += 1
 

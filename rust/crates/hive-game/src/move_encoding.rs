@@ -1,24 +1,24 @@
-/// Encode/decode Hive moves for the factorized (source, dest) neural network policy.
+/// Encode/decode Hive moves for the bilinear Q·K neural network policy.
 /// Must produce identical layout to Python move_encoder.py.
 ///
-/// Policy layout — flat vector of size 11 * grid_size * grid_size:
+/// Policy layout — flat vector of size (5 + 2*BILINEAR_DIM) * grid_size * grid_size:
 ///
-///   [0 .. 5*G*G)       — placement head (piece_type × dest)
+///   [0 .. 5*G*G)                         — placement head (piece_type × dest)
 ///       place_offset = type_idx * G*G + row*G + col
 ///
-///   [5*G*G .. 6*G*G)   — movement source head (src hex)
-///       src_offset = 5*G*G + row*G + col
+///   [5*G*G .. (5+D)*G*G)                 — Q embeddings (D channels × G*G cells)
+///       q_offset + d * G*G + row*G + col    (d = 0..D-1)
 ///
-///   [6*G*G .. 11*G*G)  — movement destination head (piece_type × dest)
-///       dst_offset = 6*G*G + type_idx*G*G + row*G + col
+///   [(5+D)*G*G .. (5+2D)*G*G)            — K embeddings (D channels × G*G cells)
+///       k_offset + d * G*G + row*G + col
 ///
 /// MCTS prior computation:
 ///   Placement(type, dest):    prior = policy[place_offset]
-///   Movement(src, dest):      prior = policy[src_offset] + policy[dst_offset]
+///   Movement(src, dest):      prior = Q[src] · K[dst] / sqrt(D)
 ///
-/// Training targets (marginals stored in the flat policy vector):
-///   Placement visits go to policy[place_offset].
-///   Movement visits are split: policy[src_offset] += visits, policy[dst_offset] += visits.
+/// Training targets:
+///   Placement visits stored in flat placement slice (unchanged).
+///   Movement visits stored as sparse (src_cell, dst_cell, prob) triples — no marginalization.
 
 use core_game::hex::Hex;
 use crate::piece::Piece;
@@ -26,9 +26,11 @@ use crate::piece::PieceType;
 use crate::game::{Game, Move};
 use core_game::game::PolicyIndex;
 
+/// Bilinear embedding dimension for the Q·K movement head.
+pub const BILINEAR_DIM: usize = 8;
 /// Conceptual "channels" for policy_size = NUM_POLICY_CHANNELS * G * G:
-///   5 placement channels + 1 src channel + 5 dst channels (piece_type × dest).
-pub const NUM_POLICY_CHANNELS: usize = 11;
+///   5 placement + D Q-channels + D K-channels.
+pub const NUM_POLICY_CHANNELS: usize = 5 + 2 * BILINEAR_DIM;
 /// Number of placement head channels (one per piece type).
 pub const NUM_PLACE_CHANNELS: usize = 5;
 
@@ -40,12 +42,12 @@ pub fn policy_size(grid_size: usize) -> usize {
 /// Offset of the placement head in the flat policy vector.
 #[inline]
 pub fn place_section_offset() -> usize { 0 }
-/// Offset of the movement-source head.
+/// Offset of the Q-embedding head (D channels).
 #[inline]
-pub fn src_section_offset(grid_size: usize) -> usize { NUM_PLACE_CHANNELS * grid_size * grid_size }
-/// Offset of the movement-destination head.
+pub fn q_section_offset(grid_size: usize) -> usize { NUM_PLACE_CHANNELS * grid_size * grid_size }
+/// Offset of the K-embedding head (D channels).
 #[inline]
-pub fn dst_section_offset(grid_size: usize) -> usize { (NUM_PLACE_CHANNELS + 1) * grid_size * grid_size }
+pub fn k_section_offset(grid_size: usize) -> usize { (NUM_PLACE_CHANNELS + BILINEAR_DIM) * grid_size * grid_size }
 
 /// Map hex coordinates to encoding grid (shared with board encoding).
 #[inline]
@@ -85,16 +87,21 @@ pub fn encode_placement(piece: Piece, dest: Hex, grid_size: usize) -> Option<Pol
     Some(PolicyIndex::Single(type_idx * grid_size * grid_size + cell(row, col, grid_size)))
 }
 
-/// Encode a movement move (src, piece, dest) as a Sum PolicyIndex.
-/// The dst index is piece-type-conditioned: dst_offset + type_idx * G² + cell.
-/// Returns None if either hex is out of grid bounds.
+/// Encode a movement move (src, piece, dest) as a DotProduct PolicyIndex.
+/// Returns None if either hex is out of grid bounds or piece type is not a base type.
 pub fn encode_movement(src: Hex, piece: Piece, dest: Hex, grid_size: usize) -> Option<PolicyIndex> {
     let (sr, sc) = hex_to_grid(src, grid_size)?;
     let (dr, dc) = hex_to_grid(dest, grid_size)?;
-    let src_idx = src_section_offset(grid_size) + cell(sr, sc, grid_size);
-    let type_idx = base_piece_type_idx(piece.piece_type())?;
-    let dst_idx = dst_section_offset(grid_size) + type_idx * grid_size * grid_size + cell(dr, dc, grid_size);
-    Some(PolicyIndex::Sum(src_idx, dst_idx))
+    let _ = base_piece_type_idx(piece.piece_type())?;  // reject non-base pieces
+    let g2 = grid_size * grid_size;
+    Some(PolicyIndex::DotProduct {
+        q_offset: q_section_offset(grid_size),
+        k_offset: k_section_offset(grid_size),
+        src_cell: cell(sr, sc, grid_size),
+        dst_cell: cell(dr, dc, grid_size),
+        embed_dim: BILINEAR_DIM,
+        g2,
+    })
 }
 
 /// Encode any Move struct as a PolicyIndex. Returns None for pass or out-of-grid.
@@ -141,11 +148,15 @@ pub fn get_legal_move_mask(game: &mut Game, grid_size: usize) -> (Vec<f32>, Vec<
                     indexed_moves.push((PolicyIndex::Single(idx), mv));
                 }
             }
-            Some(PolicyIndex::Sum(a, b)) if a < ps && b < ps => {
-                // Movement — src hex is unique per piece, no dedup needed
-                mask[a] = 1.0;
-                mask[b] = 1.0;
-                indexed_moves.push((PolicyIndex::Sum(a, b), mv));
+            Some(enc @ PolicyIndex::DotProduct { q_offset, k_offset, src_cell, dst_cell, embed_dim, g2 }) => {
+                // Movement — mark all D Q-cells and D K-cells used by this src/dst pair
+                for d in 0..embed_dim {
+                    let qi = q_offset + d * g2 + src_cell;
+                    let ki = k_offset + d * g2 + dst_cell;
+                    if qi < ps { mask[qi] = 1.0; }
+                    if ki < ps { mask[ki] = 1.0; }
+                }
+                indexed_moves.push((enc, mv));
             }
             _ => {}
         }
@@ -175,19 +186,19 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_movement_sum() {
-        // Movement ant (1,0) -> (0,0): src=(11,12), dst=(11,11)
-        // Ant type_idx = 4
+    fn test_encode_movement_dot_product() {
+        // Movement ant (1,0) -> (0,0): src=(row11,col12), dst=(row11,col11)
         let ant = Piece::new(PieceColor::White, PieceType::Ant, 1);
         match encode_movement((1, 0), ant, (0, 0), GS) {
-            Some(PolicyIndex::Sum(a, b)) => {
-                let src_off = src_section_offset(GS);
-                let dst_off = dst_section_offset(GS);
-                assert_eq!(a, src_off + 11 * GS + 12); // (1,0) -> row11, col12
-                // Ant type_idx=4, dest=(0,0) -> center (row11, col11)
-                assert_eq!(b, dst_off + 4 * GS * GS + 11 * GS + 11);
+            Some(PolicyIndex::DotProduct { q_offset, k_offset, src_cell, dst_cell, embed_dim, g2 }) => {
+                assert_eq!(q_offset, q_section_offset(GS));
+                assert_eq!(k_offset, k_section_offset(GS));
+                assert_eq!(src_cell, 11 * GS + 12); // (1,0) -> row11, col12
+                assert_eq!(dst_cell, 11 * GS + 11); // (0,0) -> center
+                assert_eq!(embed_dim, BILINEAR_DIM);
+                assert_eq!(g2, GS * GS);
             }
-            other => panic!("expected Sum, got {:?}", other),
+            other => panic!("expected DotProduct, got {:?}", other),
         }
     }
 
@@ -214,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_movement_different_src_differ() {
-        // Same dest and piece type, different src → different Sum indices
+        // Different src → different src_cell in DotProduct
         let piece = Piece::new(PieceColor::White, PieceType::Ant, 1);
         let e1 = encode_movement((1, 0), piece, (0, 0), GS);
         let e2 = encode_movement((2, 0), piece, (0, 0), GS);
@@ -224,6 +235,7 @@ mod tests {
     #[test]
     fn test_policy_size() {
         assert_eq!(policy_size(23), NUM_POLICY_CHANNELS * 23 * 23);
+        assert_eq!(NUM_POLICY_CHANNELS, 5 + 2 * BILINEAR_DIM);
     }
 
     #[test]
@@ -237,7 +249,7 @@ mod tests {
     fn test_section_offsets() {
         let gs = 17usize;
         assert_eq!(place_section_offset(), 0);
-        assert_eq!(src_section_offset(gs), 5 * gs * gs);
-        assert_eq!(dst_section_offset(gs), 6 * gs * gs);
+        assert_eq!(q_section_offset(gs), 5 * gs * gs);
+        assert_eq!(k_section_offset(gs), (5 + BILINEAR_DIM) * gs * gs);
     }
 }

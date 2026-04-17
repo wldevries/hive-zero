@@ -303,14 +303,18 @@ fn expand_with_policy<G: GameEngine>(
         return;
     }
 
-    // Compute raw scores (logit or logit-sum) per legal move, then softmax
-    // over legal moves only. This is correct whether the policy vector contains
-    // raw logits (ORT path, TicTacToe) or pre-softmaxed probabilities (legacy
-    // Hive Python path) — equal inputs still produce equal priors via softmax.
+    // Compute raw scores per legal move, then softmax over legal moves only.
     let mut scores: Vec<f32> = indexed_moves.iter()
         .map(|&(enc, _)| match enc {
             PolicyIndex::Single(idx) => policy[idx],
             PolicyIndex::Sum(a, b) => policy[a] + policy[b],
+            PolicyIndex::DotProduct { q_offset, k_offset, src_cell, dst_cell, embed_dim, g2 } => {
+                let mut dot = 0.0f32;
+                for d in 0..embed_dim {
+                    dot += policy[q_offset + d * g2 + src_cell] * policy[k_offset + d * g2 + dst_cell];
+                }
+                dot / (embed_dim as f32).sqrt()
+            }
         })
         .collect();
 

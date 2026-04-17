@@ -3,7 +3,6 @@ use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
 
 use core_game::game::{Game as GameTrait, Outcome, Player, PolicyIndex};
-use core_game::hex::hex_neighbors;
 use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::{CpuctStrategy, ForcedExploration, MctsSearch, RootNoise, SearchParams};
 use core_game::symmetry::{D6Symmetry, Symmetry};
@@ -11,7 +10,7 @@ use core_game::symmetry::{D6Symmetry, Symmetry};
 use crate::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE};
 use crate::game::{Game, GameState, Move};
 use crate::move_encoding::{self, encode_game_move};
-use crate::piece::{Piece, PieceColor, PieceType};
+use crate::piece::PieceColor;
 
 pub type EvalFn<'a> = Box<dyn FnMut(&[f32], &[f32], usize) -> Result<(Vec<f32>, Vec<f32>), String> + 'a>;
 pub type SelfPlayProgressFn<'a> = Box<dyn FnMut(u32, u32, u32, u32, u32, u32, u32) + 'a>;
@@ -30,7 +29,11 @@ pub struct SelfPlayResult {
     pub grid_size: usize,
     pub board_data: Vec<f32>,
     pub reserve_data: Vec<f32>,
-    pub policy_data: Vec<f32>,
+    pub place_data: Vec<f32>,
+    pub movement_src_data: Vec<u16>,
+    pub movement_dst_data: Vec<u16>,
+    pub movement_prob_data: Vec<f32>,
+    pub movement_offsets: Vec<u32>,
     pub value_targets: Vec<f32>,
     pub value_only_flags: Vec<bool>,
     pub policy_only_flags: Vec<bool>,
@@ -62,7 +65,10 @@ struct TurnRecord {
     reserve_offset: usize,
     turn_color: PieceColor,
     is_value_only: bool,
-    policy_vector: Vec<f32>,
+    place_vector: Vec<f32>,
+    movement_src: Vec<u16>,
+    movement_dst: Vec<u16>,
+    movement_prob: Vec<f32>,
     my_queen_danger: f32,
     opp_queen_danger: f32,
     my_queen_escape: f32,
@@ -529,24 +535,25 @@ pub fn play_selfplay_core(
                 }
             }
 
-            let mut policy_vector = vec![0.0f32; policy_size];
+            let place_size = move_encoding::NUM_PLACE_CHANNELS * grid_size * grid_size;
+            let mut place_vector = vec![0.0f32; place_size];
+            let mut movement_src: Vec<u16> = Vec::new();
+            let mut movement_dst: Vec<u16> = Vec::new();
+            let mut movement_prob: Vec<f32> = Vec::new();
             for (move_index, (mv, _)) in dist.iter().enumerate() {
                 if mv.piece.is_some() {
                     match encode_game_move(mv, grid_size) {
                         Some(PolicyIndex::Single(index)) => {
-                            if index < policy_size {
-                                policy_vector[index] = probs[move_index];
+                            if index < place_size {
+                                place_vector[index] = probs[move_index];
                             }
                         }
-                        Some(PolicyIndex::Sum(a, b)) => {
-                            if a < policy_size {
-                                policy_vector[a] += probs[move_index];
-                            }
-                            if b < policy_size {
-                                policy_vector[b] += probs[move_index];
-                            }
+                        Some(PolicyIndex::DotProduct { src_cell, dst_cell, .. }) => {
+                            movement_src.push(src_cell as u16);
+                            movement_dst.push(dst_cell as u16);
+                            movement_prob.push(probs[move_index]);
                         }
-                        None => {}
+                        _ => {}
                     }
                 }
             }
@@ -564,7 +571,10 @@ pub fn play_selfplay_core(
                 reserve_offset: turn_reserve_offsets[index],
                 turn_color,
                 is_value_only,
-                policy_vector,
+                place_vector,
+                movement_src,
+                movement_dst,
+                movement_prob,
                 my_queen_danger: games[game_index].queen_danger(turn_color),
                 opp_queen_danger: games[game_index].queen_danger(opp_color),
                 my_queen_escape: games[game_index].queen_escape(turn_color),
@@ -647,7 +657,11 @@ pub fn play_selfplay_core(
 
     let mut result_board_data = Vec::new();
     let mut result_reserve_data = Vec::new();
-    let mut result_policy_data = Vec::new();
+    let mut result_place_data = Vec::new();
+    let mut result_movement_src: Vec<u16> = Vec::new();
+    let mut result_movement_dst: Vec<u16> = Vec::new();
+    let mut result_movement_prob: Vec<f32> = Vec::new();
+    let mut result_movement_offsets: Vec<u32> = vec![0u32];
     let mut result_value_targets = Vec::new();
     let mut result_value_only = Vec::new();
     let mut result_policy_only = Vec::new();
@@ -751,7 +765,11 @@ pub fn play_selfplay_core(
 
             result_board_data.extend_from_slice(board);
             result_reserve_data.extend_from_slice(reserve);
-            result_policy_data.extend_from_slice(&record.policy_vector);
+            result_place_data.extend_from_slice(&record.place_vector);
+            result_movement_src.extend_from_slice(&record.movement_src);
+            result_movement_dst.extend_from_slice(&record.movement_dst);
+            result_movement_prob.extend_from_slice(&record.movement_prob);
+            result_movement_offsets.push(result_movement_src.len() as u32);
             result_value_targets.push(value);
             result_value_only.push(record.is_value_only);
             result_policy_only.push(policy_only);
@@ -787,7 +805,11 @@ pub fn play_selfplay_core(
         grid_size,
         board_data: result_board_data,
         reserve_data: result_reserve_data,
-        policy_data: result_policy_data,
+        place_data: result_place_data,
+        movement_src_data: result_movement_src,
+        movement_dst_data: result_movement_dst,
+        movement_prob_data: result_movement_prob,
+        movement_offsets: result_movement_offsets,
         value_targets: result_value_targets,
         value_only_flags: result_value_only,
         policy_only_flags: result_policy_only,

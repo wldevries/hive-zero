@@ -154,7 +154,11 @@ fn into_py_selfplay_result(result: search::SelfPlayResult) -> PySelfPlayResult {
         grid_size: result.grid_size,
         board_data: result.board_data,
         reserve_data: result.reserve_data,
-        policy_data: result.policy_data,
+        place_data: result.place_data,
+        movement_src_data: result.movement_src_data,
+        movement_dst_data: result.movement_dst_data,
+        movement_prob_data: result.movement_prob_data,
+        movement_offsets: result.movement_offsets,
         value_targets: result.value_targets,
         value_only_flags: result.value_only_flags,
         policy_only_flags: result.policy_only_flags,
@@ -196,7 +200,11 @@ pub struct PySelfPlayResult {
     grid_size: usize,
     board_data: Vec<f32>,
     reserve_data: Vec<f32>,
-    policy_data: Vec<f32>,
+    place_data: Vec<f32>,
+    movement_src_data: Vec<u16>,
+    movement_dst_data: Vec<u16>,
+    movement_prob_data: Vec<f32>,
+    movement_offsets: Vec<u32>,
     value_targets: Vec<f32>,
     value_only_flags: Vec<bool>,
     policy_only_flags: Vec<bool>,
@@ -229,20 +237,26 @@ impl PySelfPlayResult {
         &self,
         py: Python<'py>,
     ) -> (
-        Bound<'py, PyArray2<f32>>,
-        Bound<'py, PyArray2<f32>>,
-        Bound<'py, PyArray2<f32>>,
-        Bound<'py, PyArray1<f32>>,
-        Vec<bool>,
-        Vec<bool>,
-        Bound<'py, PyArray2<f32>>,
+        Bound<'py, PyArray2<f32>>,   // boards (n, board_size)
+        Bound<'py, PyArray2<f32>>,   // reserves (n, RESERVE_SIZE)
+        Bound<'py, PyArray2<f32>>,   // place_targets (n, place_size)
+        Bound<'py, PyArray1<f32>>,   // values (n,)
+        Vec<bool>,                   // value_only_flags
+        Vec<bool>,                   // policy_only_flags
+        Bound<'py, PyArray2<f32>>,   // aux (n, 6)
+        Bound<'py, PyArray2<u16>>,   // movement_srcs (n, MAX_MOVE_PAIRS)
+        Bound<'py, PyArray2<u16>>,   // movement_dsts (n, MAX_MOVE_PAIRS)
+        Bound<'py, PyArray2<f32>>,   // movement_probs (n, MAX_MOVE_PAIRS)
+        Bound<'py, PyArray1<i32>>,   // num_movements (n,)
     ) {
+        const MAX_MOVE_PAIRS: usize = 256;
         let n = self.num_samples;
         let board_size = NUM_CHANNELS * self.grid_size * self.grid_size;
-        let policy_size = move_encoding::policy_size(self.grid_size);
+        let place_size = move_encoding::NUM_PLACE_CHANNELS * self.grid_size * self.grid_size;
+
         let boards = numpy::ndarray::Array2::from_shape_vec((n, board_size), self.board_data.clone()).unwrap();
         let reserves = numpy::ndarray::Array2::from_shape_vec((n, RESERVE_SIZE), self.reserve_data.clone()).unwrap();
-        let policies = numpy::ndarray::Array2::from_shape_vec((n, policy_size), self.policy_data.clone()).unwrap();
+        let place_targets = numpy::ndarray::Array2::from_shape_vec((n, place_size), self.place_data.clone()).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
 
         let mut aux_data = Vec::with_capacity(n * 6);
@@ -256,14 +270,40 @@ impl PySelfPlayResult {
         }
         let aux = numpy::ndarray::Array2::from_shape_vec((n, 6), aux_data).unwrap();
 
+        // Build padded movement arrays from CSR data
+        let mut mv_srcs = vec![0u16; n * MAX_MOVE_PAIRS];
+        let mut mv_dsts = vec![0u16; n * MAX_MOVE_PAIRS];
+        let mut mv_probs = vec![0.0f32; n * MAX_MOVE_PAIRS];
+        let mut num_movements = vec![0i32; n];
+
+        for i in 0..n {
+            let start = self.movement_offsets[i] as usize;
+            let end = self.movement_offsets[i + 1] as usize;
+            let count = (end - start).min(MAX_MOVE_PAIRS);
+            num_movements[i] = count as i32;
+            let row = i * MAX_MOVE_PAIRS;
+            mv_srcs[row..row + count].copy_from_slice(&self.movement_src_data[start..start + count]);
+            mv_dsts[row..row + count].copy_from_slice(&self.movement_dst_data[start..start + count]);
+            mv_probs[row..row + count].copy_from_slice(&self.movement_prob_data[start..start + count]);
+        }
+
+        let mv_srcs_arr = numpy::ndarray::Array2::from_shape_vec((n, MAX_MOVE_PAIRS), mv_srcs).unwrap();
+        let mv_dsts_arr = numpy::ndarray::Array2::from_shape_vec((n, MAX_MOVE_PAIRS), mv_dsts).unwrap();
+        let mv_probs_arr = numpy::ndarray::Array2::from_shape_vec((n, MAX_MOVE_PAIRS), mv_probs).unwrap();
+        let num_mv_arr = numpy::ndarray::Array1::from(num_movements);
+
         (
             PyArray2::from_owned_array(py, boards),
             PyArray2::from_owned_array(py, reserves),
-            PyArray2::from_owned_array(py, policies),
+            PyArray2::from_owned_array(py, place_targets),
             PyArray1::from_owned_array(py, values),
             self.value_only_flags.clone(),
             self.policy_only_flags.clone(),
             PyArray2::from_owned_array(py, aux),
+            PyArray2::from_owned_array(py, mv_srcs_arr),
+            PyArray2::from_owned_array(py, mv_dsts_arr),
+            PyArray2::from_owned_array(py, mv_probs_arr),
+            PyArray1::from_owned_array(py, num_mv_arr),
         )
     }
 
