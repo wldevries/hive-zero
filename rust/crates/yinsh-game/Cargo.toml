@@ -1,0 +1,11 @@
+[package]
+name = "yinsh-game"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+core-game = { path = "../core-game", default-features = false }
+
+[lib]
+name = "yinsh_game"
+path = "src/lib.rs"

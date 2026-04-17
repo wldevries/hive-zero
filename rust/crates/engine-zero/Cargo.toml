@@ -12,6 +12,7 @@ core-game = { path = "../core-game" }
 hive-game = { path = "../hive-game" }
 zertz-game = { path = "../zertz-game" }
 tictactoe-game = { path = "../tictactoe-game" }
+yinsh-game = { path = "../yinsh-game" }
 pyo3 = { version = "0.28.3", features = ["extension-module"] }
 numpy = "0.28.0"
 rand = { workspace = true }

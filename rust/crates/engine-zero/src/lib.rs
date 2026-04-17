@@ -3,6 +3,7 @@ pub mod hive_python;
 pub mod hive_selfplay;
 pub mod zertz_python;
 pub mod tictactoe_python;
+pub mod yinsh_python;
 
 use pyo3::prelude::*;
 
@@ -13,5 +14,6 @@ fn engine_zero(m: &Bound<'_, PyModule>) -> PyResult<()> {
     hive_selfplay::register(m)?;
     zertz_python::register(m)?;
     tictactoe_python::register(m)?;
+    yinsh_python::register(m)?;
     Ok(())
 }
