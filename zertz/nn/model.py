@@ -10,22 +10,22 @@ from shared.nn.resblock import ResBlock
 # From Rust board encoding
 NUM_CHANNELS = 6
 GRID_SIZE = 7
-POLICY_SIZE = 5587  # Legacy flat size, used only for training data storage
+POLICY_SIZE = 4440  # flat training storage: place[4107] + place_only[111] + cap_dir[222]
 RESERVE_SIZE = 22
 
-# Factorized policy head sizes (must match Rust PLACE_HEAD_SIZE, CAP_HEAD_SIZE)
+# Policy head sizes (must match Rust PLACE_HEAD_SIZE, CAP_HEAD_SIZE)
 PLACE_HEAD_CHANNELS = 4  # ch 0-2: place W/G/B, ch 3: remove ring
 PLACE_HEAD_SIZE = PLACE_HEAD_CHANNELS * GRID_SIZE * GRID_SIZE  # 196
-CAP_HEAD_SIZE = GRID_SIZE * GRID_SIZE  # 49
+NUM_DIR_CHANNELS = 6  # one per hex direction (E, NE, NW, W, SW, SE)
+CAP_HEAD_SIZE = NUM_DIR_CHANNELS * GRID_SIZE * GRID_SIZE  # 294
 
 
 class ZertzNet(nn.Module):
-    """AlphaZero-style network for Zertz with factorized policy heads.
+    """AlphaZero-style network for Zertz with direction-based capture policy head.
 
-    Input:  (batch, 4, 7, 7) board tensor + (batch, 15) reserve vector
-    Output: place_logits (batch, 4, 7, 7),
-            cap_source_logits (batch, 1, 7, 7),
-            cap_dest_logits (batch, 1, 7, 7),
+    Input:  (batch, 6, 7, 7) board tensor + (batch, 22) reserve vector
+    Output: place_logits (batch, 4*7*7),
+            cap_dir_logits (batch, 6*7*7),
             value (batch, 1) in [-1, 1]
 
     Reserve vector is broadcast spatially and concatenated with the board
@@ -33,7 +33,7 @@ class ZertzNet(nn.Module):
     context (supply, captures) through all residual blocks.
 
     Policy heads are conv1x1 over the trunk (no flatten/FC).
-    Rust MCTS combines heads to compute per-move priors.
+    Rust MCTS scores each capture as cap_dir[direction][source_pos].
     """
 
     def __init__(self, num_blocks: int = 6, channels: int = 64):
@@ -46,10 +46,9 @@ class ZertzNet(nn.Module):
 
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
 
-        # Factorized policy heads (conv1x1 over trunk)
+        # Policy heads (conv1x1 over trunk)
         self.policy_place = nn.Conv2d(channels, PLACE_HEAD_CHANNELS, 1)
-        self.policy_source = nn.Conv2d(channels, 1, 1)
-        self.policy_dest = nn.Conv2d(channels, 1, 1)
+        self.policy_cap_dir = nn.Conv2d(channels, NUM_DIR_CHANNELS, 1)
 
         # Value head: conv1x1 → flatten → FC(256) → tanh
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
@@ -62,13 +61,12 @@ class ZertzNet(nn.Module):
 
         Returns:
             place_logits: (batch, 4*7*7) flattened placement head
-            cap_source_logits: (batch, 7*7) flattened capture source head
-            cap_dest_logits: (batch, 7*7) flattened capture dest head
+            cap_dir_logits: (batch, 6*7*7) flattened direction head
             value: (batch, 1) in [-1, 1]
         """
         # Broadcast reserve spatially and concat with board tensor
         r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, GRID_SIZE, GRID_SIZE)
-        x = torch.cat([board_tensor, r], dim=1)  # (B, 4+15, 7, 7)
+        x = torch.cat([board_tensor, r], dim=1)  # (B, 6+22, 7, 7)
 
         # Trunk
         x = F.relu(self.input_bn(self.input_conv(x)))
@@ -76,9 +74,8 @@ class ZertzNet(nn.Module):
             x = block(x)
 
         # Policy heads (conv1x1 over trunk, then flatten for Rust)
-        place_logits = self.policy_place(x).view(x.size(0), -1)   # (B, 196)
-        source_logits = self.policy_source(x).view(x.size(0), -1) # (B, 49)
-        dest_logits = self.policy_dest(x).view(x.size(0), -1)     # (B, 49)
+        place_logits = self.policy_place(x).view(x.size(0), -1)    # (B, 196)
+        cap_dir_logits = self.policy_cap_dir(x).view(x.size(0), -1) # (B, 294)
 
         # Value head
         v = F.relu(self.value_bn(self.value_conv(x)))
@@ -86,7 +83,7 @@ class ZertzNet(nn.Module):
         v = F.relu(self.value_fc1(v))
         value = torch.tanh(self.value_fc2(v))
 
-        return place_logits, source_logits, dest_logits, value
+        return place_logits, cap_dir_logits, value
 
 
 def create_model(num_blocks: int = 6, channels: int = 64) -> ZertzNet:
@@ -110,7 +107,7 @@ def export_onnx(model: ZertzNet, path: str):
     """Export model to ONNX format for Rust-native inference via ort.
 
     Inputs: board_tensor (B, 6, 7, 7), reserve (B, 22)
-    Outputs: place (B, 196), cap_source (B, 49), cap_dest (B, 49), value (B, 1)
+    Outputs: place (B, 196), cap_dir (B, 294), value (B, 1)
     """
     import os
     was_training = model.training
@@ -118,7 +115,7 @@ def export_onnx(model: ZertzNet, path: str):
     dummy_board = torch.zeros(1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE).cuda()
     dummy_reserve = torch.zeros(1, RESERVE_SIZE).cuda()
     input_names = ["board", "reserve"]
-    output_names = ["place", "cap_source", "cap_dest", "value"]
+    output_names = ["place", "cap_dir", "value"]
     import logging
     _onnx_logger = logging.getLogger("onnxscript")
     _prev_level = _onnx_logger.level

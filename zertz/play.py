@@ -16,11 +16,10 @@ def make_eval_fn(model, device):
         board = torch.from_numpy(np.array(board_np)).float().to(device)
         reserve = torch.from_numpy(np.array(reserve_np)).float().to(device)
         with torch.no_grad():
-            place, source, dest, value = model(board, reserve)
+            place, cap_dir, value = model(board, reserve)
         return (
             place.cpu().numpy(),
-            source.cpu().numpy(),
-            dest.cpu().numpy(),
+            cap_dir.cpu().numpy(),
             value.squeeze(-1).cpu().numpy(),
         )
 

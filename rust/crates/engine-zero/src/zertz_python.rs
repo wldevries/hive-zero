@@ -20,7 +20,7 @@ fn call_python_eval(
     boards: &[f32],
     reserves: &[f32],
     batch_size: usize,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>), String> {
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
     Python::attach(|py| {
         let board_arr = numpy::ndarray::Array2::from_shape_vec(
             (batch_size, BOARD_FLAT),
@@ -43,7 +43,7 @@ fn call_python_eval(
             .map_err(|e| e.to_string())?;
         let tuple = result
             .cast::<PyTuple>()
-            .map_err(|_| "eval_fn must return (place, cap_source, cap_dest, value) tuple".to_string())?;
+            .map_err(|_| "eval_fn must return (place, cap_dir, value) tuple".to_string())?;
 
         let place = tuple
             .get_item(0)
@@ -51,20 +51,14 @@ fn call_python_eval(
             .cast::<PyArray2<f32>>()
             .map_err(|e| e.to_string())?
             .readonly();
-        let cap_source = tuple
+        let cap_dir = tuple
             .get_item(1)
             .map_err(|e| e.to_string())?
             .cast::<PyArray2<f32>>()
             .map_err(|e| e.to_string())?
             .readonly();
-        let cap_dest = tuple
-            .get_item(2)
-            .map_err(|e| e.to_string())?
-            .cast::<PyArray2<f32>>()
-            .map_err(|e| e.to_string())?
-            .readonly();
         let value = tuple
-            .get_item(3)
+            .get_item(2)
             .map_err(|e| e.to_string())?
             .cast::<PyArray1<f32>>()
             .map_err(|e| e.to_string())?
@@ -72,8 +66,7 @@ fn call_python_eval(
 
         Ok((
             place.as_slice().map_err(|e| e.to_string())?.to_vec(),
-            cap_source.as_slice().map_err(|e| e.to_string())?.to_vec(),
-            cap_dest.as_slice().map_err(|e| e.to_string())?.to_vec(),
+            cap_dir.as_slice().map_err(|e| e.to_string())?.to_vec(),
             value.as_slice().map_err(|e| e.to_string())?.to_vec(),
         ))
     })
@@ -265,7 +258,7 @@ impl PyZertzSelfPlaySession {
                 let r = engine
                     .infer_batch(boards, reserves, n, NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE)
                     .map_err(|e| e.to_string())?;
-                Ok((r.place, r.cap_source, r.cap_dest, r.value))
+                Ok((r.place, r.cap_dir, r.value))
             })
         } else {
             let py_eval = eval_fn

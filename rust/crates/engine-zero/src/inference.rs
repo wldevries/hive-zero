@@ -51,10 +51,8 @@ pub struct HiveInferenceResult {
 pub struct ZertzInferenceResult {
     /// Place logits: [B * PLACE_HEAD_SIZE]
     pub place: Vec<f32>,
-    /// Capture source logits: [B * CAP_HEAD_SIZE]
-    pub cap_source: Vec<f32>,
-    /// Capture dest logits: [B * CAP_HEAD_SIZE]
-    pub cap_dest: Vec<f32>,
+    /// Direction logits: [B * CAP_HEAD_SIZE] (6 channels × 7×7, one per hex direction)
+    pub cap_dir: Vec<f32>,
     /// Value per sample: [B]
     pub value: Vec<f32>,
 }
@@ -256,14 +254,12 @@ impl ZertzOrtEngine {
         ])?;
 
         let (_, place_data) = outputs["place"].try_extract_tensor::<f32>()?;
-        let (_, cap_source_data) = outputs["cap_source"].try_extract_tensor::<f32>()?;
-        let (_, cap_dest_data) = outputs["cap_dest"].try_extract_tensor::<f32>()?;
+        let (_, cap_dir_data) = outputs["cap_dir"].try_extract_tensor::<f32>()?;
         let (_, value_data) = outputs["value"].try_extract_tensor::<f32>()?;
 
         Ok(ZertzInferenceResult {
             place: place_data.to_vec(),
-            cap_source: cap_source_data.to_vec(),
-            cap_dest: cap_dest_data.to_vec(),
+            cap_dir: cap_dir_data.to_vec(),
             value: value_data.to_vec(),
         })
     }

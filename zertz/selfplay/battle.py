@@ -29,11 +29,10 @@ def _make_eval_fn(model, device):
         reserve = torch.from_numpy(np.array(reserve_np)).to(device, dtype=torch.float32)
         with torch.no_grad():
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                place, source, dest, value = model(board, reserve)
+                place, cap_dir, value = model(board, reserve)
         return (
             place.float().cpu().numpy(),
-            source.float().cpu().numpy(),
-            dest.float().cpu().numpy(),
+            cap_dir.float().cpu().numpy(),
             value.float().cpu().numpy().squeeze(1),
         )
     return eval_fn

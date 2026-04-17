@@ -16,8 +16,7 @@ fn run_mcts_demo(simulations: u32) {
     let uniform_buf = vec![0.0f32; POLICY_HEADS_TOTAL];
     let heads = PolicyHeads {
         place: &uniform_buf[..PLACE_HEAD_SIZE],
-        cap_source: &uniform_buf[PLACE_HEAD_SIZE..PLACE_HEAD_SIZE + CAP_HEAD_SIZE],
-        cap_dest: &uniform_buf[PLACE_HEAD_SIZE + CAP_HEAD_SIZE..],
+        cap_dir: &uniform_buf[PLACE_HEAD_SIZE..],
     };
     // TODO: use search.reroot() between moves to carry forward warm visit statistics
     let mut search = mcts::search::MctsSearch::new(100_000);
@@ -34,8 +33,7 @@ fn run_mcts_demo(simulations: u32) {
         if leaves.is_empty() { break; }
         let heads_list: Vec<PolicyHeads> = leaves.iter().map(|_| PolicyHeads {
             place: &uniform_buf[..PLACE_HEAD_SIZE],
-            cap_source: &uniform_buf[PLACE_HEAD_SIZE..PLACE_HEAD_SIZE + CAP_HEAD_SIZE],
-            cap_dest: &uniform_buf[PLACE_HEAD_SIZE + CAP_HEAD_SIZE..],
+            cap_dir: &uniform_buf[PLACE_HEAD_SIZE..],
         }).collect();
         let values: Vec<f32> = vec![0.0; leaves.len()];
         search.expand_and_backprop(&leaves, &heads_list, &values);

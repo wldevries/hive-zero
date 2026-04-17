@@ -3,20 +3,35 @@
 /// Layout:
 ///   Place:     color(3) * 37 * 37 + place_at(37) * 37 + remove(37)   → [0, 4107)
 ///   PlaceOnly: 4107 + color(3) * 37 + place_at(37)                   → [4107, 4218)
-///   Capture:   4218 + from(37) * 37 + final_to(37)                   → [4218, 5587)
+///   Capture:   4218 + direction(6) * 37 + from(37)                   → [4218, 4440)
+///
+/// Direction indices match DIRECTIONS: E=0, NE=1, NW=2, W=3, SW=4, SE=5.
+/// All Zertz captures jump exactly 2 cells in one of these 6 directions.
 
-use crate::hex::{self, hex_to_index};
+use crate::hex::{self, hex_to_index, DIRECTIONS};
 use crate::zertz::{ZertzBoard, ZertzMove};
 #[cfg(test)]
 use crate::zertz::Marble;
 
 const BOARD_SIZE: usize = hex::BOARD_SIZE;
+const NUM_DIRECTIONS: usize = 6;
 
 const PLACE_OFFSET: usize = 0;
 const PLACE_ONLY_OFFSET: usize = 3 * BOARD_SIZE * BOARD_SIZE; // 4107
 const CAPTURE_OFFSET: usize = PLACE_ONLY_OFFSET + 3 * BOARD_SIZE; // 4218
 
-pub const POLICY_SIZE: usize = CAPTURE_OFFSET + BOARD_SIZE * BOARD_SIZE; // 5587
+pub const POLICY_SIZE: usize = CAPTURE_OFFSET + NUM_DIRECTIONS * BOARD_SIZE; // 4440
+
+/// Find the direction index for a capture jump from `from` to `to`.
+/// All Zertz captures jump exactly 2 cells in one of 6 directions.
+pub fn capture_direction(from: crate::hex::Hex, to: crate::hex::Hex) -> usize {
+    for (d, &dir) in DIRECTIONS.iter().enumerate() {
+        if to.0 == from.0 + 2 * dir.0 && to.1 == from.1 + 2 * dir.1 {
+            return d;
+        }
+    }
+    panic!("invalid capture jump: no direction from {:?} to {:?}", from, to);
+}
 
 /// Encode a ZertzMove as a policy index.
 pub fn encode_move(mv: &ZertzMove) -> usize {
@@ -34,10 +49,11 @@ pub fn encode_move(mv: &ZertzMove) -> usize {
         ZertzMove::PlaceOnly { color, place_at } => {
             PLACE_ONLY_OFFSET + color.index() * BOARD_SIZE + hex_to_index(place_at)
         }
-        ZertzMove::Capture { jumps, len } => {
-            let from = hex_to_index(jumps[0].0);
-            let final_to = hex_to_index(jumps[len as usize - 1].2);
-            CAPTURE_OFFSET + from * BOARD_SIZE + final_to
+        ZertzMove::Capture { jumps, .. } => {
+            let from = jumps[0].0;
+            let to = jumps[0].2;
+            let d = capture_direction(from, to);
+            CAPTURE_OFFSET + d * BOARD_SIZE + hex_to_index(from)
         }
         ZertzMove::Pass => 0, // Pass is never generated; return dummy index
     }
@@ -93,14 +109,17 @@ mod tests {
 
     #[test]
     fn test_capture_encoding() {
-        use crate::hex::index_to_hex;
+        use crate::hex::{index_to_hex, hex_add};
+        // Build a valid 2-step capture: from + 2*dir = to
         let from = index_to_hex(10);
-        let over = index_to_hex(15);
-        let to = index_to_hex(20);
-        let mv = ZertzMove::capture_single(from, over, to);
+        let dir = DIRECTIONS[0]; // E direction
+        let mid = hex_add(from, dir);
+        let to = hex_add(mid, dir);
+        let mv = ZertzMove::capture_single(from, mid, to);
         let idx = encode_move(&mv);
         assert!(idx >= CAPTURE_OFFSET && idx < POLICY_SIZE);
-        assert_eq!(idx, CAPTURE_OFFSET + 10 * 37 + 20);
+        let expected_d = 0; // E direction
+        assert_eq!(idx, CAPTURE_OFFSET + expected_d * 37 + 10);
     }
 
     #[test]

@@ -10,9 +10,10 @@ use core_game::mcts::search::{calculate_ucb_exploration, terminal_value};
 use super::arena::{NodeArena, NodeId};
 use super::node::{Edge, MctsNode};
 use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
-use crate::hex::hex_to_grid;
+use crate::hex::{hex_to_grid, Hex, DIRECTIONS};
 use crate::move_encoding::get_legal_move_mask;
 use crate::zertz::{ZertzBoard, ZertzMove};
+use core_game::symmetry::{D6Symmetry, Symmetry, apply_d6_sym_spatial};
 
 const DEFAULT_C_PUCT: f32 = 1.5;
 const VIRTUAL_LOSS: f32 = -1.0;
@@ -199,23 +200,49 @@ fn correct_virtual_loss(arena: &mut NodeArena, node_id: NodeId, real_value: f32)
 }
 
 // ---------------------------------------------------------------------------
-// Policy heads (factorized conv1x1 outputs)
+// Policy heads
 // ---------------------------------------------------------------------------
 
-/// Factorized policy head outputs passed from the NN to the MCTS.
+/// Policy head outputs passed from the NN to the MCTS.
 /// All slices are flattened [C, H, W] with H=W=GRID_SIZE=7.
 pub struct PolicyHeads<'a> {
     /// Placement head: 4 channels × 7×7 (ch 0-2: place W/G/B, ch 3: remove ring).
-    pub place: &'a [f32],      // len = 4 * GRID_SIZE * GRID_SIZE = 196
-    /// Capture source head: 1 channel × 7×7 (which marble starts the hop).
-    pub cap_source: &'a [f32], // len = GRID_SIZE * GRID_SIZE = 49
-    /// Capture destination head: 1 channel × 7×7 (where the marble lands).
-    pub cap_dest: &'a [f32],   // len = GRID_SIZE * GRID_SIZE = 49
+    pub place: &'a [f32],   // len = 4 * GRID_SIZE * GRID_SIZE = 196
+    /// Direction head: 6 channels × 7×7 (one per hex direction, logit at source cell).
+    /// Channel order matches DIRECTIONS: E=0, NE=1, NW=2, W=3, SW=4, SE=5.
+    pub cap_dir: &'a [f32], // len = 6 * GRID_SIZE * GRID_SIZE = 294
 }
 
 pub const PLACE_HEAD_SIZE: usize = 4 * GRID_SIZE * GRID_SIZE;
-pub const CAP_HEAD_SIZE: usize = GRID_SIZE * GRID_SIZE;
-pub const POLICY_HEADS_TOTAL: usize = PLACE_HEAD_SIZE + CAP_HEAD_SIZE + CAP_HEAD_SIZE;
+pub const CAP_HEAD_SIZE: usize = 6 * GRID_SIZE * GRID_SIZE;
+pub const POLICY_HEADS_TOTAL: usize = PLACE_HEAD_SIZE + CAP_HEAD_SIZE;
+
+/// Find the direction index for a capture jump: to = from + 2 * DIRECTIONS[d].
+fn capture_direction(from: Hex, to: Hex) -> usize {
+    for (d, &dir) in DIRECTIONS.iter().enumerate() {
+        if to.0 == from.0 + 2 * dir.0 && to.1 == from.1 + 2 * dir.1 {
+            return d;
+        }
+    }
+    panic!("invalid capture jump {:?} -> {:?}", from, to);
+}
+
+/// Apply a D6 symmetry to a direction head tensor [6, GRID_SIZE, GRID_SIZE].
+/// Permutes both spatial positions and direction channels.
+pub fn apply_d6_sym_cap_dir(tensor: &mut [f32], sym: D6Symmetry) {
+    if sym == D6Symmetry::identity() { return; }
+    let cells = GRID_SIZE * GRID_SIZE;
+    // Permute spatial positions within each direction channel
+    apply_d6_sym_spatial(tensor, sym, 6, GRID_SIZE);
+    // Permute direction channels (old_d -> new_d = sym.transform_dir(old_d))
+    let mut out = vec![0f32; 6 * cells];
+    for d in 0..6usize {
+        let new_d = sym.transform_dir(d);
+        out[new_d * cells..(new_d + 1) * cells]
+            .copy_from_slice(&tensor[d * cells..(d + 1) * cells]);
+    }
+    tensor.copy_from_slice(&out);
+}
 
 impl PolicyHeads<'_> {
     /// Grid index for a flattened [C, H, W] tensor.
@@ -224,8 +251,8 @@ impl PolicyHeads<'_> {
         channel * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col
     }
 
-    /// Score a move using the factorized policy heads.
-    fn score_move(&self, mv: &ZertzMove, is_mid_capture: bool) -> f32 {
+    /// Score a move using the policy heads.
+    fn score_move(&self, mv: &ZertzMove) -> f32 {
         match *mv {
             ZertzMove::Place { color, place_at, remove } => {
                 let (pr, pc) = hex_to_grid(place_at);
@@ -239,16 +266,9 @@ impl PolicyHeads<'_> {
             }
             ZertzMove::Capture { jumps, .. } => {
                 let (from, _over, to) = jumps[0];
-                let (tr, tc) = hex_to_grid(to);
-                let dest_score = self.cap_dest[tr * GRID_SIZE + tc];
-                if is_mid_capture {
-                    // Source is fixed during mid-capture — only destination matters.
-                    dest_score
-                } else {
-                    let (fr, fc) = hex_to_grid(from);
-                    let src_score = self.cap_source[fr * GRID_SIZE + fc];
-                    src_score + dest_score
-                }
+                let d = capture_direction(from, to);
+                let (fr, fc) = hex_to_grid(from);
+                self.cap_dir[Self::grid_idx(d, fr, fc)]
             }
             ZertzMove::Pass => 0.0,
         }
@@ -270,11 +290,9 @@ fn expand_with_policy(arena: &mut NodeArena, node_id: NodeId, heads: &PolicyHead
         return;
     }
 
-    let is_mid = board.is_mid_capture();
-
     // Compute raw scores and softmax for priors.
     let mut scores: Vec<f32> = indexed_moves.iter()
-        .map(|(_, mv)| heads.score_move(mv, is_mid))
+        .map(|(_, mv)| heads.score_move(mv))
         .collect();
 
     // Softmax: subtract max for numerical stability, then exp and normalize.
@@ -616,8 +634,7 @@ mod tests {
     fn heads_from_buf(buf: &[f32]) -> PolicyHeads<'_> {
         PolicyHeads {
             place: &buf[..PLACE_HEAD_SIZE],
-            cap_source: &buf[PLACE_HEAD_SIZE..PLACE_HEAD_SIZE + CAP_HEAD_SIZE],
-            cap_dest: &buf[PLACE_HEAD_SIZE + CAP_HEAD_SIZE..],
+            cap_dir: &buf[PLACE_HEAD_SIZE..],
         }
     }
 

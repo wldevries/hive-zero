@@ -87,7 +87,7 @@ class SelfPlayTrainer:
     def _eval_fn(self, board_tensor_np, reserve_np):
         """NN inference callback for Rust self-play.
 
-        Returns 4-tuple: (place_logits, cap_source_logits, cap_dest_logits, value)
+        Returns 3-tuple: (place_logits, cap_dir_logits, value)
         as numpy arrays. Rust MCTS computes softmax over legal moves internally.
         """
         board = torch.from_numpy(np.array(board_tensor_np)).to(self.device, dtype=torch.float32)
@@ -97,11 +97,10 @@ class SelfPlayTrainer:
                 device_type="cuda" if self.device != "cpu" else "cpu",
                 dtype=torch.bfloat16,
             ):
-                place, source, dest, value = self.model(board, reserve)
+                place, cap_dir, value = self.model(board, reserve)
         return (
             place.float().cpu().numpy(),
-            source.float().cpu().numpy(),
-            dest.float().cpu().numpy(),
+            cap_dir.float().cpu().numpy(),
             value.float().cpu().numpy().squeeze(1),
         )
 

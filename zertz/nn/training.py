@@ -13,8 +13,26 @@ from .model import ZertzNet, create_model, NUM_CHANNELS, GRID_SIZE, POLICY_SIZE,
 _BOARD_SIZE = 37
 _PLACE_ONLY_OFFSET = 3 * _BOARD_SIZE * _BOARD_SIZE  # 4107
 _CAPTURE_OFFSET = _PLACE_ONLY_OFFSET + 3 * _BOARD_SIZE  # 4218
+_NUM_DIRS = 6
 _RADIUS = 3
 _GS = GRID_SIZE * GRID_SIZE  # 49
+
+# Inverse gather permutations for direction channels under each D6 symmetry.
+# _D6_DIR_PERMS[sym][new_d] = old_d: "to build new channel new_d, gather from old channel old_d"
+_D6_DIR_PERMS = [
+    [0, 1, 2, 3, 4, 5],  # sym 0: identity
+    [5, 0, 1, 2, 3, 4],  # sym 1: rot 1
+    [4, 5, 0, 1, 2, 3],  # sym 2: rot 2
+    [3, 4, 5, 0, 1, 2],  # sym 3: rot 3 (180°)
+    [2, 3, 4, 5, 0, 1],  # sym 4: rot 4
+    [1, 2, 3, 4, 5, 0],  # sym 5: rot 5
+    [0, 5, 4, 3, 2, 1],  # sym 6: mirror (self-inverse)
+    [1, 0, 5, 4, 3, 2],  # sym 7: mirror+rot1 (self-inverse)
+    [2, 1, 0, 5, 4, 3],  # sym 8: mirror+rot2 (self-inverse)
+    [3, 2, 1, 0, 5, 4],  # sym 9: mirror+rot3 (self-inverse)
+    [4, 3, 2, 1, 0, 5],  # sym 10: mirror+rot4 (self-inverse)
+    [5, 4, 3, 2, 1, 0],  # sym 11: mirror+rot5 (self-inverse)
+]
 
 _GRID_PERM_CACHE: list | None = None
 _HEX_PERM_CACHE: list | None = None
@@ -118,11 +136,12 @@ class ZertzDataset(Dataset):
 
             place = policy[:_PLACE_ONLY_OFFSET].reshape(3, _BOARD_SIZE, _BOARD_SIZE)
             place_only = policy[_PLACE_ONLY_OFFSET:_CAPTURE_OFFSET].reshape(3, _BOARD_SIZE)
-            capture = policy[_CAPTURE_OFFSET:].reshape(_BOARD_SIZE, _BOARD_SIZE)
+            capture = policy[_CAPTURE_OFFSET:].reshape(_NUM_DIRS, _BOARD_SIZE)
 
             new_place = place[:, hex_perm, :][:, :, hex_perm]
             new_place_only = place_only[:, hex_perm]
-            new_capture = capture[hex_perm, :][:, hex_perm]
+            dir_perm = _D6_DIR_PERMS[sym]
+            new_capture = capture[dir_perm, :][:, hex_perm]
 
             policy = np.concatenate([
                 new_place.reshape(-1),
@@ -142,13 +161,12 @@ class ZertzDataset(Dataset):
 
 
 def _marginalize_policy(flat_policy: torch.Tensor, gi: torch.Tensor):
-    """Marginalize flat policy[B, 5587] to per-head targets on grid.
+    """Convert flat policy[B, 4440] to per-head targets on the 7x7 grid.
 
     Returns:
-        place_cp: [B, 3*49] color/position marginal (channels 0-2)
-        place_rm: [B, 49] remove marginal (channel 3)
-        cap_src: [B, 49] capture source marginal
-        cap_dst: [B, 49] capture dest marginal
+        place_cp: [B, 3*49] color/position targets (channels 0-2)
+        place_rm: [B, 49] remove-ring targets (channel 3)
+        cap_dir:  [B, 6*49] direction targets (6 channels × 49 grid cells)
     """
     B = flat_policy.shape[0]
     device = flat_policy.device
@@ -172,17 +190,14 @@ def _marginalize_policy(flat_policy: torch.Tensor, gi: torch.Tensor):
     place_rm = torch.zeros(B, _GS, device=device)
     place_rm.scatter_add_(1, gi_exp, remove_hex)
 
-    # Capture region [4218, 5587): from(37) * to(37)
-    cap_probs = flat_policy[:, _CAPTURE_OFFSET:].reshape(B, _BOARD_SIZE, _BOARD_SIZE)
-    src_hex = cap_probs.sum(dim=2)  # [B, 37]
-    dst_hex = cap_probs.sum(dim=1)  # [B, 37]
+    # Capture region [4218, 4440): direction(6) * 37 + from(37)
+    cap_probs = flat_policy[:, _CAPTURE_OFFSET:].reshape(B, _NUM_DIRS, _BOARD_SIZE)  # [B, 6, 37]
+    cap_dir = torch.zeros(B, _NUM_DIRS, _GS, device=device)
+    for d in range(_NUM_DIRS):
+        cap_dir[:, d].scatter_add_(1, gi_exp, cap_probs[:, d])
+    cap_dir = cap_dir.reshape(B, _NUM_DIRS * _GS)  # [B, 294]
 
-    cap_src = torch.zeros(B, _GS, device=device)
-    cap_dst = torch.zeros(B, _GS, device=device)
-    cap_src.scatter_add_(1, gi_exp, src_hex)
-    cap_dst.scatter_add_(1, gi_exp, dst_hex)
-
-    return place_cp, place_rm, cap_src, cap_dst
+    return place_cp, place_rm, cap_dir
 
 
 def _head_ce(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -242,13 +257,13 @@ class Trainer:
             value_target = value_target.to(self.device).unsqueeze(1)
             vo_mask = vo_mask.to(self.device)
             cap_mask = cap_mask.to(self.device)
-            mid_cap_mask = mid_cap_mask.to(self.device)
+            mid_cap_mask = mid_cap_mask.to(self.device)  # kept for value logging split
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                place_logits, source_logits, dest_logits, value = self.model(board, reserve)
+                place_logits, cap_dir_logits, value = self.model(board, reserve)
 
-            # Marginalize flat policy to per-head targets
-            place_cp_t, place_rm_t, src_t, dst_t = _marginalize_policy(policy_target, gi)
+            # Convert flat policy to per-head targets
+            place_cp_t, place_rm_t, cap_dir_t = _marginalize_policy(policy_target, gi)
 
             # --- Policy loss ---
             policy_mask = (~vo_mask).float()
@@ -258,6 +273,9 @@ class Trainer:
             place_active = ~cap_mask & ~vo_mask
             if place_active.any():
                 pw = policy_mask[place_active]
+                n_place = place_active.sum().item()
+                pp = torch.tensor(0.0, device=self.device)
+
                 # Color/position head (channels 0-2, flat 3*49=147)
                 cp_logits = place_logits[place_active, :3 * _GS]
                 cp_target = place_cp_t[place_active]
@@ -265,6 +283,7 @@ class Trainer:
                 if has_cp.any():
                     cp_loss = _head_ce(cp_logits[has_cp], cp_target[has_cp])
                     policy_loss = policy_loss + (cp_loss * pw[has_cp]).mean()
+                    pp = pp + (cp_loss * pw[has_cp]).sum() / n_place
 
                 # Remove head (channel 3, flat 49)
                 rm_logits = place_logits[place_active, 3 * _GS:]
@@ -273,25 +292,20 @@ class Trainer:
                 if has_rm.any():
                     rm_loss = _head_ce(rm_logits[has_rm], rm_target[has_rm])
                     policy_loss = policy_loss + (rm_loss * pw[has_rm]).mean()
+                    pp = pp + (rm_loss * pw[has_rm]).sum() / n_place
 
-            # First-hop capture turns: train both source and dest
-            cap_first = cap_mask & ~mid_cap_mask & ~vo_mask
-            cap_first_loss = torch.tensor(0.0, device=self.device)
-            if cap_first.any():
-                cw = policy_mask[cap_first]
-                s_loss = _head_ce(source_logits[cap_first], src_t[cap_first])
-                d_loss = _head_ce(dest_logits[cap_first], dst_t[cap_first])
-                cap_first_loss = ((s_loss + d_loss) * cw).sum()
-                policy_loss = policy_loss + (s_loss * cw).mean() + (d_loss * cw).mean()
+                total_place_policy_loss += pp.item()
+                place_policy_batches += 1
 
-            # Mid-capture turns: train dest only (source is fixed)
-            mid_active = mid_cap_mask & ~vo_mask
-            mid_cap_loss = torch.tensor(0.0, device=self.device)
-            if mid_active.any():
-                mw = policy_mask[mid_active]
-                md_loss = _head_ce(dest_logits[mid_active], dst_t[mid_active])
-                mid_cap_loss = (md_loss * mw).sum()
-                policy_loss = policy_loss + (md_loss * mw).mean()
+            # Capture turns (first-hop and mid-capture): train cap_dir head uniformly
+            cap_active = cap_mask & ~vo_mask
+            if cap_active.any():
+                cw = policy_mask[cap_active]
+                n_cap = cap_active.sum().item()
+                c_loss = _head_ce(cap_dir_logits[cap_active], cap_dir_t[cap_active])
+                policy_loss = policy_loss + (c_loss * cw).mean()
+                total_capture_policy_loss += ((c_loss * cw).sum() / n_cap).item()
+                capture_policy_batches += 1
 
             # --- Value loss ---
             per_sample_value = (value.squeeze(1) - value_target.squeeze(1)) ** 2
@@ -305,23 +319,6 @@ class Trainer:
             if cap_mask.any():
                 total_capture_value_loss += per_sample_value[cap_mask].mean().item()
                 capture_value_batches += 1
-
-            # Track per-type policy loss for logging
-            if place_active.any():
-                # Recompute place policy per-sample for logging
-                pp = torch.tensor(0.0, device=self.device)
-                n_place = place_active.sum().item()
-                if has_cp.any():
-                    pp = pp + (cp_loss * pw[has_cp]).sum() / n_place
-                if has_rm.any():
-                    pp = pp + (rm_loss * pw[has_rm]).sum() / n_place
-                total_place_policy_loss += pp.item()
-                place_policy_batches += 1
-
-            if cap_first.any() or mid_active.any():
-                n_cap = cap_first.sum().item() + mid_active.sum().item()
-                total_capture_policy_loss += ((cap_first_loss + mid_cap_loss) / n_cap).item()
-                capture_policy_batches += 1
 
             loss = policy_loss + value_loss_scale * value_loss
 

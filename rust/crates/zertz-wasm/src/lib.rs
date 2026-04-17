@@ -7,8 +7,8 @@
 //!
 //! # JS inference callback contract (for best_move)
 //! `eval_fn(boards: Float32Array, reserves: Float32Array, n: number)`
-//! must return `[place: Float32Array, cap_source: Float32Array, cap_dest: Float32Array, value: Float32Array]`
-//! with lengths `n * PLACE_HEAD_SIZE`, `n * CAP_HEAD_SIZE`, `n * CAP_HEAD_SIZE`, `n`.
+//! must return `[place: Float32Array, cap_dir: Float32Array, value: Float32Array]`
+//! with lengths `n * PLACE_HEAD_SIZE`, `n * CAP_HEAD_SIZE`, `n`.
 
 use js_sys::{Array, Float32Array, Function};
 use wasm_bindgen::prelude::*;
@@ -55,7 +55,7 @@ fn call_js_eval(
     boards: &[f32],
     reserves: &[f32],
     n: usize,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>), String> {
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
     let boards_js = Float32Array::from(boards);
     let reserves_js = Float32Array::from(reserves);
     let n_js = JsValue::from(n as u32);
@@ -67,7 +67,6 @@ fn call_js_eval(
         Float32Array::from(arr.get(0)).to_vec(),
         Float32Array::from(arr.get(1)).to_vec(),
         Float32Array::from(arr.get(2)).to_vec(),
-        Float32Array::from(arr.get(3)).to_vec(),
     ))
 }
 
@@ -78,13 +77,13 @@ fn call_js_eval(
 /// Call an async JS eval function and await the Promise it returns.
 /// The JS function must accept (boards: Float32Array, reserves: Float32Array, n: number)
 /// and return a Promise resolving to
-/// [place: Float32Array, cap_source: Float32Array, cap_dest: Float32Array, value: Float32Array].
+/// [place: Float32Array, cap_dir: Float32Array, value: Float32Array].
 async fn call_js_eval_async(
     eval_fn: &Function,
     boards: &[f32],
     reserves: &[f32],
     n: usize,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>), JsValue> {
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), JsValue> {
     let boards_js = Float32Array::from(boards);
     let reserves_js = Float32Array::from(reserves);
     let n_js = JsValue::from(n as u32);
@@ -95,7 +94,6 @@ async fn call_js_eval_async(
         Float32Array::from(arr.get(0)).to_vec(),
         Float32Array::from(arr.get(1)).to_vec(),
         Float32Array::from(arr.get(2)).to_vec(),
-        Float32Array::from(arr.get(3)).to_vec(),
     ))
 }
 
@@ -115,13 +113,12 @@ async fn best_move_nn_impl(
     let mut board_buf = vec![0f32; BOARD_FLAT];
     let mut reserve_buf = vec![0f32; RESERVE_SIZE];
     encode_board(&board, &mut board_buf, &mut reserve_buf);
-    let (root_place, root_src, root_dst, _) =
+    let (root_place, root_cap_dir, _) =
         call_js_eval_async(&eval_fn, &board_buf, &reserve_buf, 1).await?;
 
     let root_heads = PolicyHeads {
         place: &root_place,
-        cap_source: &root_src,
-        cap_dest: &root_dst,
+        cap_dir: &root_cap_dir,
     };
     let mut search = MctsSearch::new(simulations + 64);
     search.c_puct = c_puct;
@@ -147,7 +144,7 @@ async fn best_move_nn_impl(
                 .copy_from_slice(&reserve_enc);
         }
 
-        let (lp, ls, ld, vals) = call_js_eval_async(
+        let (lp, lc, vals) = call_js_eval_async(
             &eval_fn,
             &flat_boards[..nl * BOARD_FLAT],
             &flat_reserves[..nl * RESERVE_SIZE],
@@ -158,8 +155,7 @@ async fn best_move_nn_impl(
         let leaf_heads: Vec<PolicyHeads> = (0..nl)
             .map(|k| PolicyHeads {
                 place: &lp[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE],
-                cap_source: &ls[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
-                cap_dest: &ld[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
+                cap_dir: &lc[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
             })
             .collect();
 
@@ -297,7 +293,7 @@ impl ZertzGame {
     }
 
     /// NN-guided MCTS. eval_fn receives (boards, reserves, n) and returns
-    /// [place, cap_source, cap_dest, value] as Float32Arrays.
+    /// [place, cap_dir, value] as Float32Arrays.
     /// Run this in a Web Worker to avoid blocking the main thread.
     pub fn best_move(
         &self,
@@ -319,7 +315,7 @@ impl ZertzGame {
     ///
     /// `eval_fn(boards: Float32Array, reserves: Float32Array, n: number)`
     /// must return a **Promise** resolving to
-    /// `[place: Float32Array, cap_source: Float32Array, cap_dest: Float32Array, value: Float32Array]`.
+    /// `[place: Float32Array, cap_dir: Float32Array, value: Float32Array]`.
     ///
     /// Returns a `Promise<{move: string, value: number}>`.
     /// Run this in a Web Worker or via `await` in an async context.
@@ -349,9 +345,8 @@ impl ZertzGame {
 
         let uniform = vec![0.0f32; POLICY_HEADS_TOTAL];
         let root_heads = PolicyHeads {
-            place:      &uniform[..PLACE_HEAD_SIZE],
-            cap_source: &uniform[PLACE_HEAD_SIZE..PLACE_HEAD_SIZE + CAP_HEAD_SIZE],
-            cap_dest:   &uniform[PLACE_HEAD_SIZE + CAP_HEAD_SIZE..],
+            place:   &uniform[..PLACE_HEAD_SIZE],
+            cap_dir: &uniform[PLACE_HEAD_SIZE..],
         };
 
         let mut search = MctsSearch::new(simulations + 128);
@@ -369,9 +364,8 @@ impl ZertzGame {
             let nl = leaves.len();
 
             let heads_list: Vec<PolicyHeads> = leaves.iter().map(|_| PolicyHeads {
-                place:      &uniform[..PLACE_HEAD_SIZE],
-                cap_source: &uniform[PLACE_HEAD_SIZE..PLACE_HEAD_SIZE + CAP_HEAD_SIZE],
-                cap_dest:   &uniform[PLACE_HEAD_SIZE + CAP_HEAD_SIZE..],
+                place:   &uniform[..PLACE_HEAD_SIZE],
+                cap_dir: &uniform[PLACE_HEAD_SIZE..],
             }).collect();
 
             let values: Vec<f32> = leaves.iter().map(|&leaf| {
