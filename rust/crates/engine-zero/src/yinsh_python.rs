@@ -14,7 +14,7 @@ use core_game::symmetry::{D6Symmetry, Symmetry};
 
 use yinsh_game::board::{YinshBoard, YinshMove};
 use yinsh_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
-use yinsh_game::hex::{ALL_CELLS, BOARD_SIZE, GRID_SIZE, ROW_DIRS, is_valid_i8};
+use yinsh_game::hex::{ALL_CELLS, BOARD_SIZE, DIRECTIONS, GRID_SIZE, ROW_DIRS, is_valid_i8};
 use yinsh_game::move_encoding::{NUM_POLICY_CHANNELS, POLICY_SIZE};
 use yinsh_game::notation::{move_to_str, str_to_move};
 use yinsh_game::search::{
@@ -521,6 +521,41 @@ fn yinsh_d6_dir_permutations<'py>(py: Python<'py>) -> Vec<Bound<'py, PyArray1<i6
         .collect()
 }
 
+/// 12 D6 direction-permutation tables for all 6 DIRECTIONS (used by ring movement
+/// policy channels). Returns 12 arrays of length 6: `perm[new_dir] = old_dir`.
+#[pyfunction]
+fn yinsh_d6_movement_dir_permutations<'py>(py: Python<'py>) -> Vec<Bound<'py, PyArray1<i64>>> {
+    let dir_axials: [(i32, i32); 6] = {
+        let mut v = [(0i32, 0i32); 6];
+        for (i, &(dc, dr)) in DIRECTIONS.iter().enumerate() {
+            v[i] = yinsh_to_axial(dc as i32, dr as i32);
+        }
+        v
+    };
+
+    D6Symmetry::all()
+        .iter()
+        .map(|sym| {
+            // Forward map: old_d -> new_d
+            let mut forward = [0usize; 6];
+            for old_d in 0..6 {
+                let (q, r) = dir_axials[old_d];
+                let (q2, r2) = sym.transform_hex(q, r);
+                let target = (q2, r2);
+                let new_d = dir_axials.iter().position(|&d| d == target)
+                    .expect("direction not preserved by D6 symmetry");
+                forward[old_d] = new_d;
+            }
+            // Invert: perm[new_d] = old_d
+            let mut perm = vec![0i64; 6];
+            for old_d in 0..6 {
+                perm[forward[old_d]] = old_d as i64;
+            }
+            PyArray1::from_owned_array(py, numpy::ndarray::Array1::from(perm))
+        })
+        .collect()
+}
+
 /// Subset of D6 symmetries that map every Yinsh valid cell to another valid cell.
 /// Returns the indices (0..12) into `D6Symmetry::all()` of the preserving symmetries.
 /// Used by Python-side augmentation to skip transforms that would inject phantom
@@ -566,6 +601,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("YINSH_NUM_POLICY_CHANNELS", NUM_POLICY_CHANNELS)?;
     m.add_function(wrap_pyfunction!(yinsh_d6_grid_permutations, m)?)?;
     m.add_function(wrap_pyfunction!(yinsh_d6_dir_permutations, m)?)?;
+    m.add_function(wrap_pyfunction!(yinsh_d6_movement_dir_permutations, m)?)?;
     m.add_function(wrap_pyfunction!(yinsh_valid_d6_indices, m)?)?;
     Ok(())
 }

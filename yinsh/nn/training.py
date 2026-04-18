@@ -1,11 +1,10 @@
-"""Training loop for YinshNet — single flat 7-channel policy head, MSE value.
+"""Training loop for YinshNet — single flat 59-channel policy head, MSE value.
 
 The dataset optionally augments samples with the subset of D6 hex symmetries
 that map every Yinsh valid cell to another valid cell (computed in Rust by
-`yinsh_valid_d6_indices`). The 3 `RemoveRow` policy channels (3, 4, 5) need a
-per-symmetry remap because each row direction transforms to another under
-rotations/reflections; that channel permutation table is also supplied by Rust
-(`yinsh_d6_dir_permutations`).
+`yinsh_valid_d6_indices`). Two channel groups need direction permutation:
+  - RemoveRow channels (1-3): 3 row directions, via `yinsh_d6_dir_permutations`
+  - MoveRing channels (5-58): 6 movement directions, via `yinsh_d6_movement_dir_permutations`
 """
 
 from __future__ import annotations
@@ -30,15 +29,17 @@ from .model import (
 
 _GS = GRID_SIZE * GRID_SIZE  # 121
 
-# Layout of the 7 policy channels.
+# Layout of the 59 policy channels (must match move_encoding.rs).
 _CH_PLACE_RING = 0
-_CH_MOVE_FROM = 1
-_CH_MOVE_TO = 2
-_CH_REMOVE_ROW_BASE = 3  # 3, 4, 5
-_CH_REMOVE_RING = 6
+_CH_REMOVE_ROW_BASE = 1   # channels 1, 2, 3
+_CH_REMOVE_RING = 4
+_CH_MOVE_BASE = 5          # channels 5..58: 6 dirs × 9 distances
+_MAX_RING_DIST = 9
+_NUM_DIRS = 6
 
 _GRID_PERM_CACHE: list | None = None
 _DIR_PERM_CACHE: list | None = None
+_MOVE_DIR_PERM_CACHE: list | None = None
 _VALID_SYM_CACHE: list | None = None
 
 
@@ -58,6 +59,14 @@ def _load_dir_perms() -> list[np.ndarray]:
     return _DIR_PERM_CACHE
 
 
+def _load_move_dir_perms() -> list[np.ndarray]:
+    global _MOVE_DIR_PERM_CACHE
+    if _MOVE_DIR_PERM_CACHE is None:
+        from engine_zero import yinsh_d6_movement_dir_permutations
+        _MOVE_DIR_PERM_CACHE = [np.asarray(p, dtype=np.int64) for p in yinsh_d6_movement_dir_permutations()]
+    return _MOVE_DIR_PERM_CACHE
+
+
 def _load_valid_syms() -> list[int]:
     global _VALID_SYM_CACHE
     if _VALID_SYM_CACHE is None:
@@ -71,39 +80,44 @@ def _apply_symmetry(
     policy: np.ndarray,
     sym: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Apply D6 transform `sym` to (board[9, 11, 11], policy[847]).
+    """Apply D6 transform `sym` to (board[9, 11, 11], policy[7139]).
 
-    Spatial channels are gathered using the grid permutation. The 3 `RemoveRow`
-    direction channels are additionally permuted via the row-direction table.
-    `MoveRing` channels (1=from, 2=to) are direction-agnostic so only get the
-    spatial gather.
+    Spatial channels are gathered using the grid permutation. Two channel groups
+    need direction permutation:
+      - RemoveRow (ch 1-3): via row-direction table
+      - MoveRing  (ch 5-58): 6-direction blocks of 9 distances each
     """
     if sym == 0:
         return board, policy
 
     grid_perm = _load_grid_perms()[sym]
     dir_perm = _load_dir_perms()[sym]
+    move_dir_perm = _load_move_dir_perms()[sym]
 
     # Board: pad with one zero column so out-of-board positions gather to 0.
     flat = board.reshape(NUM_CHANNELS, _GS)
     padded = np.concatenate([flat, np.zeros((NUM_CHANNELS, 1), dtype=np.float32)], axis=1)
     new_board = padded[:, grid_perm].reshape(NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
 
-    # Policy: same gather per channel, plus channel permutation for ch 3..6.
+    # Policy: spatial gather first, then channel permutation for direction-sensitive groups.
     pol_flat = policy.reshape(POLICY_CHANNELS, _GS)
     pol_padded = np.concatenate([pol_flat, np.zeros((POLICY_CHANNELS, 1), dtype=np.float32)], axis=1)
-    spatially_perm = pol_padded[:, grid_perm]  # (7, 121)
+    spatially_perm = pol_padded[:, grid_perm]  # (59, 121)
 
     new_policy = np.empty_like(spatially_perm)
+    # PlaceRing (ch 0) and RemoveRing (ch 4): spatial only.
     new_policy[_CH_PLACE_RING] = spatially_perm[_CH_PLACE_RING]
-    new_policy[_CH_MOVE_FROM] = spatially_perm[_CH_MOVE_FROM]
-    new_policy[_CH_MOVE_TO] = spatially_perm[_CH_MOVE_TO]
     new_policy[_CH_REMOVE_RING] = spatially_perm[_CH_REMOVE_RING]
-    # Row channels: new channel `_CH_REMOVE_ROW_BASE + d` gathers from
-    # old channel `_CH_REMOVE_ROW_BASE + dir_perm[d]`.
+    # RemoveRow (ch 1-3): permute direction channels via row-dir table.
     for d in range(3):
         old_d = int(dir_perm[d])
         new_policy[_CH_REMOVE_ROW_BASE + d] = spatially_perm[_CH_REMOVE_ROW_BASE + old_d]
+    # MoveRing (ch 5-58): permute the 6 direction-blocks of 9 distances.
+    for new_d in range(_NUM_DIRS):
+        old_d = int(move_dir_perm[new_d])
+        new_base = _CH_MOVE_BASE + new_d * _MAX_RING_DIST
+        old_base = _CH_MOVE_BASE + old_d * _MAX_RING_DIST
+        new_policy[new_base : new_base + _MAX_RING_DIST] = spatially_perm[old_base : old_base + _MAX_RING_DIST]
 
     return new_board, new_policy.reshape(POLICY_SIZE)
 

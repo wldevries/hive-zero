@@ -1,10 +1,13 @@
-"""YinshNet: AlphaZero-style network for YINSH with a single 7-channel policy head.
+"""YinshNet: AlphaZero-style network for YINSH.
 
-Yinsh's encoded policy uses `PolicyIndex::Sum` for ring movement (the prior of
-moving from A to B is `policy[from_idx] + policy[to_idx]` where both indices
-sit in their own dedicated channel — see `move_encoding.rs`). All other moves
-use `PolicyIndex::Single`. Either way the network only needs to emit one
-flat (7, 11, 11) tensor; Rust MCTS handles the prior arithmetic.
+Policy layout (59 channels × 11×11 grid):
+  ch 0:    PlaceRing destination
+  ch 1-3:  RemoveRow start, dir 0/1/2
+  ch 4:    RemoveRing target
+  ch 5-58: MoveRing — channel = 5 + dir_idx*9 + (dist-1), value at source cell
+
+All moves use `PolicyIndex::Single`; Rust MCTS reads the logit at the source cell
+in the appropriate channel. No summing or bilinear arithmetic needed.
 """
 
 from __future__ import annotations
@@ -21,15 +24,15 @@ from shared.nn.resblock import ResBlock
 NUM_CHANNELS = 9
 GRID_SIZE = 11
 RESERVE_SIZE = 6
-POLICY_CHANNELS = 7
-POLICY_SIZE = POLICY_CHANNELS * GRID_SIZE * GRID_SIZE  # 847
+POLICY_CHANNELS = 59  # 5 single-move channels + 6 dirs × 9 distances
+POLICY_SIZE = POLICY_CHANNELS * GRID_SIZE * GRID_SIZE  # 7139
 
 
 class YinshNet(nn.Module):
     """Trunk → flat policy head + value head.
 
     Input:  board (B, 9, 11, 11), reserve (B, 6)
-    Output: policy (B, 847), value (B, 1) in [-1, 1]
+    Output: policy (B, 7139), value (B, 1) in [-1, 1]
     """
 
     def __init__(self, num_blocks: int = 8, channels: int = 96):
@@ -42,9 +45,9 @@ class YinshNet(nn.Module):
         self.input_bn = nn.BatchNorm2d(channels)
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
 
-        # Single conv1x1 policy head producing 7 channels (matches the Rust
-        # `move_encoding` channel layout: place_ring, move_from, move_to,
-        # remove_row × 3 dirs, remove_ring).
+        # Single conv1x1 policy head producing 59 channels (matches the Rust
+        # `move_encoding` layout: place_ring, remove_row×3, remove_ring,
+        # then 54 ring-movement channels = 6 dirs × 9 distances).
         self.policy_conv = nn.Conv2d(channels, POLICY_CHANNELS, 1)
 
         # Value head: conv1x1 → flatten → FC256 → tanh.

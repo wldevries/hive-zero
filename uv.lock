@@ -149,13 +149,15 @@ dependencies = [
     { name = "colorama" },
     { name = "mplcursors" },
     { name = "numpy" },
-    { name = "onnxruntime" },
     { name = "onnxscript" },
     { name = "pytest" },
     { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
+ort-cpu = [
+    { name = "onnxruntime" },
+]
 ort-gpu = [
     { name = "onnxruntime-gpu" },
 ]
@@ -168,14 +170,14 @@ requires-dist = [
     { name = "colorama", specifier = ">=0.4.6" },
     { name = "mplcursors", specifier = ">=0.7.1" },
     { name = "numpy", specifier = ">=2.4.3" },
-    { name = "onnxruntime", specifier = ">=1.24.4" },
+    { name = "onnxruntime", marker = "extra == 'ort-cpu'", specifier = ">=1.24.4" },
     { name = "onnxruntime-gpu", marker = "extra == 'ort-gpu'", specifier = ">=1.24.4" },
     { name = "onnxruntime-qnn", marker = "extra == 'ort-qnn'" },
     { name = "onnxscript", specifier = ">=0.6.2" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "tqdm" },
 ]
-provides-extras = ["ort-gpu", "ort-qnn"]
+provides-extras = ["ort-cpu", "ort-gpu", "ort-qnn"]
 
 [[package]]
 name = "iniconfig"

@@ -90,7 +90,7 @@ class SelfPlayTrainer:
         """Python NN eval callback for the Rust self-play loop.
 
         Rust passes `(board[N,9,11,11], reserve[N,6])`; we return
-        `(policy[N,847], value[N])` as float32 numpy arrays.
+        `(policy[N,7139], value[N])` as float32 numpy arrays.
         """
         board = torch.from_numpy(np.array(board_tensor_np)).to(
             self.device, dtype=torch.float32
