@@ -143,7 +143,8 @@ impl PyYinshSelfPlayResult {
     #[getter] fn decisive_lengths(&self) -> Vec<u32> { self.inner.decisive_lengths.clone() }
     #[getter] fn full_search_turns(&self) -> u32 { self.inner.full_search_turns }
     #[getter] fn total_turns(&self) -> u32 { self.inner.total_turns }
-    fn sample_summaries(&self) -> Vec<String> { self.inner.sample_summaries.clone() }
+    /// Returns list of (label, board_string) for up to 2 decisive games.
+    fn sample_boards(&self) -> Vec<(String, String)> { self.inner.sample_board_data.clone() }
 }
 
 // ---------------------------------------------------------------------------

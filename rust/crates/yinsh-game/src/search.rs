@@ -250,8 +250,8 @@ pub struct SelfPlayResult {
     pub full_search_turns: u32,
     pub total_turns: u32,
 
-    /// Up to 3 short text labels summarizing decisive games (no full board render).
-    pub sample_summaries: Vec<String>,
+    /// Up to 2 (label, board_string) pairs from decisive games for display.
+    pub sample_board_data: Vec<(String, String)>,
 }
 
 /// One training record per turn, accumulated per game.
@@ -465,7 +465,7 @@ pub fn play_selfplay_core(
                             result.wins_p2 += 1;
                         }
                         result.decisive_lengths.push(len);
-                        if result.sample_summaries.len() < 3 {
+                        if result.sample_board_data.len() < 2 {
                             let label = format!(
                                 "{} wins {}-{} ({} moves)",
                                 if winner == Player::Player1 { "white" } else { "black" },
@@ -473,7 +473,7 @@ pub fn play_selfplay_core(
                                 boards[gi].black_score,
                                 len,
                             );
-                            result.sample_summaries.push(label);
+                            result.sample_board_data.push((label, format!("{}", boards[gi])));
                         }
                     }
                     Outcome::Draw => result.draws += 1,

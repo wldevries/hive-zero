@@ -1,10 +1,13 @@
 /// YINSH game state and rules.
 
+use std::fmt;
+
 use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex};
 use core_game::symmetry::UnitSymmetry;
 
 use crate::hex::{
-    BOARD_SIZE, DIRECTIONS, GRID_SIZE, ROW_DIRS, cell_index_i8, index_to_cell, is_valid_i8,
+    BOARD_SIZE, COL_ENDS, COL_STARTS, DIRECTIONS, GRID_SIZE, ROW_DIRS, cell_index, cell_index_i8,
+    index_to_cell, is_valid, is_valid_i8,
 };
 
 pub const INITIAL_MARKERS: u8 = 51;
@@ -392,6 +395,113 @@ impl YinshBoard {
         } else {
             self.outcome = Outcome::Draw;
         }
+    }
+}
+
+impl fmt::Display for YinshBoard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const CW: &str = "\x1b[38;2;220;220;220m";
+        const CB: &str = "\x1b[38;2;80;140;255m";
+        const CR: &str = "\x1b[0m";
+        const DIM: &str = "\x1b[90m";
+        const STEP: usize = 3;
+        const SHIFT: usize = 3;
+
+        let outcome_str = match self.outcome {
+            Outcome::Ongoing => {
+                let next = match self.next_player {
+                    Player::Player1 => "White",
+                    Player::Player2 => "Black",
+                };
+                format!("next={next}")
+            }
+            Outcome::WonBy(Player::Player1) => "White wins".to_string(),
+            Outcome::WonBy(Player::Player2) => "Black wins".to_string(),
+            Outcome::Draw => "Draw".to_string(),
+        };
+        writeln!(
+            f,
+            "{CW}W{CR}={} {CB}B{CR}={} m={} {outcome_str}",
+            self.white_score, self.black_score, self.markers_in_pool
+        )?;
+
+        // Staggered hex grid.
+        // Display row: drow = 2*row - col + 5
+        // Display pos:  pos  = col * STEP + SHIFT
+        // Row 11 at top, row 1 at bottom. Column letters sit 2 drows below
+        // each column's topmost cell (lowest row index). Iteration is reversed
+        // so large drow values (high rows) print first (at top of screen).
+
+        let cell_pos = |col: i32| -> usize { col as usize * STEP + SHIFT };
+
+        let col_labels: Vec<(i32, usize, char)> = (0i32..11).map(|col| {
+            let top_drow = 2 * COL_STARTS[col as usize] as i32 - col + 5;
+            let extra = match col { 0 | 10 => -2, 5 => -1, _ => 0 };
+            (top_drow - 2 + extra, cell_pos(col), (b'A' + col as u8) as char)
+        }).collect();
+
+        let row_labels: Vec<(i32, usize, String)> = (0i32..11).map(|r| {
+            let leftmost = (0i32..11)
+                .find(|&c| is_valid(c as u8, r as u8))
+                .unwrap();
+            // Rows 1 and 6 (r=0,5) shift up 2 and 3 left; all others shift up 1.
+            let (drow_shift, pos_extra_left) = if r == 0 || r == 5 { (2, STEP) } else { (1, 0) };
+            let drow = 2 * r - leftmost + 5 + drow_shift;
+            let pos = cell_pos(leftmost) - STEP - pos_extra_left;
+            (drow, pos, format!("{}", r + 1))
+        }).collect();
+
+        let min_drow = col_labels.iter().map(|(d, _, _)| *d).min().unwrap();
+        let max_drow = row_labels.iter().map(|(d, _, _)| *d).max().unwrap();
+
+        for drow in (min_drow..=max_drow).rev() {
+            // (pos, rendered string, visible width)
+            let mut items: Vec<(usize, String, usize)> = Vec::new();
+
+            for &(d, pos, ch) in &col_labels {
+                if d == drow {
+                    items.push((pos, format!("{DIM}{ch}{CR}"), 1));
+                }
+            }
+
+            for (d, pos, label) in &row_labels {
+                if *d == drow {
+                    let w = label.chars().count();
+                    items.push((*pos, format!("{DIM}{label}{CR}"), w));
+                }
+            }
+
+            for col in 0i32..11 {
+                let num = drow - 5 + col;
+                if num < 0 || num % 2 != 0 { continue; }
+                let row = (num / 2) as u8;
+                if row >= 11 { continue; }
+                if !is_valid(col as u8, row) { continue; }
+                let idx = cell_index(col as u8, row);
+                let s = match self.cells[idx] {
+                    Cell::Empty => "·".to_string(),
+                    Cell::WhiteRing => format!("{CW}O{CR}"),
+                    Cell::BlackRing => format!("{CB}O{CR}"),
+                    Cell::WhiteMarker => format!("{CW}*{CR}"),
+                    Cell::BlackMarker => format!("{CB}*{CR}"),
+                };
+                items.push((cell_pos(col), s, 1));
+            }
+
+            if !items.is_empty() {
+                items.sort_by_key(|(p, _, _)| *p);
+                let mut line = String::new();
+                let mut cursor = 0usize;
+                for (pos, cell, width) in &items {
+                    while cursor < *pos { line.push(' '); cursor += 1; }
+                    line.push_str(cell);
+                    cursor += *width;
+                }
+                writeln!(f, "{line}")?;
+            }
+        }
+
+        Ok(())
     }
 }
 

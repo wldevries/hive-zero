@@ -288,8 +288,12 @@ class SelfPlayTrainer:
                 f"buffer: {len(dataset)}"
             )
 
-            for label in result.sample_summaries():
-                print(f"    sample: {label}")
+            samples = result.sample_boards()
+            if samples:
+                board_strs = [b for _, b in samples]
+                labels = [lbl for lbl, _ in samples]
+                rendered = _render_boards_horizontally(board_strs, labels=labels)
+                print("\n".join("    " + line for line in rendered.split("\n")))
 
             avg_gl = f"{sum(lengths) / len(lengths):.1f}" if lengths else ""
             med_gl = str(_median(lengths)) if lengths else ""
@@ -344,3 +348,46 @@ class SelfPlayTrainer:
                 print(f"  Checkpoint saved to {ckpt_path}")
 
         print(f"\nTraining complete after gen {generation}. Final model: {self.model_path}")
+
+
+def _render_boards_horizontally(
+    board_strings: list, labels: list | None = None, sep: str = "   "
+) -> str:
+    """Render multiple board strings side-by-side, handling ANSI escape codes."""
+    import re
+
+    _ANSI = re.compile(r"\033\[[0-9;]*m")
+
+    def visual_len(s: str) -> int:
+        return len(_ANSI.sub("", s))
+
+    boards_lines = [b.split("\n") for b in board_strings]
+    board_widths = [
+        max((visual_len(line) for line in lines), default=0) for lines in boards_lines
+    ]
+
+    if labels:
+        board_widths = [max(w, visual_len(labels[i])) for i, w in enumerate(board_widths)]
+
+    max_height = max(len(lines) for lines in boards_lines)
+    all_lines = []
+
+    if labels:
+        all_lines.append(
+            sep.join(
+                lbl + " " * (board_widths[i] - visual_len(lbl)) for i, lbl in enumerate(labels)
+            ).rstrip()
+        )
+
+    for row in range(max_height):
+        parts = []
+        for bi, lines in enumerate(boards_lines):
+            if row < len(lines):
+                line = lines[row]
+                padding = board_widths[bi] - visual_len(line)
+                parts.append(line + " " * padding)
+            else:
+                parts.append(" " * board_widths[bi])
+        all_lines.append(sep.join(parts).rstrip())
+
+    return "\n".join(all_lines)
