@@ -15,7 +15,7 @@ enum Command {
     /// Replay boardspace games from a zip dir/file
     Replay {
         /// Path to zip dir or file
-        #[arg(default_value = "../../../games/yinsh/boardspace")]
+        #[arg(default_value = "games/yinsh/boardspace")]
         path: String,
     },
     /// Verbose replay of a single game from a zip
@@ -29,6 +29,12 @@ enum Command {
         #[arg(default_value = "300")]
         moves: usize,
     },
+    /// Compute statistics from boardspace games
+    Stats {
+        /// Path to zip dir or file
+        #[arg(default_value = "games/yinsh/boardspace")]
+        path: String,
+    },
 }
 
 fn main() {
@@ -37,5 +43,6 @@ fn main() {
         Command::Replay { path } => replay::run_replay(&path),
         Command::Debug { zip_path, sgf_name } => replay::run_debug(&zip_path, &sgf_name),
         Command::Random { moves } => random_play::run_random_game(moves),
+        Command::Stats { path } => replay::run_stats(&path),
     }
 }
