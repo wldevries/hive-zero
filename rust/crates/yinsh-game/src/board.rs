@@ -213,6 +213,10 @@ impl YinshBoard {
             (Phase::Normal, YinshMove::MoveRing { from, to }) => self.apply_move_ring(from, to),
             (Phase::RemoveRow, YinshMove::RemoveRow { start, dir }) => self.apply_remove_row(start, dir),
             (Phase::RemoveRing, YinshMove::RemoveRing(idx)) => self.apply_remove_ring(idx),
+            (_, YinshMove::Pass) => {
+                self.next_player = self.next_player.opposite();
+                Ok(())
+            }
             _ => Err(format!("move {:?} invalid in phase {:?}", mv, self.phase)),
         }
     }
