@@ -176,7 +176,17 @@ class YinshDataset(Dataset):
                 f"(_count={self._count}) from {buf_dir}"
             )
 
+    def flush(self):
+        """Flush all memmap arrays to disk. No-op for in-memory datasets."""
+        for arr in (
+            self.board_tensors, self.reserve_vectors, self.policy_targets,
+            self.value_targets, self.value_only, self.phase_flags, self.generations,
+        ):
+            if isinstance(arr, np.memmap):
+                arr.flush()
+
     def _save_meta(self):
+        self.flush()
         np.savez(
             self._meta_path,
             count=self._count,
