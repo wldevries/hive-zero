@@ -45,7 +45,7 @@ def main():
                    help="Use Rust-native ORT inference (requires .onnx export)")
     t.add_argument("--value-loss-scale", type=float, default=1.0)
     t.add_argument("--buf-dir", type=str, default=None,
-                   help="Override replay buffer directory (default: models/{name}/replay)")
+                   help="Override replay buffer directory (default: models/{name}/)")
 
     # battle
     b = sub.add_parser("battle", help="Pit two models against each other")

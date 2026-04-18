@@ -143,7 +143,7 @@ class SelfPlayTrainer:
             with open(self.log_path, "w") as f:
                 f.write(LOG_HEADER)
 
-        resolved_buf_dir = buf_dir if buf_dir is not None else os.path.join(self.model_dir, "replay")
+        resolved_buf_dir = buf_dir if buf_dir is not None else self.model_dir
         max_buffer = games_per_gen * max_moves * replay_window
         dataset = YinshDataset(max_size=max_buffer, buf_dir=resolved_buf_dir)
         dataset.augment_symmetry = augment_symmetry
