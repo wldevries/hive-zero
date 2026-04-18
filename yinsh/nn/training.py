@@ -9,6 +9,7 @@ that map every Yinsh valid cell to another valid cell (computed in Rust by
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import numpy as np
@@ -123,21 +124,65 @@ def _apply_symmetry(
 
 
 class YinshDataset(Dataset):
-    """Ring-buffer replay dataset for Yinsh self-play positions."""
+    """Ring-buffer replay dataset for Yinsh self-play positions.
 
-    def __init__(self, max_size: int = 100_000):
+    When `buf_dir` is given, all arrays are backed by memory-mapped files so the
+    buffer survives process restarts.  On resume the existing files are opened
+    read-write and `_count`/`_size` are restored from `meta.npz`.
+    """
+
+    def __init__(self, max_size: int = 100_000, buf_dir: str | None = None):
         self.max_size = max_size
-        self._count = 0
-        self._size = 0
-        self.board_tensors = np.zeros(
-            (max_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32
-        )
-        self.reserve_vectors = np.zeros((max_size, RESERVE_SIZE), dtype=np.float32)
-        self.policy_targets = np.zeros((max_size, POLICY_SIZE), dtype=np.float32)
-        self.value_targets = np.zeros(max_size, dtype=np.float32)
-        self.value_only = np.zeros(max_size, dtype=np.bool_)
-        self.phase_flags = np.zeros(max_size, dtype=np.uint8)
+        self._buf_dir = buf_dir
+        self._meta_path = os.path.join(buf_dir, "meta.npz") if buf_dir else None
         self.augment_symmetry = False
+
+        resuming = buf_dir is not None and os.path.exists(self._meta_path)
+        if resuming:
+            meta = np.load(self._meta_path)
+            stored_max = int(meta["max_size"])
+            if stored_max != max_size:
+                raise ValueError(
+                    f"Buffer max_size mismatch: stored {stored_max} vs requested {max_size}"
+                )
+            self._count = int(meta["count"])
+            self._size = int(meta["size"])
+        else:
+            self._count = 0
+            self._size = 0
+
+        file_mode = "r+" if resuming else "w+"
+
+        def _arr(name, shape, dtype):
+            if buf_dir is None:
+                return np.zeros(shape, dtype=dtype)
+            os.makedirs(buf_dir, exist_ok=True)
+            path = os.path.join(buf_dir, f"{name}.bin")
+            return np.memmap(path, dtype=dtype, mode=file_mode, shape=shape)
+
+        self.board_tensors = _arr(
+            "board_tensors", (max_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE), np.float32
+        )
+        self.reserve_vectors = _arr("reserve_vectors", (max_size, RESERVE_SIZE), np.float32)
+        self.policy_targets = _arr("policy_targets", (max_size, POLICY_SIZE), np.float32)
+        self.value_targets = _arr("value_targets", (max_size,), np.float32)
+        self.value_only = _arr("value_only", (max_size,), np.bool_)
+        self.phase_flags = _arr("phase_flags", (max_size,), np.uint8)
+        self.generations = _arr("generations", (max_size,), np.int32)
+
+        if resuming:
+            print(
+                f"  Replay buffer resumed: {self._size} samples "
+                f"(_count={self._count}) from {buf_dir}"
+            )
+
+    def _save_meta(self):
+        np.savez(
+            self._meta_path,
+            count=self._count,
+            size=self._size,
+            max_size=self.max_size,
+        )
 
     def add_batch(
         self,
@@ -147,23 +192,48 @@ class YinshDataset(Dataset):
         value_targets: np.ndarray,
         value_only: list[bool],
         phase_flags: list[int] | np.ndarray,
+        generation: int = 0,
     ):
         n = board_tensors.shape[0]
         boards = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
-        for i in range(n):
-            idx = self._count % self.max_size
-            self.board_tensors[idx] = boards[i]
-            self.reserve_vectors[idx] = reserve_vectors[i]
-            self.policy_targets[idx] = policy_targets[i]
-            self.value_targets[idx] = value_targets[i]
-            self.value_only[idx] = value_only[i]
-            self.phase_flags[idx] = int(phase_flags[i])
-            self._count += 1
-            self._size = min(self._size + 1, self.max_size)
+        vo_arr = np.asarray(value_only, dtype=np.bool_)
+        pf_arr = np.asarray(phase_flags, dtype=np.uint8)
+        gen_arr = np.full(n, generation, dtype=np.int32)
+
+        start = self._count % self.max_size
+        end = start + n
+        if end <= self.max_size:
+            self.board_tensors[start:end] = boards
+            self.reserve_vectors[start:end] = reserve_vectors
+            self.policy_targets[start:end] = policy_targets
+            self.value_targets[start:end] = value_targets
+            self.value_only[start:end] = vo_arr
+            self.phase_flags[start:end] = pf_arr
+            self.generations[start:end] = gen_arr
+        else:
+            first = self.max_size - start
+            for arr, data in [
+                (self.board_tensors, boards),
+                (self.reserve_vectors, reserve_vectors),
+                (self.policy_targets, policy_targets),
+                (self.value_targets, value_targets),
+                (self.value_only, vo_arr),
+                (self.phase_flags, pf_arr),
+                (self.generations, gen_arr),
+            ]:
+                arr[start:] = data[:first]
+                arr[: n - first] = data[first:]
+
+        self._count += n
+        self._size = min(self._size + n, self.max_size)
+        if self._meta_path is not None:
+            self._save_meta()
 
     def clear(self):
         self._count = 0
         self._size = 0
+        if self._meta_path is not None:
+            self._save_meta()
 
     def __len__(self):
         if self.augment_symmetry:

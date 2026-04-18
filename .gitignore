@@ -22,3 +22,4 @@ rust/target/
 mzinga
 scripts/.plot_log_geom.json
 target
+models

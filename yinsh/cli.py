@@ -11,7 +11,8 @@ def main():
 
     # train
     t = sub.add_parser("train", help="Run self-play training")
-    t.add_argument("--model", type=str, default="yinsh.pt")
+    t.add_argument("--name", type=str, default="yinsh",
+                   help="Model name; all paths derived as models/{name}/")
     t.add_argument("--device", type=str, default="cuda")
     t.add_argument("--generations", type=int, default=None)
     t.add_argument("--time-limit", type=float, default=None,
@@ -28,7 +29,6 @@ def main():
     t.add_argument("--max-moves", type=int, default=400)
     t.add_argument("--replay-window", type=int, default=8)
     t.add_argument("--checkpoint-every", type=int, default=10)
-    t.add_argument("--checkpoint-dir", type=str, default="checkpoints/yinsh")
     t.add_argument("--playout-cap-p", type=float, default=0.0)
     t.add_argument("--fast-cap", type=int, default=30)
     t.add_argument("--temperature", type=float, default=1.0)
@@ -44,6 +44,8 @@ def main():
     t.add_argument("--use-ort", action="store_true",
                    help="Use Rust-native ORT inference (requires .onnx export)")
     t.add_argument("--value-loss-scale", type=float, default=1.0)
+    t.add_argument("--buf-dir", type=str, default=None,
+                   help="Override replay buffer directory (default: models/{name}/replay)")
 
     # battle
     b = sub.add_parser("battle", help="Pit two models against each other")
@@ -72,13 +74,12 @@ def main():
             scheduler = lr_scheduler_from_string(args.lr_schedule)
 
         trainer = SelfPlayTrainer(
-            model_path=args.model,
+            name=args.name,
             device=args.device,
             num_blocks=args.blocks,
             channels=args.channels,
             lr=args.lr,
             lr_scheduler=scheduler,
-            checkpoint_dir=args.checkpoint_dir,
         )
         trainer.run(
             num_generations=args.generations,
@@ -102,6 +103,7 @@ def main():
             augment_symmetry=args.augment_symmetry,
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
+            buf_dir=args.buf_dir,
         )
     elif args.command == "battle":
         from yinsh.selfplay.battle import run_battle
