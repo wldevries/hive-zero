@@ -4,11 +4,10 @@ use rand::distr::Distribution;
 
 use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
 use crate::mcts::arena::NodeId;
-use crate::mcts::search::{MctsSearch, PolicyHeads, PLACE_HEAD_SIZE, CAP_HEAD_SIZE, apply_d6_sym_cap_dir};
+use crate::mcts::search::{MctsSearch, PolicyHeads, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
 use crate::zertz::{ZertzBoard, ZertzMove, classify_win, WinType};
 use crate::move_encoding::{encode_move, POLICY_SIZE};
 use core_game::game::{Game, Outcome, Player};
-use core_game::symmetry::{D6Symmetry, Symmetry, apply_d6_sym_spatial};
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 
@@ -168,9 +167,6 @@ pub fn play_battle_core(
         Ok((place, cap_dir, value))
     };
 
-    let mut rng = rand::rng();
-    let place_channels = PLACE_HEAD_SIZE / (GRID_SIZE * GRID_SIZE);
-
     while active.iter().any(|&a| a) {
         let mcts_games: Vec<usize> = (0..num_games).filter(|&gi| active[gi]).collect();
         if mcts_games.is_empty() { break; }
@@ -184,23 +180,16 @@ pub fn play_battle_core(
 
         if !cold.is_empty() {
             let nc = cold.len();
-            let root_syms: Vec<D6Symmetry> = (0..nc).map(|_| D6Symmetry::random(&mut rng)).collect();
             let mut flat_boards = vec![0f32; nc * BOARD_FLAT];
             let mut flat_reserves = vec![0f32; nc * RESERVE_SIZE];
             let mut fn1_flags: Vec<bool> = Vec::with_capacity(nc);
             for (k, &ci) in cold.iter().enumerate() {
                 let gi = mcts_games[ci];
                 encode_board(&boards[gi], &mut flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], &mut flat_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE]);
-                apply_d6_sym_spatial(&mut flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], root_syms[k], NUM_CHANNELS, GRID_SIZE);
                 fn1_flags.push(use_fn1_for(gi, boards[gi].next_player()));
             }
 
-            let (mut init_place, mut init_cap_dir, _) = call_evals(&flat_boards, &flat_reserves, &fn1_flags, nc)?;
-            for k in 0..nc {
-                let inv = root_syms[k].inverse();
-                apply_d6_sym_spatial(&mut init_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE], inv, place_channels, GRID_SIZE);
-                apply_d6_sym_cap_dir(&mut init_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE], inv);
-            }
+            let (init_place, init_cap_dir, _) = call_evals(&flat_boards, &flat_reserves, &fn1_flags, nc)?;
             for (k, &ci) in cold.iter().enumerate() {
                 let gi = mcts_games[ci];
                 let heads = PolicyHeads {
@@ -233,15 +222,11 @@ pub fn play_battle_core(
             let mut leaf_boards_flat = vec![0f32; nl * BOARD_FLAT];
             let mut leaf_reserves_flat = vec![0f32; nl * RESERVE_SIZE];
             let mut leaf_fn1_flags: Vec<bool> = Vec::with_capacity(nl);
-            let mut leaf_syms: Vec<D6Symmetry> = Vec::with_capacity(nl);
             for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
                 let gi = mcts_games[i];
                 let (board_enc, reserve_enc) = searches[gi].encode_leaf(leaf);
                 leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
                 leaf_reserves_flat[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
-                let sym = D6Symmetry::random(&mut rng);
-                apply_d6_sym_spatial(&mut leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], sym, NUM_CHANNELS, GRID_SIZE);
-                leaf_syms.push(sym);
                 let leaf_player = searches[gi].get_leaf_player(leaf);
                 leaf_fn1_flags.push(use_fn1_for(gi, leaf_player));
             }
@@ -253,11 +238,8 @@ pub fn play_battle_core(
             let mut per_game_head_data: Vec<Vec<LeafHeadData>> = (0..n).map(|_| Vec::new()).collect();
             let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
             for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
-                let inv = leaf_syms[k].inverse();
-                let mut place = leaf_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE].to_vec();
-                let mut cap_dir = leaf_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec();
-                apply_d6_sym_spatial(&mut place, inv, place_channels, GRID_SIZE);
-                apply_d6_sym_cap_dir(&mut cap_dir, inv);
+                let place = leaf_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE].to_vec();
+                let cap_dir = leaf_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec();
                 per_game_leaves[i].push(leaf);
                 per_game_head_data[i].push(LeafHeadData { place, cap_dir });
                 per_game_values[i].push(leaf_values[k]);
@@ -434,22 +416,15 @@ pub fn play_selfplay_core(
 
         if !cold.is_empty() {
             let nc = cold.len();
-            let root_syms: Vec<D6Symmetry> = (0..nc).map(|_| D6Symmetry::random(&mut rng)).collect();
             let mut flat_boards = vec![0f32; nc * BOARD_FLAT];
             let mut flat_reserves = vec![0f32; nc * RESERVE_SIZE];
             for (k, &ci) in cold.iter().enumerate() {
                 let gi = mcts_games[ci];
                 encode_board(&boards[gi], &mut flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], &mut flat_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE]);
-                apply_d6_sym_spatial(&mut flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], root_syms[k], NUM_CHANNELS, GRID_SIZE);
             }
 
             // Initial NN eval for cold roots
-            let (mut init_place, mut init_cap_dir, _) = eval_fn(&flat_boards, &flat_reserves, nc)?;
-            for k in 0..nc {
-                let inv = root_syms[k].inverse();
-                apply_d6_sym_spatial(&mut init_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE], inv, PLACE_HEAD_SIZE / (GRID_SIZE * GRID_SIZE), GRID_SIZE);
-                apply_d6_sym_cap_dir(&mut init_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE], inv);
-            }
+            let (init_place, init_cap_dir, _) = eval_fn(&flat_boards, &flat_reserves, nc)?;
 
             for (k, &ci) in cold.iter().enumerate() {
                 let gi = mcts_games[ci];
@@ -492,30 +467,22 @@ pub fn play_selfplay_core(
             let nl = leaf_ids.len();
             let mut leaf_boards_flat = vec![0f32; nl * BOARD_FLAT];
             let mut leaf_reserves_flat = vec![0f32; nl * RESERVE_SIZE];
-            let mut leaf_syms: Vec<D6Symmetry> = Vec::with_capacity(nl);
             for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
                 let gi = mcts_games[i];
                 let (board_enc, reserve_enc) = searches[gi].encode_leaf(leaf);
                 leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
                 leaf_reserves_flat[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
-                let sym = D6Symmetry::random(&mut rng);
-                apply_d6_sym_spatial(&mut leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], sym, NUM_CHANNELS, GRID_SIZE);
-                leaf_syms.push(sym);
             }
 
             let (leaf_place, leaf_cap_dir, leaf_values) = eval_fn(&leaf_boards_flat, &leaf_reserves_flat, nl)?;
 
-            let place_channels = PLACE_HEAD_SIZE / (GRID_SIZE * GRID_SIZE);
             let mut per_game_leaves: Vec<Vec<NodeId>> = vec![Vec::new(); n];
             let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
             struct LeafHeadData { place: Vec<f32>, cap_dir: Vec<f32> }
             let mut per_game_head_data: Vec<Vec<LeafHeadData>> = (0..n).map(|_| Vec::new()).collect();
             for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
-                let inv = leaf_syms[k].inverse();
-                let mut place = leaf_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE].to_vec();
-                let mut cap_dir = leaf_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec();
-                apply_d6_sym_spatial(&mut place, inv, place_channels, GRID_SIZE);
-                apply_d6_sym_cap_dir(&mut cap_dir, inv);
+                let place = leaf_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE].to_vec();
+                let cap_dir = leaf_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec();
                 per_game_leaves[i].push(leaf);
                 per_game_head_data[i].push(LeafHeadData { place, cap_dir });
                 per_game_values[i].push(leaf_values[k]);
