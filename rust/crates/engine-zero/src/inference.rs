@@ -49,10 +49,9 @@ pub struct HiveInferenceResult {
 
 /// Result of a batch inference call for Zertz.
 pub struct ZertzInferenceResult {
-    /// Place logits: [B * PLACE_HEAD_SIZE]
-    pub place: Vec<f32>,
-    /// Direction logits: [B * CAP_HEAD_SIZE] (6 channels × 7×7, one per hex direction)
-    pub cap_dir: Vec<f32>,
+    /// Flat policy logits: [B * NN_POLICY_SIZE] = [B * 490]
+    /// Layout per sample: place[4*49] || cap_dir[6*49]
+    pub policy: Vec<f32>,
     /// Value per sample: [B]
     pub value: Vec<f32>,
 }
@@ -340,9 +339,17 @@ impl ZertzOrtEngine {
         let (_, cap_dir_data) = outputs["cap_dir"].try_extract_tensor::<f32>()?;
         let (_, value_data) = outputs["value"].try_extract_tensor::<f32>()?;
 
+        // Concatenate per-sample: [place(196), cap_dir(294)] = flat 490
+        let place_per = place_data.len() / batch_size;
+        let cap_per = cap_dir_data.len() / batch_size;
+        let mut policy = Vec::with_capacity(batch_size * (place_per + cap_per));
+        for i in 0..batch_size {
+            policy.extend_from_slice(&place_data[i * place_per..(i + 1) * place_per]);
+            policy.extend_from_slice(&cap_dir_data[i * cap_per..(i + 1) * cap_per]);
+        }
+
         Ok(ZertzInferenceResult {
-            place: place_data.to_vec(),
-            cap_dir: cap_dir_data.to_vec(),
+            policy,
             value: value_data.to_vec(),
         })
     }

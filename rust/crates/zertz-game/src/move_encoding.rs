@@ -8,13 +8,26 @@
 /// Direction indices match DIRECTIONS: E=0, NE=1, NW=2, W=3, SW=4, SE=5.
 /// All Zertz captures jump exactly 2 cells in one of these 6 directions.
 
-use crate::hex::{self, hex_to_index, DIRECTIONS};
+use core_game::game::PolicyIndex;
+
+use crate::hex::{self, hex_to_index, hex_to_grid, DIRECTIONS, GRID_SIZE};
 use crate::zertz::{ZertzBoard, ZertzMove};
 #[cfg(test)]
 use crate::zertz::Marble;
 
 const BOARD_SIZE: usize = hex::BOARD_SIZE;
 const NUM_DIRECTIONS: usize = 6;
+
+pub const NN_POLICY_CHANNELS: usize = 10; // 4 place + 6 cap_dir
+pub const NN_POLICY_SIZE: usize = NN_POLICY_CHANNELS * GRID_SIZE * GRID_SIZE; // 490
+pub const PLACE_HEAD_SIZE: usize = 4 * GRID_SIZE * GRID_SIZE; // 196
+pub const CAP_HEAD_SIZE: usize = 6 * GRID_SIZE * GRID_SIZE;   // 294
+
+#[inline]
+fn hex_to_grid_cell(h: crate::hex::Hex) -> usize {
+    let (row, col) = hex_to_grid(h);
+    row * GRID_SIZE + col
+}
 
 const PLACE_OFFSET: usize = 0;
 const PLACE_ONLY_OFFSET: usize = 3 * BOARD_SIZE * BOARD_SIZE; // 4107
@@ -70,6 +83,46 @@ pub fn get_legal_move_mask(board: &ZertzBoard) -> ([f32; POLICY_SIZE], Vec<(usiz
         let idx = encode_move(&mv);
         mask[idx] = 1.0;
         indexed.push((idx, mv));
+    }
+
+    (mask, indexed)
+}
+
+/// Get legal move mask and indexed moves for the main MCTS (NNGame interface).
+/// Policy layout: [place_W(49), place_G(49), place_B(49), remove(49),
+///                 cap_dir_E(49), cap_dir_NE(49), ..., cap_dir_SE(49)] = 490 total.
+/// Returns (mask[NN_POLICY_SIZE], Vec<(PolicyIndex, move)>).
+pub fn get_legal_move_mask_nn(board: &ZertzBoard) -> (Vec<f32>, Vec<(PolicyIndex, ZertzMove)>) {
+    const G2: usize = GRID_SIZE * GRID_SIZE;
+    let mut mask = vec![0.0f32; NN_POLICY_SIZE];
+    let moves = board.legal_moves();
+    let mut indexed = Vec::with_capacity(moves.len());
+
+    for mv in moves {
+        let pi = match mv {
+            ZertzMove::Place { color, place_at, remove } => {
+                let a = color.index() * G2 + hex_to_grid_cell(place_at);
+                let b = 3 * G2 + hex_to_grid_cell(remove);
+                mask[a] = 1.0;
+                mask[b] = 1.0;
+                PolicyIndex::Sum(a, b)
+            }
+            ZertzMove::PlaceOnly { color, place_at } => {
+                let a = color.index() * G2 + hex_to_grid_cell(place_at);
+                mask[a] = 1.0;
+                PolicyIndex::Single(a)
+            }
+            ZertzMove::Capture { jumps, .. } => {
+                let from = jumps[0].0;
+                let to = jumps[0].2;
+                let d = capture_direction(from, to);
+                let a = (4 + d) * G2 + hex_to_grid_cell(from);
+                mask[a] = 1.0;
+                PolicyIndex::Single(a)
+            }
+            ZertzMove::Pass => continue,
+        };
+        indexed.push((pi, mv));
     }
 
     (mask, indexed)

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use core_game::game::{Game, Outcome, Player};
+use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex};
 
 use crate::hex::{
     self, hex_add, hex_neighbors, hex_to_index, index_to_hex, is_valid, Hex, DIRECTIONS,
@@ -1012,6 +1012,24 @@ impl Game for ZertzBoard {
 
     fn is_pass(mv: &ZertzMove) -> bool {
         matches!(mv, ZertzMove::Pass)
+    }
+}
+
+impl NNGame for ZertzBoard {
+    const BOARD_CHANNELS: usize    = crate::board_encoding::NUM_CHANNELS;
+    const RESERVE_SIZE: usize      = crate::board_encoding::RESERVE_SIZE;
+    const NUM_POLICY_CHANNELS: usize = crate::move_encoding::NN_POLICY_CHANNELS;
+
+    fn grid_size(&self) -> usize {
+        crate::board_encoding::GRID_SIZE
+    }
+
+    fn encode_board(&self, board_out: &mut [f32], reserve_out: &mut [f32]) {
+        crate::board_encoding::encode_board(self, board_out, reserve_out);
+    }
+
+    fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(PolicyIndex, ZertzMove)>) {
+        crate::move_encoding::get_legal_move_mask_nn(self)
     }
 }
 

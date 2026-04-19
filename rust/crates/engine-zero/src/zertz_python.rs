@@ -6,7 +6,7 @@ use numpy::{PyArray1, PyArray2, PyArrayMethods};
 use std::sync::{Arc, Mutex};
 
 use zertz_game::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
-use zertz_game::move_encoding::POLICY_SIZE;
+use zertz_game::move_encoding::{POLICY_SIZE, NN_POLICY_SIZE, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
 use zertz_game::notation::{move_to_str, str_to_move};
 use zertz_game::zertz::ZertzBoard;
 use core_game::game::{Game, Outcome, Player};
@@ -20,7 +20,7 @@ fn call_python_eval(
     boards: &[f32],
     reserves: &[f32],
     batch_size: usize,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+) -> Result<(Vec<f32>, Vec<f32>), String> {
     Python::attach(|py| {
         let board_arr = numpy::ndarray::Array2::from_shape_vec(
             (batch_size, BOARD_FLAT),
@@ -64,11 +64,15 @@ fn call_python_eval(
             .map_err(|e| e.to_string())?
             .readonly();
 
-        Ok((
-            place.as_slice().map_err(|e| e.to_string())?.to_vec(),
-            cap_dir.as_slice().map_err(|e| e.to_string())?.to_vec(),
-            value.as_slice().map_err(|e| e.to_string())?.to_vec(),
-        ))
+        let place_slice = place.as_slice().map_err(|e| e.to_string())?;
+        let cap_dir_slice = cap_dir.as_slice().map_err(|e| e.to_string())?;
+        // Concatenate per-sample: [place(196), cap_dir(294)] = flat 490
+        let mut flat = Vec::with_capacity(batch_size * NN_POLICY_SIZE);
+        for i in 0..batch_size {
+            flat.extend_from_slice(&place_slice[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE]);
+            flat.extend_from_slice(&cap_dir_slice[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE]);
+        }
+        Ok((flat, value.as_slice().map_err(|e| e.to_string())?.to_vec()))
     })
 }
 // ---------------------------------------------------------------------------
@@ -258,7 +262,7 @@ impl PyZertzSelfPlaySession {
                 let r = engine
                     .infer_batch(boards, reserves, n, NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE)
                     .map_err(|e| e.to_string())?;
-                Ok((r.place, r.cap_dir, r.value))
+                Ok((r.policy, r.value))
             })
         } else {
             let py_eval = eval_fn

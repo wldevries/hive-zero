@@ -3,11 +3,11 @@ use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
 
 use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
-use crate::mcts::arena::NodeId;
-use crate::mcts::search::{MctsSearch, PolicyHeads, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
 use crate::zertz::{ZertzBoard, ZertzMove, classify_win, WinType};
-use crate::move_encoding::{encode_move, POLICY_SIZE};
+use crate::move_encoding::{encode_move, POLICY_SIZE, NN_POLICY_SIZE};
 use core_game::game::{Game, Outcome, Player};
+use core_game::mcts::arena::NodeId;
+use core_game::mcts::search::{MctsSearch, CpuctStrategy};
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 
@@ -24,8 +24,8 @@ pub struct BattleResult {
     pub game_lengths: Vec<u32>,
 }
 
-/// Eval callback type: (boards_flat, reserves_flat, n) -> (place, cap_dir, value)
-pub type EvalFn = Box<dyn Fn(&[f32], &[f32], usize) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> + Send + Sync>;
+/// Eval callback type: (boards_flat, reserves_flat, n) -> (flat_policy_490, value)
+pub type EvalFn = Box<dyn Fn(&[f32], &[f32], usize) -> Result<(Vec<f32>, Vec<f32>), String> + Send + Sync>;
 
 /// Progress callback: finished, total, active, total_moves
 pub type ProgressFn = Box<dyn Fn(u32, u32, u32, u32) + Send + Sync>;
@@ -41,20 +41,15 @@ pub fn best_move_core(
         return Err("Game is already over".to_string());
     }
 
-    let mut search = MctsSearch::new(simulations + 64);
-    search.c_puct = c_puct;
+    let mut search = MctsSearch::<ZertzBoard>::new(simulations + 64);
+    search.params.cpuct_strategy = CpuctStrategy::Constant { c_puct };
 
     // Initial NN eval on root position.
     let mut board_buf = vec![0f32; BOARD_FLAT];
     let mut reserve_buf = vec![0f32; RESERVE_SIZE];
     encode_board(board, &mut board_buf, &mut reserve_buf);
-    let (root_place, root_cap_dir, _root_val) = eval_fn(&board_buf, &reserve_buf, 1)?;
-    let root_heads = PolicyHeads {
-        place: &root_place,
-        cap_dir: &root_cap_dir,
-    };
-
-    search.init(board, &root_heads);
+    let (root_policy, _root_val) = eval_fn(&board_buf, &reserve_buf, 1)?;
+    search.init(board, &root_policy);
     // No Dirichlet noise at inference time — Dirichlet is for self-play exploration only.
 
     // Simulation rounds (batch_size=8)
@@ -75,20 +70,17 @@ pub fn best_move_core(
             flat_res[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
         }
 
-        let (lp_place_data, lp_cap_dir_data, leaf_values) = eval_fn(
+        let (flat_policy, leaf_values) = eval_fn(
             &flat[..nl * BOARD_FLAT],
             &flat_res[..nl * RESERVE_SIZE],
             nl,
         )?;
 
-        let leaf_heads: Vec<PolicyHeads> = (0..nl)
-            .map(|k| PolicyHeads {
-                place: &lp_place_data[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE],
-                cap_dir: &lp_cap_dir_data[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
-            })
+        let policies: Vec<Vec<f32>> = (0..nl)
+            .map(|k| flat_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE].to_vec())
             .collect();
 
-        search.expand_and_backprop(&leaves, &leaf_heads, &leaf_values);
+        search.expand_and_backprop(&policies, &leaf_values);
         done += nl;
     }
 
@@ -120,9 +112,9 @@ pub fn play_battle_core(
     // Warm MCTS: trees are rerooted after each move and reused. Capacity sized for
     // ~80 MCTS searches per game (60 plies + capture sub-moves) × sims per search.
     let arena_capacity = simulations.saturating_mul(80);
-    let mut searches: Vec<MctsSearch> = (0..num_games).map(|_| {
+    let mut searches: Vec<MctsSearch<ZertzBoard>> = (0..num_games).map(|_| {
         let mut s = MctsSearch::new(arena_capacity);
-        s.c_puct = c_puct;
+        s.params.cpuct_strategy = CpuctStrategy::Constant { c_puct };
         s
     }).collect();
     let mut active = vec![true; num_games];
@@ -147,24 +139,21 @@ pub fn play_battle_core(
     };
 
     let call_evals = |flat_boards: &[f32], flat_reserves: &[f32], fn1_flags: &[bool], n: usize|
-     -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
-        let (pl1, cd1, va1) = eval_fn1(flat_boards, flat_reserves, n)?;
-        let (pl2, cd2, va2) = eval_fn2(flat_boards, flat_reserves, n)?;
-        let mut place = vec![0.0f32; n * PLACE_HEAD_SIZE];
-        let mut cap_dir = vec![0.0f32; n * CAP_HEAD_SIZE];
+     -> Result<(Vec<f32>, Vec<f32>), String> {
+        let (fp1, va1) = eval_fn1(flat_boards, flat_reserves, n)?;
+        let (fp2, va2) = eval_fn2(flat_boards, flat_reserves, n)?;
+        let mut flat = vec![0.0f32; n * NN_POLICY_SIZE];
         let mut value = vec![0.0f32; n];
         for i in 0..n {
             if fn1_flags[i] {
-                place[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE].copy_from_slice(&pl1[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE]);
-                cap_dir[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE].copy_from_slice(&cd1[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE]);
+                flat[i * NN_POLICY_SIZE..(i + 1) * NN_POLICY_SIZE].copy_from_slice(&fp1[i * NN_POLICY_SIZE..(i + 1) * NN_POLICY_SIZE]);
                 value[i] = va1[i];
             } else {
-                place[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE].copy_from_slice(&pl2[i * PLACE_HEAD_SIZE..(i + 1) * PLACE_HEAD_SIZE]);
-                cap_dir[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE].copy_from_slice(&cd2[i * CAP_HEAD_SIZE..(i + 1) * CAP_HEAD_SIZE]);
+                flat[i * NN_POLICY_SIZE..(i + 1) * NN_POLICY_SIZE].copy_from_slice(&fp2[i * NN_POLICY_SIZE..(i + 1) * NN_POLICY_SIZE]);
                 value[i] = va2[i];
             }
         }
-        Ok((place, cap_dir, value))
+        Ok((flat, value))
     };
 
     while active.iter().any(|&a| a) {
@@ -189,14 +178,10 @@ pub fn play_battle_core(
                 fn1_flags.push(use_fn1_for(gi, boards[gi].next_player()));
             }
 
-            let (init_place, init_cap_dir, _) = call_evals(&flat_boards, &flat_reserves, &fn1_flags, nc)?;
+            let (init_policy, _) = call_evals(&flat_boards, &flat_reserves, &fn1_flags, nc)?;
             for (k, &ci) in cold.iter().enumerate() {
                 let gi = mcts_games[ci];
-                let heads = PolicyHeads {
-                    place: &init_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE],
-                    cap_dir: &init_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
-                };
-                searches[gi].init(&boards[gi], &heads);
+                searches[gi].init(&boards[gi], &init_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE]);
             }
         }
 
@@ -231,26 +216,17 @@ pub fn play_battle_core(
                 leaf_fn1_flags.push(use_fn1_for(gi, leaf_player));
             }
 
-            let (leaf_place, leaf_cap_dir, leaf_values) = call_evals(&leaf_boards_flat, &leaf_reserves_flat, &leaf_fn1_flags, nl)?;
+            let (leaf_policy, leaf_values) = call_evals(&leaf_boards_flat, &leaf_reserves_flat, &leaf_fn1_flags, nl)?;
 
-            struct LeafHeadData { place: Vec<f32>, cap_dir: Vec<f32> }
-            let mut per_game_leaves: Vec<Vec<NodeId>> = vec![Vec::new(); n];
-            let mut per_game_head_data: Vec<Vec<LeafHeadData>> = (0..n).map(|_| Vec::new()).collect();
+            let mut per_game_policies: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n];
             let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
-            for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
-                let place = leaf_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE].to_vec();
-                let cap_dir = leaf_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec();
-                per_game_leaves[i].push(leaf);
-                per_game_head_data[i].push(LeafHeadData { place, cap_dir });
+            for (k, &i) in leaf_game_idx.iter().enumerate() {
+                per_game_policies[i].push(leaf_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE].to_vec());
                 per_game_values[i].push(leaf_values[k]);
             }
             for (i, &gi) in mcts_games.iter().enumerate() {
-                if per_game_leaves[i].is_empty() { continue; }
-                let heads: Vec<PolicyHeads> = per_game_head_data[i].iter().map(|d| PolicyHeads {
-                    place: &d.place,
-                    cap_dir: &d.cap_dir,
-                }).collect();
-                searches[gi].expand_and_backprop(&per_game_leaves[i], &heads, &per_game_values[i]);
+                if per_game_policies[i].is_empty() { continue; }
+                searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i]);
             }
             if game_sims.iter().all(|&s| s >= simulations) { break; }
         }
@@ -347,9 +323,9 @@ pub fn play_selfplay_core(
     // Warm MCTS: trees are rerooted after each move and reused. Capacity sized for
     // ~80 MCTS searches per game (60 plies + capture sub-moves) × sims per search.
     let arena_capacity = simulations.saturating_mul(80);
-    let mut searches: Vec<MctsSearch> = (0..num_games).map(|_| {
+    let mut searches: Vec<MctsSearch<ZertzBoard>> = (0..num_games).map(|_| {
         let mut s = MctsSearch::new(arena_capacity);
-        s.c_puct = c_puct;
+        s.params.cpuct_strategy = CpuctStrategy::Constant { c_puct };
         s
     }).collect();
     let mut move_counts: Vec<u32> = vec![0; num_games];
@@ -424,15 +400,11 @@ pub fn play_selfplay_core(
             }
 
             // Initial NN eval for cold roots
-            let (init_place, init_cap_dir, _) = eval_fn(&flat_boards, &flat_reserves, nc)?;
+            let (init_policy, _) = eval_fn(&flat_boards, &flat_reserves, nc)?;
 
             for (k, &ci) in cold.iter().enumerate() {
                 let gi = mcts_games[ci];
-                let heads = PolicyHeads {
-                    place: &init_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE],
-                    cap_dir: &init_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE],
-                };
-                searches[gi].init(&boards[gi], &heads);
+                searches[gi].init(&boards[gi], &init_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE]);
             }
         }
 
@@ -474,26 +446,17 @@ pub fn play_selfplay_core(
                 leaf_reserves_flat[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
             }
 
-            let (leaf_place, leaf_cap_dir, leaf_values) = eval_fn(&leaf_boards_flat, &leaf_reserves_flat, nl)?;
+            let (leaf_policy, leaf_values) = eval_fn(&leaf_boards_flat, &leaf_reserves_flat, nl)?;
 
-            let mut per_game_leaves: Vec<Vec<NodeId>> = vec![Vec::new(); n];
+            let mut per_game_policies: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n];
             let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
-            struct LeafHeadData { place: Vec<f32>, cap_dir: Vec<f32> }
-            let mut per_game_head_data: Vec<Vec<LeafHeadData>> = (0..n).map(|_| Vec::new()).collect();
-            for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
-                let place = leaf_place[k * PLACE_HEAD_SIZE..(k + 1) * PLACE_HEAD_SIZE].to_vec();
-                let cap_dir = leaf_cap_dir[k * CAP_HEAD_SIZE..(k + 1) * CAP_HEAD_SIZE].to_vec();
-                per_game_leaves[i].push(leaf);
-                per_game_head_data[i].push(LeafHeadData { place, cap_dir });
+            for (k, &i) in leaf_game_idx.iter().enumerate() {
+                per_game_policies[i].push(leaf_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE].to_vec());
                 per_game_values[i].push(leaf_values[k]);
             }
             for (i, &gi) in mcts_games.iter().enumerate() {
-                if per_game_leaves[i].is_empty() { continue; }
-                let heads: Vec<PolicyHeads> = per_game_head_data[i].iter().map(|d| PolicyHeads {
-                    place: &d.place,
-                    cap_dir: &d.cap_dir,
-                }).collect();
-                searches[gi].expand_and_backprop(&per_game_leaves[i], &heads, &per_game_values[i]);
+                if per_game_policies[i].is_empty() { continue; }
+                searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i]);
             }
 
             if game_sims.iter().zip(sim_caps.iter()).all(|(s, c)| *s >= *c) { break; }

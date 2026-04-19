@@ -2,28 +2,22 @@ mod random_play;
 mod replay;
 
 use clap::{Parser, Subcommand};
-use zertz_game::mcts;
-
 // ---------------------------------------------------------------------------
 // MCTS demo
 // ---------------------------------------------------------------------------
 
 fn run_mcts_demo(simulations: u32) {
-    use mcts::search::{PolicyHeads, POLICY_HEADS_TOTAL, PLACE_HEAD_SIZE};
+    use core_game::mcts::search::MctsSearch;
+    use zertz_game::move_encoding::NN_POLICY_SIZE;
     use zertz_game::zertz::ZertzBoard;
 
     let board = ZertzBoard::default();
-    let uniform_buf = vec![0.0f32; POLICY_HEADS_TOTAL];
-    let heads = PolicyHeads {
-        place: &uniform_buf[..PLACE_HEAD_SIZE],
-        cap_dir: &uniform_buf[PLACE_HEAD_SIZE..],
-    };
-    // TODO: use search.reroot() between moves to carry forward warm visit statistics
-    let mut search = mcts::search::MctsSearch::new(100_000);
-    search.init(&board, &heads);
+    let uniform_policy = vec![0.0f32; NN_POLICY_SIZE];
+    let mut search = MctsSearch::<ZertzBoard>::new(100_000);
+    search.init(&board, &uniform_policy);
 
-    let batch_size = 8;
-    let rounds = simulations / batch_size as u32;
+    let batch_size = 8usize;
+    let rounds = (simulations as usize) / batch_size;
 
     println!("Running MCTS demo: {simulations} simulations, batch_size={batch_size}");
 
@@ -31,19 +25,19 @@ fn run_mcts_demo(simulations: u32) {
     for _ in 0..rounds {
         let leaves = search.select_leaves(batch_size);
         if leaves.is_empty() { break; }
-        let heads_list: Vec<PolicyHeads> = leaves.iter().map(|_| PolicyHeads {
-            place: &uniform_buf[..PLACE_HEAD_SIZE],
-            cap_dir: &uniform_buf[PLACE_HEAD_SIZE..],
-        }).collect();
-        let values: Vec<f32> = vec![0.0; leaves.len()];
-        search.expand_and_backprop(&leaves, &heads_list, &values);
+        let nl = leaves.len();
+        let policies: Vec<Vec<f32>> = (0..nl).map(|_| uniform_policy.clone()).collect();
+        let values: Vec<f32> = vec![0.0; nl];
+        search.expand_and_backprop(&policies, &values);
     }
     let elapsed = start.elapsed();
 
-    println!("Root visits: {}", search.root_visit_count());
-    println!("Root value:  {:.4}", search.root_value());
+    let dist = search.get_visit_distribution();
+    let total_visits: f32 = dist.iter().map(|(_, v)| v).sum::<f32>();
+    let root_visits = (total_visits * simulations as f32) as u32;
+    println!("Root visits: {root_visits}");
     println!("Time:        {:.3}s", elapsed.as_secs_f64());
-    println!("Throughput:  {:.0} sims/s", search.root_visit_count() as f64 / elapsed.as_secs_f64());
+    println!("Throughput:  {:.0} sims/s", root_visits as f64 / elapsed.as_secs_f64());
 }
 
 // ---------------------------------------------------------------------------
