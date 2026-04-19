@@ -168,26 +168,32 @@ def game_to_samples(
 ) -> list[tuple]:
     """Convert one SGF game to a list of training samples.
 
+    The per-position policy target is a sparse joint distribution over ALL
+    legal moves at that position: the played move gets prob 1.0, every other
+    legal move gets prob 0.0. Having the other legal moves present forms the
+    softmax denominator at train time and matches what MCTS sees at inference.
+
     Args:
         sgf_content: Raw SGF text (iso-8859-1 decoded).
         result: 'p0_wins', 'p1_wins', 'draw', or None to infer from the SGF.
         grid_size: NN encoding grid size.
 
     Returns:
-        List of (board_tensor, reserve_vector, place_target,
-                 movement_src, movement_dst, movement_probs, value_target).
-          board_tensor  : shape (NUM_CHANNELS, grid_size, grid_size), float32
-          reserve_vector: shape (RESERVE_SIZE,), float32
-          place_target  : shape (5*G²,), float32 one-hot on placement, zeros for movements
-          movement_src  : list[int] — [src_cell] for movements, [] for placements
-          movement_dst  : list[int] — [dst_cell] for movements, [] for placements
-          movement_probs: list[float] — [1.0] for movements, [] for placements
-          value_target  : float, ∈ {-1.0, 0.0, +1.0}
+        List of (board_tensor, reserve_vector,
+                 place_idx, place_probs,
+                 movement_src, movement_dst, movement_probs,
+                 value_target).
+          board_tensor   : shape (NUM_CHANNELS, grid_size, grid_size), float32
+          reserve_vector : shape (RESERVE_SIZE,), float32
+          place_idx      : list[int] of flat placement indices (into [0, 5*G²))
+          place_probs    : list[float] with 1.0 on the played placement, 0 elsewhere
+          movement_src   : list[int] of legal src cells
+          movement_dst   : list[int] of legal dst cells
+          movement_probs : list[float] with 1.0 on the played movement pair, 0 elsewhere
+          value_target   : float, ∈ {-1.0, 0.0, +1.0}
     """
     import engine_zero
-    from ..encoding.move_encoder import NUM_PLACE_CHANNELS
     NUM_CHANNELS, _, _ = _load_encoding_consts()
-    place_size = NUM_PLACE_CHANNELS * grid_size * grid_size
 
     known_result = result
     game = engine_zero.HiveGame(grid_size=grid_size)
@@ -229,20 +235,44 @@ def game_to_samples(
                 print(f"  [skip] {game_name}: move outside encoding grid: {move_str!r}")
             return []
 
-        place_target = np.zeros(place_size, dtype=np.float32)
-        if from_pos is None:
-            # Placement: primary_idx is a flat index into [0, 5*G²)
-            place_target[primary_idx] = 1.0
-            mv_src: list[int] = []
-            mv_dst: list[int] = []
-            mv_probs: list[float] = []
-        else:
-            # Movement: encode_move returns (src_cell, dst_cell) in [0, G²)
-            mv_src = [int(primary_idx)]
-            mv_dst = [int(secondary_idx)]
-            mv_probs = [1.0]
+        # Enumerate all legal moves at the current position, split by kind.
+        _mask, legal_moves = game.get_legal_move_mask()
+        place_idx: list[int] = []
+        mv_src: list[int] = []
+        mv_dst: list[int] = []
+        for entry in legal_moves:
+            primary, secondary = entry[0], entry[1]
+            if secondary is None:
+                place_idx.append(int(primary))
+            else:
+                mv_src.append(int(primary))
+                mv_dst.append(int(secondary))
 
-        pending.append((board, reserve, place_target, mv_src, mv_dst, mv_probs, turn_color))
+        place_probs = [0.0] * len(place_idx)
+        mv_probs = [0.0] * len(mv_src)
+
+        if from_pos is None:
+            try:
+                i = place_idx.index(int(primary_idx))
+            except ValueError:
+                if verbose:
+                    print(f"  [skip] {game_name}: played placement not in legal list: {move_str!r}")
+                return []
+            place_probs[i] = 1.0
+        else:
+            found = False
+            for i, (s, d) in enumerate(zip(mv_src, mv_dst)):
+                if s == int(primary_idx) and d == int(secondary_idx):
+                    mv_probs[i] = 1.0
+                    found = True
+                    break
+            if not found:
+                if verbose:
+                    print(f"  [skip] {game_name}: played movement not in legal list: {move_str!r}")
+                return []
+
+        pending.append((board, reserve, place_idx, place_probs,
+                        mv_src, mv_dst, mv_probs, turn_color))
 
         # Advance the game state.
         game.play_move(piece_str, from_pos, to_pos)
@@ -259,8 +289,10 @@ def game_to_samples(
         outcome = {"w": 0.0, "b": 0.0}
 
     return [
-        (board, reserve, place_target, mv_src, mv_dst, mv_probs, outcome[turn_color])
-        for board, reserve, place_target, mv_src, mv_dst, mv_probs, turn_color in pending
+        (board, reserve, place_idx, place_probs,
+         mv_src, mv_dst, mv_probs, outcome[turn_color])
+        for board, reserve, place_idx, place_probs,
+            mv_src, mv_dst, mv_probs, turn_color in pending
     ]
 
 
@@ -441,8 +473,12 @@ class Pretrainer:
                         errors_this_epoch += 1
                         samples = []
 
-                    for board, reserve, place_target, mv_src, mv_dst, mv_probs, value in samples:
-                        dataset.add_sample(board, reserve, place_target, mv_src, mv_dst, mv_probs, float(value))
+                    for (board, reserve, place_idx, place_probs,
+                         mv_src, mv_dst, mv_probs_per, value) in samples:
+                        dataset.add_sample(board, reserve,
+                                           place_idx, place_probs,
+                                           mv_src, mv_dst, mv_probs_per,
+                                           float(value))
                         total_positions += 1
                         positions_this_epoch += 1
 

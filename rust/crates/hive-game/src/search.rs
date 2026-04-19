@@ -29,7 +29,12 @@ pub struct SelfPlayResult {
     pub grid_size: usize,
     pub board_data: Vec<f32>,
     pub reserve_data: Vec<f32>,
-    pub place_data: Vec<f32>,
+    /// CSR placement targets: one flat index per legal placement, paired with its
+    /// visit probability.  The joint (place_prob_data + movement_prob_data) sums
+    /// to 1 per sample — training softmaxes across the combined legal action set.
+    pub place_idx_data: Vec<u16>,
+    pub place_prob_data: Vec<f32>,
+    pub place_offsets: Vec<u32>,
     pub movement_src_data: Vec<u16>,
     pub movement_dst_data: Vec<u16>,
     pub movement_prob_data: Vec<f32>,
@@ -65,7 +70,8 @@ struct TurnRecord {
     reserve_offset: usize,
     turn_color: PieceColor,
     is_value_only: bool,
-    place_vector: Vec<f32>,
+    place_idx: Vec<u16>,
+    place_prob: Vec<f32>,
     movement_src: Vec<u16>,
     movement_dst: Vec<u16>,
     movement_prob: Vec<f32>,
@@ -536,7 +542,8 @@ pub fn play_selfplay_core(
             }
 
             let place_size = move_encoding::NUM_PLACE_CHANNELS * grid_size * grid_size;
-            let mut place_vector = vec![0.0f32; place_size];
+            let mut place_idx: Vec<u16> = Vec::new();
+            let mut place_prob: Vec<f32> = Vec::new();
             let mut movement_src: Vec<u16> = Vec::new();
             let mut movement_dst: Vec<u16> = Vec::new();
             let mut movement_prob: Vec<f32> = Vec::new();
@@ -545,7 +552,8 @@ pub fn play_selfplay_core(
                     match encode_game_move(mv, grid_size) {
                         Some(PolicyIndex::Single(index)) => {
                             if index < place_size {
-                                place_vector[index] = probs[move_index];
+                                place_idx.push(index as u16);
+                                place_prob.push(probs[move_index]);
                             }
                         }
                         Some(PolicyIndex::DotProduct { src_cell, dst_cell, .. }) => {
@@ -571,7 +579,8 @@ pub fn play_selfplay_core(
                 reserve_offset: turn_reserve_offsets[index],
                 turn_color,
                 is_value_only,
-                place_vector,
+                place_idx,
+                place_prob,
                 movement_src,
                 movement_dst,
                 movement_prob,
@@ -657,7 +666,9 @@ pub fn play_selfplay_core(
 
     let mut result_board_data = Vec::new();
     let mut result_reserve_data = Vec::new();
-    let mut result_place_data = Vec::new();
+    let mut result_place_idx: Vec<u16> = Vec::new();
+    let mut result_place_prob: Vec<f32> = Vec::new();
+    let mut result_place_offsets: Vec<u32> = vec![0u32];
     let mut result_movement_src: Vec<u16> = Vec::new();
     let mut result_movement_dst: Vec<u16> = Vec::new();
     let mut result_movement_prob: Vec<f32> = Vec::new();
@@ -765,7 +776,9 @@ pub fn play_selfplay_core(
 
             result_board_data.extend_from_slice(board);
             result_reserve_data.extend_from_slice(reserve);
-            result_place_data.extend_from_slice(&record.place_vector);
+            result_place_idx.extend_from_slice(&record.place_idx);
+            result_place_prob.extend_from_slice(&record.place_prob);
+            result_place_offsets.push(result_place_idx.len() as u32);
             result_movement_src.extend_from_slice(&record.movement_src);
             result_movement_dst.extend_from_slice(&record.movement_dst);
             result_movement_prob.extend_from_slice(&record.movement_prob);
@@ -805,7 +818,9 @@ pub fn play_selfplay_core(
         grid_size,
         board_data: result_board_data,
         reserve_data: result_reserve_data,
-        place_data: result_place_data,
+        place_idx_data: result_place_idx,
+        place_prob_data: result_place_prob,
+        place_offsets: result_place_offsets,
         movement_src_data: result_movement_src,
         movement_dst_data: result_movement_dst,
         movement_prob_data: result_movement_prob,

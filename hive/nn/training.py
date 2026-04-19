@@ -1,6 +1,12 @@
-"""Training loop for the Hive neural network."""
+"""Training loop for the Hive neural network.
+
+The policy target is a **joint** distribution over every legal move at a
+position — placements and movements share one softmax, matching what MCTS
+consumes at inference. See docs/policy_heads.md.
+"""
 
 from __future__ import annotations
+import math
 import torch
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
@@ -10,12 +16,12 @@ from tqdm import tqdm
 
 from .model import HiveNet, create_model
 from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
-from ..encoding.move_encoder import (
-    NUM_PLACE_CHANNELS,
-    place_section_size,
-)
+from ..encoding.move_encoder import NUM_PLACE_CHANNELS
 
-MAX_MOVE_PAIRS = 256  # max legal movement pairs per position (src, dst, prob)
+# Per-sample caps on the sparse legal-action target. Must match the Rust side
+# (hive_selfplay.rs training_data()).
+MAX_PLACEMENTS = 128
+MAX_MOVE_PAIRS = 256
 
 # ---------------------------------------------------------------------------
 # Hex D6 symmetry: lazy-loaded per grid_size.
@@ -30,20 +36,20 @@ def _load_sym_perms(grid_size: int):
 
 
 class HiveDataset(Dataset):
-    """Dataset of training samples for the bilinear Q·K policy head.
+    """Replay buffer holding sparse joint (placement + movement) policy targets.
 
-    Policy targets are split into:
-      - place_targets: (max_size, 5*G²) — placement visit distribution
-      - movement_src/dst/probs: (max_size, MAX_MOVE_PAIRS) — sparse joint movement distribution
-      - num_movements: (max_size,) — actual pair count per sample
+    Per sample we store the full legal-action list so the training softmax has
+    the same denominator MCTS uses at inference — placements and movements
+    are NOT trained as two independent heads.
 
-    Acts as a replay buffer with ring-buffer eviction.
+    Placement target: flat indices into [0, 5*G²) (type*G² + cell).
+    Movement target : (src_cell, dst_cell) pairs with dst computed via Q[src]·K[dst].
+    Probabilities sum to 1 across the union of both per sample.
     """
 
     def __init__(self, max_size: int = 50_000, grid_size: int = DEFAULT_GRID_SIZE):
         self.max_size = max_size
         self.grid_size = grid_size
-        self._place_size = place_section_size(grid_size)
         self._count = 0
         self._size = 0
         self.augment_symmetry = False
@@ -51,11 +57,18 @@ class HiveDataset(Dataset):
         # Pre-allocate contiguous arrays
         self.board_tensors = np.zeros((max_size, NUM_CHANNELS, grid_size, grid_size), dtype=np.float32)
         self.reserve_vectors = np.zeros((max_size, RESERVE_SIZE), dtype=np.float32)
-        self.place_targets = np.zeros((max_size, self._place_size), dtype=np.float32)
+
+        # Sparse placement targets: flat idx = type*G² + cell, prob per legal placement.
+        self.place_idx = np.zeros((max_size, MAX_PLACEMENTS), dtype=np.uint16)
+        self.place_probs = np.zeros((max_size, MAX_PLACEMENTS), dtype=np.float32)
+        self.num_placements = np.zeros(max_size, dtype=np.int32)
+
+        # Sparse movement targets: (src_cell, dst_cell, prob) per legal movement pair.
         self.movement_src = np.zeros((max_size, MAX_MOVE_PAIRS), dtype=np.uint16)
         self.movement_dst = np.zeros((max_size, MAX_MOVE_PAIRS), dtype=np.uint16)
         self.movement_probs = np.zeros((max_size, MAX_MOVE_PAIRS), dtype=np.float32)
         self.num_movements = np.zeros(max_size, dtype=np.int32)
+
         self.value_targets = np.zeros(max_size, dtype=np.float32)
         self.value_only = np.zeros(max_size, dtype=np.bool_)
         self.policy_only = np.zeros(max_size, dtype=np.bool_)
@@ -67,10 +80,11 @@ class HiveDataset(Dataset):
         self.opp_mobility = np.zeros(max_size, dtype=np.float32)
 
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
-                   place_target: np.ndarray,
+                   place_idx_arr,   # list/array of int, length <= MAX_PLACEMENTS
+                   place_probs_arr, # list/array of float
                    movement_src_cells,  # list/array of int, length <= MAX_MOVE_PAIRS
-                   movement_dst_cells,  # list/array of int
-                   movement_probs_arr,  # list/array of float
+                   movement_dst_cells,
+                   movement_probs_arr,
                    value_target: float,
                    value_only: bool = False, policy_only: bool = False,
                    my_queen_danger: float = 0.0, opp_queen_danger: float = 0.0,
@@ -79,16 +93,25 @@ class HiveDataset(Dataset):
         idx = self._count % self.max_size
         self.board_tensors[idx] = board_tensor
         self.reserve_vectors[idx] = reserve_vector
-        self.place_targets[idx] = place_target
-        n = min(len(movement_src_cells), MAX_MOVE_PAIRS)
-        self.movement_src[idx, :n] = movement_src_cells[:n]
-        self.movement_dst[idx, :n] = movement_dst_cells[:n]
-        self.movement_probs[idx, :n] = movement_probs_arr[:n]
-        if n < MAX_MOVE_PAIRS:
-            self.movement_src[idx, n:] = 0
-            self.movement_dst[idx, n:] = 0
-            self.movement_probs[idx, n:] = 0.0
-        self.num_movements[idx] = n
+
+        np_ = min(len(place_idx_arr), MAX_PLACEMENTS)
+        self.place_idx[idx, :np_] = place_idx_arr[:np_]
+        self.place_probs[idx, :np_] = place_probs_arr[:np_]
+        if np_ < MAX_PLACEMENTS:
+            self.place_idx[idx, np_:] = 0
+            self.place_probs[idx, np_:] = 0.0
+        self.num_placements[idx] = np_
+
+        nm = min(len(movement_src_cells), MAX_MOVE_PAIRS)
+        self.movement_src[idx, :nm] = movement_src_cells[:nm]
+        self.movement_dst[idx, :nm] = movement_dst_cells[:nm]
+        self.movement_probs[idx, :nm] = movement_probs_arr[:nm]
+        if nm < MAX_MOVE_PAIRS:
+            self.movement_src[idx, nm:] = 0
+            self.movement_dst[idx, nm:] = 0
+            self.movement_probs[idx, nm:] = 0.0
+        self.num_movements[idx] = nm
+
         self.value_targets[idx] = value_target
         self.value_only[idx] = value_only
         self.policy_only[idx] = policy_only
@@ -102,7 +125,9 @@ class HiveDataset(Dataset):
         self._size = min(self._size + 1, self.max_size)
 
     def add_batch(self, board_tensors: np.ndarray, reserve_vectors: np.ndarray,
-                  place_targets: np.ndarray,
+                  place_idx_data: np.ndarray,   # (N, MAX_PLACEMENTS) uint16
+                  place_prob_data: np.ndarray,  # (N, MAX_PLACEMENTS) float32
+                  num_placements_arr: np.ndarray,  # (N,) int32
                   movement_src_data: np.ndarray,   # (N, MAX_MOVE_PAIRS) uint16
                   movement_dst_data: np.ndarray,   # (N, MAX_MOVE_PAIRS) uint16
                   movement_prob_data: np.ndarray,  # (N, MAX_MOVE_PAIRS) float32
@@ -122,7 +147,9 @@ class HiveDataset(Dataset):
             idx = self._count % self.max_size
             self.board_tensors[idx] = boards_flat[i]
             self.reserve_vectors[idx] = reserve_vectors[i]
-            self.place_targets[idx] = place_targets[i]
+            self.place_idx[idx] = place_idx_data[i]
+            self.place_probs[idx] = place_prob_data[i]
+            self.num_placements[idx] = num_placements_arr[i]
             self.movement_src[idx] = movement_src_data[i]
             self.movement_dst[idx] = movement_dst_data[i]
             self.movement_probs[idx] = movement_prob_data[i]
@@ -155,11 +182,13 @@ class HiveDataset(Dataset):
             base_idx = idx
 
         board = self.board_tensors[base_idx]
-        place = self.place_targets[base_idx]
-        mv_src = self.movement_src[base_idx].copy()
-        mv_dst = self.movement_dst[base_idx].copy()
-        mv_prob = self.movement_probs[base_idx].copy()
-        n_mv = int(self.num_movements[base_idx])
+        p_idx = self.place_idx[base_idx].copy()
+        p_prob = self.place_probs[base_idx].copy()
+        n_p = int(self.num_placements[base_idx])
+        m_src = self.movement_src[base_idx].copy()
+        m_dst = self.movement_dst[base_idx].copy()
+        m_prob = self.movement_probs[base_idx].copy()
+        n_m = int(self.num_movements[base_idx])
 
         if sym != 0:
             gs = self.grid_size
@@ -172,32 +201,56 @@ class HiveDataset(Dataset):
             padded = np.concatenate([bf, np.zeros((NUM_CHANNELS, 1), dtype=np.float32)], axis=1)
             board = padded[:, perm].reshape(NUM_CHANNELS, gs, gs)
 
-            # Placement: (5, gc) → permute → flatten
-            pf = place.reshape(NUM_PLACE_CHANNELS, gc)
-            padded_p = np.concatenate([pf, np.zeros((NUM_PLACE_CHANNELS, 1), dtype=np.float32)], axis=1)
-            place = padded_p[:, perm].reshape(-1)
+            # Placement indices: idx = type * gc + cell. Permute the cell part.
+            if n_p > 0:
+                flat = p_idx[:n_p].astype(np.int64)
+                type_part = flat // gc
+                cell_part = flat % gc
+                new_cell = perm[cell_part]
+                valid_p = new_cell < gc
+                new_flat = (type_part * gc + new_cell).astype(np.uint16)
+            else:
+                valid_p = np.zeros(0, dtype=bool)
+                new_flat = np.zeros(0, dtype=np.uint16)
 
-            # Movement pairs: apply perm, filter pairs that map outside the grid
-            # (perm sentinel = gc for cells outside grid after rotation)
-            if n_mv > 0:
-                new_src = perm[mv_src[:n_mv]]
-                new_dst = perm[mv_dst[:n_mv]]
-                valid = (new_src < gc) & (new_dst < gc)
-                n_valid = int(valid.sum())
-                if n_valid < n_mv:
-                    valid_probs = mv_prob[:n_mv][valid]
-                    prob_sum = valid_probs.sum()
-                    mv_src[:n_valid] = new_src[valid]
-                    mv_dst[:n_valid] = new_dst[valid]
-                    mv_prob[:n_valid] = valid_probs / prob_sum if prob_sum > 0 else valid_probs
-                    mv_prob[n_valid:n_mv] = 0.0
-                    n_mv = n_valid
-                else:
-                    mv_src[:n_mv] = new_src
-                    mv_dst[:n_mv] = new_dst
+            # Movement pairs: permute src and dst; drop pairs with OOB src or dst.
+            if n_m > 0:
+                new_src = perm[m_src[:n_m]]
+                new_dst = perm[m_dst[:n_m]]
+                valid_m = (new_src < gc) & (new_dst < gc)
+            else:
+                valid_m = np.zeros(0, dtype=bool)
+                new_src = np.zeros(0, dtype=np.int64)
+                new_dst = np.zeros(0, dtype=np.int64)
+
+            # Renormalize the joint target across surviving placements + movements.
+            kept_p_prob = p_prob[:n_p][valid_p] if n_p > 0 else np.zeros(0, dtype=np.float32)
+            kept_m_prob = m_prob[:n_m][valid_m] if n_m > 0 else np.zeros(0, dtype=np.float32)
+            total = float(kept_p_prob.sum() + kept_m_prob.sum())
+            if total > 0:
+                kept_p_prob = kept_p_prob / total
+                kept_m_prob = kept_m_prob / total
+
+            # Write back (pad with zeros).
+            n_p_new = len(kept_p_prob)
+            p_idx = np.zeros(MAX_PLACEMENTS, dtype=np.uint16)
+            p_prob = np.zeros(MAX_PLACEMENTS, dtype=np.float32)
+            if n_p_new > 0:
+                p_idx[:n_p_new] = new_flat[valid_p][:MAX_PLACEMENTS]
+                p_prob[:n_p_new] = kept_p_prob[:MAX_PLACEMENTS]
+            n_p = min(n_p_new, MAX_PLACEMENTS)
+
+            n_m_new = len(kept_m_prob)
+            m_src = np.zeros(MAX_MOVE_PAIRS, dtype=np.uint16)
+            m_dst = np.zeros(MAX_MOVE_PAIRS, dtype=np.uint16)
+            m_prob = np.zeros(MAX_MOVE_PAIRS, dtype=np.float32)
+            if n_m_new > 0:
+                m_src[:n_m_new] = new_src[valid_m][:MAX_MOVE_PAIRS].astype(np.uint16)
+                m_dst[:n_m_new] = new_dst[valid_m][:MAX_MOVE_PAIRS].astype(np.uint16)
+                m_prob[:n_m_new] = kept_m_prob[:MAX_MOVE_PAIRS]
+            n_m = min(n_m_new, MAX_MOVE_PAIRS)
         else:
             board = board.copy()
-            place = place.copy()
 
         aux_targets = np.array([
             self.my_queen_danger[base_idx], self.opp_queen_danger[base_idx],
@@ -208,11 +261,13 @@ class HiveDataset(Dataset):
         return (
             torch.from_numpy(board),
             torch.from_numpy(self.reserve_vectors[base_idx].copy()),
-            torch.from_numpy(place),
-            torch.from_numpy(mv_src.astype(np.int64)),
-            torch.from_numpy(mv_dst.astype(np.int64)),
-            torch.from_numpy(mv_prob),
-            torch.tensor(n_mv, dtype=torch.int32),
+            torch.from_numpy(p_idx.astype(np.int64)),
+            torch.from_numpy(p_prob),
+            torch.tensor(n_p, dtype=torch.int32),
+            torch.from_numpy(m_src.astype(np.int64)),
+            torch.from_numpy(m_dst.astype(np.int64)),
+            torch.from_numpy(m_prob),
+            torch.tensor(n_m, dtype=torch.int32),
             torch.tensor(self.value_targets[base_idx], dtype=torch.float32),
             torch.tensor(self.value_only[base_idx], dtype=torch.bool),
             torch.tensor(self.policy_only[base_idx], dtype=torch.bool),
@@ -221,7 +276,7 @@ class HiveDataset(Dataset):
 
 
 class Trainer:
-    """Trains the HiveNet model on self-play data using SGD with momentum."""
+    """Trains HiveNet on joint-softmax policy targets."""
 
     def __init__(self, model: Optional[HiveNet] = None,
                  weight_decay: float = 1e-4, device: str = "cpu",
@@ -254,70 +309,75 @@ class Trainer:
 
         D = self.model.bilinear_dim
         device_type = self.device.type
+        device = self.device
 
-        for board, reserve, place_target, mv_src, mv_dst, mv_probs, n_mv, \
-                value_target, vo_mask, po_mask, aux_target in tqdm(loader, desc="  Training", leave=False, unit="batch"):
-            board = board.to(self.device)
-            reserve = reserve.to(self.device)
-            place_target = place_target.to(self.device)
-            mv_src = mv_src.to(self.device)       # (B, MAX_MOVE_PAIRS) int64
-            mv_dst = mv_dst.to(self.device)       # (B, MAX_MOVE_PAIRS) int64
-            mv_probs = mv_probs.to(self.device)   # (B, MAX_MOVE_PAIRS) float32
-            n_mv = n_mv.to(self.device)           # (B,) int32
-            value_target = value_target.to(self.device).unsqueeze(1)
-            vo_mask = vo_mask.to(self.device)
-            po_mask = po_mask.to(self.device)
-            aux_target = aux_target.to(self.device)
+        for (board, reserve, p_idx, p_prob, n_p,
+             m_src, m_dst, m_prob, n_m,
+             value_target, vo_mask, po_mask, aux_target) in tqdm(
+                loader, desc="  Training", leave=False, unit="batch"):
+            board = board.to(device)
+            reserve = reserve.to(device)
+            p_idx = p_idx.to(device)     # (B, MAX_PLACEMENTS) int64
+            p_prob = p_prob.to(device)   # (B, MAX_PLACEMENTS) float32
+            n_p = n_p.to(device)         # (B,) int32
+            m_src = m_src.to(device)
+            m_dst = m_dst.to(device)
+            m_prob = m_prob.to(device)
+            n_m = n_m.to(device)
+            value_target = value_target.to(device).unsqueeze(1)
+            vo_mask = vo_mask.to(device)
+            po_mask = po_mask.to(device)
+            aux_target = aux_target.to(device)
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 policy_logits, value, aux = self.model(board, reserve)
 
+            B = board.size(0)
             gs = board.size(-1)
             gs2 = gs * gs
             place_end = NUM_PLACE_CHANNELS * gs2
 
-            place_logits = policy_logits[:, :place_end]                   # (B, 5*G²)
-            q = policy_logits[:, place_end:place_end + D * gs2]           # (B, D*G²)
-            k = policy_logits[:, place_end + D * gs2:]                    # (B, D*G²)
+            place_logits_flat = policy_logits[:, :place_end]                   # (B, 5*G²)
+            q = policy_logits[:, place_end:place_end + D * gs2].view(B, gs2, D)  # (B, G², D)
+            k = policy_logits[:, place_end + D * gs2:].view(B, gs2, D)           # (B, G², D)
 
-            B = board.size(0)
-            q = q.view(B, gs2, D)  # (B, G², D)
-            k = k.view(B, gs2, D)  # (B, G², D)
+            # Gather placement logits at legal indices.
+            p_gather = torch.gather(place_logits_flat, 1, p_idx)               # (B, MAX_PLACEMENTS)
 
-            # Placement loss: soft CE
-            def soft_ce(logits, target):
-                return -(target * torch.log_softmax(logits, dim=1)).sum(dim=1)
+            # Bilinear movement logits.
+            src_exp = m_src.unsqueeze(-1).expand(-1, -1, D)
+            dst_exp = m_dst.unsqueeze(-1).expand(-1, -1, D)
+            q_g = torch.gather(q, 1, src_exp)                                  # (B, MAX_MOVE_PAIRS, D)
+            k_g = torch.gather(k, 1, dst_exp)                                  # (B, MAX_MOVE_PAIRS, D)
+            m_logits = (q_g * k_g).sum(-1) / math.sqrt(D)                      # (B, MAX_MOVE_PAIRS)
 
-            place_loss = soft_ce(place_logits, place_target)
+            # One softmax over the combined legal-action set — matches MCTS.
+            combined_logits = torch.cat([p_gather, m_logits], dim=1)
+            combined_probs = torch.cat([p_prob, m_prob], dim=1)
 
-            # Bilinear movement loss: gather Q[src] and K[dst] per pair, dot product
-            src_idx = mv_src.unsqueeze(-1).expand(-1, -1, D)   # (B, MAX_MOVE_PAIRS, D)
-            dst_idx = mv_dst.unsqueeze(-1).expand(-1, -1, D)   # (B, MAX_MOVE_PAIRS, D)
-            q_gathered = torch.gather(q, 1, src_idx)            # (B, MAX_MOVE_PAIRS, D)
-            k_gathered = torch.gather(k, 1, dst_idx)            # (B, MAX_MOVE_PAIRS, D)
-            move_logits = (q_gathered * k_gathered).sum(-1) / (D ** 0.5)  # (B, MAX_MOVE_PAIRS)
+            p_mask = (torch.arange(MAX_PLACEMENTS, device=device).unsqueeze(0)
+                      < n_p.unsqueeze(1).long())
+            m_mask = (torch.arange(MAX_MOVE_PAIRS, device=device).unsqueeze(0)
+                      < n_m.unsqueeze(1).long())
+            c_mask = torch.cat([p_mask, m_mask], dim=1)
 
-            # Mask padded entries (i >= num_movements)
-            move_mask = (torch.arange(MAX_MOVE_PAIRS, device=self.device)
-                         .unsqueeze(0) < n_mv.unsqueeze(1))
-            move_logits = move_logits.masked_fill(~move_mask, float('-inf'))
+            combined_logits = combined_logits.masked_fill(~c_mask, float('-inf'))
+            log_probs = torch.log_softmax(combined_logits, dim=1)
+            log_probs = log_probs.masked_fill(~c_mask, 0.0)  # avoid 0 * -inf = NaN
 
-            # CE loss; zero out padded positions to avoid 0 * -inf = NaN
-            move_log_probs = torch.log_softmax(move_logits, dim=1)
-            move_log_probs = move_log_probs.masked_fill(~move_mask, 0.0)
-            move_loss = -(mv_probs * move_log_probs).sum(dim=1)
-            move_loss = move_loss * (n_mv > 0).float()
+            per_sample_policy = -(combined_probs * log_probs).sum(dim=1)
+            has_target = ((n_p + n_m) > 0)
+            per_sample_policy = per_sample_policy * has_target.float()
 
-            per_sample_policy = place_loss + move_loss
             policy_weight = (~vo_mask).float()
             policy_loss = (per_sample_policy * policy_weight).mean()
 
-            # Value loss: MSE, masked for policy-only samples
+            # Value loss: MSE, masked for policy-only samples.
             per_sample_value = (value.squeeze(1) - value_target.squeeze(1)) ** 2
             value_weight = (~po_mask).float()
             value_loss = (per_sample_value * value_weight).mean()
 
-            # Auxiliary losses: MSE on all 6 outputs, always active
+            # Auxiliary losses: MSE on all 6 outputs, always active.
             aux_mse = (aux - aux_target) ** 2
             qd_loss = aux_mse[:, 0:2].mean()
             qe_loss = aux_mse[:, 2:4].mean()

@@ -6,13 +6,14 @@ import pytest
 from hive.nn.training import (
     _load_sym_perms,
     HiveDataset,
+    MAX_PLACEMENTS,
+    MAX_MOVE_PAIRS,
 )
 from hive.encoding.board_encoder import NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE
-from hive.encoding.move_encoder import POLICY_SIZE, NUM_POLICY_CHANNELS
+from hive.encoding.move_encoder import NUM_PLACE_CHANNELS
 
 _SYM_PERMS = _load_sym_perms(GRID_SIZE)
 _GRID_CELLS = GRID_SIZE * GRID_SIZE
-_NUM_POLICY_CH = NUM_POLICY_CHANNELS
 
 CENTER = GRID_SIZE // 2
 
@@ -93,37 +94,59 @@ class TestPermutations:
 
 class TestDatasetAugmentation:
     def _make_dataset(self):
+        """Two-placement sample: queen at (11,13), spider at (11,12)."""
         ds = HiveDataset(max_size=10)
         board = np.zeros((NUM_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
-        board[0, CENTER, CENTER] = 1.0          # my queen (type 0) at center
-        board[1, CENTER, CENTER + 1] = 1.0      # my spider (type 1) right of center
-        policy = np.zeros(POLICY_SIZE, dtype=np.float32)
-        # place a queen placement: channel 0 (Queen type), at center
-        policy[0 * _GRID_CELLS + cell(CENTER, CENTER + 2)] = 0.7  # queen to (11,13)
-        # place a spider placement: channel 1 (Spider type)
-        policy[1 * _GRID_CELLS + cell(CENTER, CENTER + 1)] = 0.3  # spider at (11,12)
-        ds.add_sample(board, np.ones(RESERVE_SIZE, dtype=np.float32), policy, 1.0)
+        board[0, CENTER, CENTER] = 1.0
+        board[1, CENTER, CENTER + 1] = 1.0
+
+        # Placements: (type=0=Queen, cell=(11,13))@0.7 and (type=1=Spider, cell=(11,12))@0.3.
+        place_idx = [
+            0 * _GRID_CELLS + cell(CENTER, CENTER + 2),
+            1 * _GRID_CELLS + cell(CENTER, CENTER + 1),
+        ]
+        place_probs = [0.7, 0.3]
+        # No movements in this sample.
+        mv_src: list[int] = []
+        mv_dst: list[int] = []
+        mv_probs: list[float] = []
+        ds.add_sample(
+            board, np.ones(RESERVE_SIZE, dtype=np.float32),
+            place_idx, place_probs,
+            mv_src, mv_dst, mv_probs,
+            1.0,
+        )
         return ds
 
     def test_no_augment_returns_copy(self):
         ds = self._make_dataset()
         ds.augment_symmetry = False
-        b, _, p, *_ = ds[0]
-        np.testing.assert_array_equal(b.numpy(), ds.board_tensors[0])
-        np.testing.assert_array_equal(p.numpy(), ds.policy_targets[0])
+        board_t, reserve_t, p_idx_t, p_prob_t, n_p_t, *_ = ds[0]
+        np.testing.assert_array_equal(board_t.numpy(), ds.board_tensors[0])
+        assert int(n_p_t.item()) == 2
+        np.testing.assert_array_equal(
+            p_idx_t.numpy()[: int(n_p_t.item())], ds.place_idx[0][: int(n_p_t.item())]
+        )
+        np.testing.assert_array_equal(
+            p_prob_t.numpy()[: int(n_p_t.item())], ds.place_probs[0][: int(n_p_t.item())]
+        )
 
     def test_augment_preserves_shapes(self):
         ds = self._make_dataset()
         ds.augment_symmetry = True
-        b, rv, p, v, vo, po, aux = ds[0]
+        (b, rv, p_idx, p_prob, n_p,
+         m_src, m_dst, m_prob, n_m,
+         v, vo, po, aux) = ds[0]
         assert b.shape == (NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
-        assert p.shape == (POLICY_SIZE,)
         assert rv.shape == (RESERVE_SIZE,)
+        assert p_idx.shape == (MAX_PLACEMENTS,)
+        assert p_prob.shape == (MAX_PLACEMENTS,)
+        assert m_src.shape == (MAX_MOVE_PAIRS,)
 
     def test_augment_preserves_value(self):
         ds = self._make_dataset()
         ds.augment_symmetry = True
-        _, _, _, v, *_ = ds[0]
+        _, _, _, _, _, _, _, _, _, v, *_ = ds[0]
         assert v.item() == 1.0
 
     def test_augment_preserves_board_sum(self):
@@ -131,19 +154,20 @@ class TestDatasetAugmentation:
         ds = self._make_dataset()
         original_sum = ds.board_tensors[0].sum()
         ds.augment_symmetry = True
-        # Try many times to hit non-identity symmetries
         for _ in range(50):
             b, *_ = ds[0]
             np.testing.assert_allclose(b.numpy().sum(), original_sum, rtol=1e-5)
 
     def test_augment_preserves_policy_sum(self):
-        """Sum of policy target should be preserved."""
+        """Sum of joint placement+movement target should stay 1 (or 0 if all dropped)."""
         ds = self._make_dataset()
-        original_sum = ds.policy_targets[0].sum()
         ds.augment_symmetry = True
         for _ in range(50):
-            _, _, p, *_ = ds[0]
-            np.testing.assert_allclose(p.numpy().sum(), original_sum, rtol=1e-5)
+            _, _, _, p_prob, n_p, _, _, m_prob, n_m, *_ = ds[0]
+            total = float(p_prob.sum().item() + m_prob.sum().item())
+            # All target cells here stay in-bounds under every D6 rotation (close to
+            # center), so sum must equal 1 exactly.
+            np.testing.assert_allclose(total, 1.0, rtol=1e-5)
 
     def test_augment_r3_flips_board(self):
         """Manually verify 180-degree rotation on a simple board."""
@@ -162,17 +186,21 @@ class TestDatasetAugmentation:
         # Original spider position should now be empty
         assert rotated[1, CENTER, CENTER + 1] == 0.0
 
-    def test_augment_r3_flips_policy(self):
-        """180-degree rotation moves policy targets to mirrored cells."""
+    def test_augment_r3_flips_placement_indices(self):
+        """180-degree rotation maps placement cells to mirrored cells."""
         ds = self._make_dataset()
-        policy = ds.policy_targets[0]
         perm = _SYM_PERMS[3]
+        # Directly apply R3 via dataset mechanics: idx 0 .. 11 are base sample copies
+        # under 12 symmetries. idx = base_idx * 12 + sym → base 0, sym 3 lives at idx 3.
+        ds.augment_symmetry = True
+        _, _, p_idx, p_prob, n_p, _, _, _, _, *_ = ds[3]
+        assert int(n_p.item()) == 2
 
-        pf = policy.reshape(_NUM_POLICY_CH, _GRID_CELLS)
-        padded = np.concatenate([pf, np.zeros((_NUM_POLICY_CH, 1), dtype=np.float32)], axis=1)
-        rotated = padded[:, perm].reshape(-1)
-
-        # Queen move was to (11,13) hex(2,0) -> hex(-2,0) -> grid(11,9)
-        assert rotated[0 * _GRID_CELLS + cell(CENTER, CENTER - 2)] == pytest.approx(0.7)
-        # Spider was at (11,12) hex(1,0) -> hex(-1,0) -> grid(11,10)
-        assert rotated[1 * _GRID_CELLS + cell(CENTER, CENTER - 1)] == pytest.approx(0.3)
+        # Queen placement was (type=0, cell=(11,13)=hex(2,0)) → hex(-2,0)=grid(11,9).
+        # Spider placement was (type=1, cell=(11,12)=hex(1,0)) → hex(-1,0)=grid(11,10).
+        expected = {
+            0 * _GRID_CELLS + cell(CENTER, CENTER - 2): pytest.approx(0.7),
+            1 * _GRID_CELLS + cell(CENTER, CENTER - 1): pytest.approx(0.3),
+        }
+        got = {int(p_idx[i].item()): p_prob[i].item() for i in range(int(n_p.item()))}
+        assert got == expected

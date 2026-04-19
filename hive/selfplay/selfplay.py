@@ -539,21 +539,20 @@ class SelfPlayTrainer:
             (
                 boards,
                 reserves,
-                place_targets,
+                (place_idx, place_probs, num_placements),
                 values,
                 value_only_flags,
                 policy_only_flags,
                 aux_targets,
-                movement_srcs,
-                movement_dsts,
-                movement_probs,
-                num_movements,
+                (movement_srcs, movement_dsts, movement_probs, num_movements),
             ) = result.training_data()
             # aux_targets is [N, 6]: [my_qd, opp_qd, my_qe, opp_qe, my_mob, opp_mob]
             replay_buffer.add_batch(
                 boards,
                 reserves,
-                place_targets,
+                place_idx,
+                place_probs,
+                num_placements,
                 movement_srcs,
                 movement_dsts,
                 movement_probs,
@@ -986,25 +985,18 @@ class SelfPlayTrainer:
             d = summary["draws"]
             l = summary["engine2_wins"]
 
-            # Feed samples back into replay buffer
-            samples = summary.get("training_samples", [])
-            if replay_buffer is not None and samples:
-                for bt, rv, pv, vt, wt in samples:
-                    replay_buffer.add_sample(bt, rv, pv, vt, wt)
-                print(
-                    f"  vs {summary['engine2']}: {_cg(w)}W/{_cy(d)}D/{_cr(l)}L "
-                    f"(score: {_cc(f'{score:.0%}')}, {len(samples)} samples -> buffer)"
-                )
-            else:
-                print(
-                    f"  vs {summary['engine2']}: {_cg(w)}W/{_cy(d)}D/{_cr(l)}L "
-                    f"(score: {_cc(f'{score:.0%}')})"
-                )
+            # Mzinga-match engines never produce policy vectors, so no replay
+            # samples flow back into the buffer — ModelEngine.get_samples is a
+            # documented no-op.  Surface the match result only.
+            print(
+                f"  vs {summary['engine2']}: {_cg(w)}W/{_cy(d)}D/{_cr(l)}L "
+                f"(score: {_cc(f'{score:.0%}')})"
+            )
 
             # Log to CSV
             with open(self._log_path, "a") as f:
                 f.write(
-                    f"{generation},eval,{eval_config['simulations']},{w},{l},{d},0,{len(samples)},"
+                    f"{generation},eval,{eval_config['simulations']},{w},{l},{d},0,0,"
                     f"{len(replay_buffer) if replay_buffer else 0},"
                     f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n"
                 )

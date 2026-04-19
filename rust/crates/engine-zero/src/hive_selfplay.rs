@@ -154,7 +154,9 @@ fn into_py_selfplay_result(result: search::SelfPlayResult) -> PySelfPlayResult {
         grid_size: result.grid_size,
         board_data: result.board_data,
         reserve_data: result.reserve_data,
-        place_data: result.place_data,
+        place_idx_data: result.place_idx_data,
+        place_prob_data: result.place_prob_data,
+        place_offsets: result.place_offsets,
         movement_src_data: result.movement_src_data,
         movement_dst_data: result.movement_dst_data,
         movement_prob_data: result.movement_prob_data,
@@ -200,7 +202,9 @@ pub struct PySelfPlayResult {
     grid_size: usize,
     board_data: Vec<f32>,
     reserve_data: Vec<f32>,
-    place_data: Vec<f32>,
+    place_idx_data: Vec<u16>,
+    place_prob_data: Vec<f32>,
+    place_offsets: Vec<u32>,
     movement_src_data: Vec<u16>,
     movement_dst_data: Vec<u16>,
     movement_prob_data: Vec<f32>,
@@ -239,24 +243,31 @@ impl PySelfPlayResult {
     ) -> (
         Bound<'py, PyArray2<f32>>,   // boards (n, board_size)
         Bound<'py, PyArray2<f32>>,   // reserves (n, RESERVE_SIZE)
-        Bound<'py, PyArray2<f32>>,   // place_targets (n, place_size)
+        // placement targets (sparse CSR → padded)
+        (
+            Bound<'py, PyArray2<u16>>,   // place_idx (n, MAX_PLACEMENTS)
+            Bound<'py, PyArray2<f32>>,   // place_probs (n, MAX_PLACEMENTS)
+            Bound<'py, PyArray1<i32>>,   // num_placements (n,)
+        ),
         Bound<'py, PyArray1<f32>>,   // values (n,)
         Vec<bool>,                   // value_only_flags
         Vec<bool>,                   // policy_only_flags
         Bound<'py, PyArray2<f32>>,   // aux (n, 6)
-        Bound<'py, PyArray2<u16>>,   // movement_srcs (n, MAX_MOVE_PAIRS)
-        Bound<'py, PyArray2<u16>>,   // movement_dsts (n, MAX_MOVE_PAIRS)
-        Bound<'py, PyArray2<f32>>,   // movement_probs (n, MAX_MOVE_PAIRS)
-        Bound<'py, PyArray1<i32>>,   // num_movements (n,)
+        // movement targets
+        (
+            Bound<'py, PyArray2<u16>>,   // movement_srcs (n, MAX_MOVE_PAIRS)
+            Bound<'py, PyArray2<u16>>,   // movement_dsts (n, MAX_MOVE_PAIRS)
+            Bound<'py, PyArray2<f32>>,   // movement_probs (n, MAX_MOVE_PAIRS)
+            Bound<'py, PyArray1<i32>>,   // num_movements (n,)
+        ),
     ) {
+        const MAX_PLACEMENTS: usize = 128;
         const MAX_MOVE_PAIRS: usize = 256;
         let n = self.num_samples;
         let board_size = NUM_CHANNELS * self.grid_size * self.grid_size;
-        let place_size = move_encoding::NUM_PLACE_CHANNELS * self.grid_size * self.grid_size;
 
         let boards = numpy::ndarray::Array2::from_shape_vec((n, board_size), self.board_data.clone()).unwrap();
         let reserves = numpy::ndarray::Array2::from_shape_vec((n, RESERVE_SIZE), self.reserve_data.clone()).unwrap();
-        let place_targets = numpy::ndarray::Array2::from_shape_vec((n, place_size), self.place_data.clone()).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
 
         let mut aux_data = Vec::with_capacity(n * 6);
@@ -269,6 +280,20 @@ impl PySelfPlayResult {
             aux_data.push(self.opp_mobility[index]);
         }
         let aux = numpy::ndarray::Array2::from_shape_vec((n, 6), aux_data).unwrap();
+
+        // Build padded placement arrays from CSR data
+        let mut place_idx = vec![0u16; n * MAX_PLACEMENTS];
+        let mut place_probs = vec![0.0f32; n * MAX_PLACEMENTS];
+        let mut num_placements = vec![0i32; n];
+        for i in 0..n {
+            let start = self.place_offsets[i] as usize;
+            let end = self.place_offsets[i + 1] as usize;
+            let count = (end - start).min(MAX_PLACEMENTS);
+            num_placements[i] = count as i32;
+            let row = i * MAX_PLACEMENTS;
+            place_idx[row..row + count].copy_from_slice(&self.place_idx_data[start..start + count]);
+            place_probs[row..row + count].copy_from_slice(&self.place_prob_data[start..start + count]);
+        }
 
         // Build padded movement arrays from CSR data
         let mut mv_srcs = vec![0u16; n * MAX_MOVE_PAIRS];
@@ -287,6 +312,9 @@ impl PySelfPlayResult {
             mv_probs[row..row + count].copy_from_slice(&self.movement_prob_data[start..start + count]);
         }
 
+        let place_idx_arr = numpy::ndarray::Array2::from_shape_vec((n, MAX_PLACEMENTS), place_idx).unwrap();
+        let place_probs_arr = numpy::ndarray::Array2::from_shape_vec((n, MAX_PLACEMENTS), place_probs).unwrap();
+        let num_place_arr = numpy::ndarray::Array1::from(num_placements);
         let mv_srcs_arr = numpy::ndarray::Array2::from_shape_vec((n, MAX_MOVE_PAIRS), mv_srcs).unwrap();
         let mv_dsts_arr = numpy::ndarray::Array2::from_shape_vec((n, MAX_MOVE_PAIRS), mv_dsts).unwrap();
         let mv_probs_arr = numpy::ndarray::Array2::from_shape_vec((n, MAX_MOVE_PAIRS), mv_probs).unwrap();
@@ -295,15 +323,21 @@ impl PySelfPlayResult {
         (
             PyArray2::from_owned_array(py, boards),
             PyArray2::from_owned_array(py, reserves),
-            PyArray2::from_owned_array(py, place_targets),
+            (
+                PyArray2::from_owned_array(py, place_idx_arr),
+                PyArray2::from_owned_array(py, place_probs_arr),
+                PyArray1::from_owned_array(py, num_place_arr),
+            ),
             PyArray1::from_owned_array(py, values),
             self.value_only_flags.clone(),
             self.policy_only_flags.clone(),
             PyArray2::from_owned_array(py, aux),
-            PyArray2::from_owned_array(py, mv_srcs_arr),
-            PyArray2::from_owned_array(py, mv_dsts_arr),
-            PyArray2::from_owned_array(py, mv_probs_arr),
-            PyArray1::from_owned_array(py, num_mv_arr),
+            (
+                PyArray2::from_owned_array(py, mv_srcs_arr),
+                PyArray2::from_owned_array(py, mv_dsts_arr),
+                PyArray2::from_owned_array(py, mv_probs_arr),
+                PyArray1::from_owned_array(py, num_mv_arr),
+            ),
         )
     }
 
