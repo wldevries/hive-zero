@@ -88,6 +88,41 @@ pub fn get_legal_move_mask(board: &ZertzBoard) -> ([f32; POLICY_SIZE], Vec<(usiz
     (mask, indexed)
 }
 
+/// Encode a visit distribution as a flat NN_POLICY_SIZE=490 vector for training.
+///
+/// Layout: [place_W(49), place_G(49), place_B(49), remove(49),
+///          cap_E(49), cap_NE(49), cap_NW(49), cap_W(49), cap_SW(49), cap_SE(49)]
+///
+/// For Place moves, probability is added to both the color/position cell and the
+/// remove-ring cell (marginal distributions). For PlaceOnly and Capture, one cell only.
+pub fn encode_distribution_nn(dist: &[(ZertzMove, f32)]) -> Vec<f32> {
+    const G2: usize = GRID_SIZE * GRID_SIZE;
+    let mut policy = vec![0.0f32; NN_POLICY_SIZE];
+    for &(mv, prob) in dist {
+        match mv {
+            ZertzMove::Place { color, place_at, remove } => {
+                let a = color.index() * G2 + hex_to_grid_cell(place_at);
+                let b = 3 * G2 + hex_to_grid_cell(remove);
+                policy[a] += prob;
+                policy[b] += prob;
+            }
+            ZertzMove::PlaceOnly { color, place_at } => {
+                let a = color.index() * G2 + hex_to_grid_cell(place_at);
+                policy[a] += prob;
+            }
+            ZertzMove::Capture { jumps, .. } => {
+                let from = jumps[0].0;
+                let to = jumps[0].2;
+                let d = capture_direction(from, to);
+                let a = (4 + d) * G2 + hex_to_grid_cell(from);
+                policy[a] += prob;
+            }
+            ZertzMove::Pass => {}
+        }
+    }
+    policy
+}
+
 /// Get legal move mask and indexed moves for the main MCTS (NNGame interface).
 /// Policy layout: [place_W(49), place_G(49), place_B(49), remove(49),
 ///                 cap_dir_E(49), cap_dir_NE(49), ..., cap_dir_SE(49)] = 490 total.

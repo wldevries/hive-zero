@@ -10,7 +10,7 @@ from shared.nn.resblock import ResBlock
 # From Rust board encoding
 NUM_CHANNELS = 6
 GRID_SIZE = 7
-POLICY_SIZE = 4440  # flat training storage: place[4107] + place_only[111] + cap_dir[222]
+POLICY_SIZE = 490  # flat training storage: place_W/G/B/remove[4*49] + cap_dir[6*49]
 RESERVE_SIZE = 22
 
 # Policy head sizes (must match Rust PLACE_HEAD_SIZE, CAP_HEAD_SIZE)

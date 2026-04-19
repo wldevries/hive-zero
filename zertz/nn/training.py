@@ -11,9 +11,7 @@ from tqdm import tqdm
 
 from .model import ZertzNet, create_model, NUM_CHANNELS, GRID_SIZE, POLICY_SIZE, RESERVE_SIZE
 
-_BOARD_SIZE = 37
-_PLACE_ONLY_OFFSET = 3 * _BOARD_SIZE * _BOARD_SIZE  # 4107
-_CAPTURE_OFFSET = _PLACE_ONLY_OFFSET + 3 * _BOARD_SIZE  # 4218
+_BOARD_SIZE = 37  # number of valid hex cells on the Zertz board
 _NUM_DIRS = 6
 _RADIUS = 3
 _GS = GRID_SIZE * GRID_SIZE  # 49
@@ -55,24 +53,6 @@ def _load_hex_perms() -> list:
     return _HEX_PERM_CACHE
 
 
-def _build_hex_to_grid() -> np.ndarray:
-    """Build lookup: hex_index (0..36) → flat grid index (row*7+col) in 7x7 grid."""
-    table = np.zeros(_BOARD_SIZE, dtype=np.int64)
-    idx = 0
-    for r in range(-_RADIUS, _RADIUS + 1):
-        q_min = max(-_RADIUS, -_RADIUS - r)
-        q_max = min(_RADIUS, _RADIUS - r)
-        for q in range(q_min, q_max + 1):
-            row = r + _RADIUS
-            col = q - q_min
-            table[idx] = row * GRID_SIZE + col
-            idx += 1
-    return table
-
-
-_HEX_TO_GRID = _build_hex_to_grid()
-
-
 class ZertzDataset(Dataset):
     """Ring-buffer replay dataset for Zertz self-play positions.
 
@@ -101,6 +81,12 @@ class ZertzDataset(Dataset):
                 if stored_max != max_size:
                     raise ValueError(
                         f"Buffer max_size mismatch: stored {stored_max} vs requested {max_size}"
+                    )
+                stored_policy_size = int(self._h5file["policy_targets"].shape[1]) if "policy_targets" in self._h5file else 4440
+                if stored_policy_size != POLICY_SIZE:
+                    raise ValueError(
+                        f"Replay buffer policy format changed: stored {stored_policy_size} vs current {POLICY_SIZE}. "
+                        f"Delete {h5path} to start fresh with the new format."
                     )
                 self._count = int(self._h5file.attrs["count"])
                 self._size = int(self._h5file.attrs["size"])
@@ -204,27 +190,19 @@ class ZertzDataset(Dataset):
 
         if sym != 0:
             grid_perm = _load_grid_perms()[sym]
-            hex_perm = _load_hex_perms()[sym]
 
-            gc = GRID_SIZE * GRID_SIZE
-            bf = board.reshape(NUM_CHANNELS, gc)
+            # Board: permute each channel's 7×7 grid cells (sentinel 49 → zeros)
+            bf = board.reshape(NUM_CHANNELS, _GS)
             padded = np.concatenate([bf, np.zeros((NUM_CHANNELS, 1), dtype=np.float32)], axis=1)
             board = padded[:, grid_perm].reshape(NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
 
-            place = policy[:_PLACE_ONLY_OFFSET].reshape(3, _BOARD_SIZE, _BOARD_SIZE)
-            place_only = policy[_PLACE_ONLY_OFFSET:_CAPTURE_OFFSET].reshape(3, _BOARD_SIZE)
-            capture = policy[_CAPTURE_OFFSET:].reshape(_NUM_DIRS, _BOARD_SIZE)
-
-            new_place = place[:, hex_perm, :][:, :, hex_perm]
-            new_place_only = place_only[:, hex_perm]
+            # Policy [10, 49]: permute grid cells, then reorder direction channels (4-9)
+            p = policy.reshape(10, _GS)
+            padded_p = np.concatenate([p, np.zeros((10, 1), dtype=np.float32)], axis=1)
+            p_perm = padded_p[:, grid_perm]  # (10, 49)
             dir_perm = _D6_DIR_PERMS[sym]
-            new_capture = capture[dir_perm, :][:, hex_perm]
-
-            policy = np.concatenate([
-                new_place.reshape(-1),
-                new_place_only.reshape(-1),
-                new_capture.reshape(-1),
-            ])
+            cap_perm = p_perm[4:][dir_perm]  # reorder direction channels
+            policy = np.concatenate([p_perm[:4].reshape(-1), cap_perm.reshape(-1)])
 
         return (
             torch.from_numpy(board),
@@ -237,43 +215,20 @@ class ZertzDataset(Dataset):
         )
 
 
-def _marginalize_policy(flat_policy: torch.Tensor, gi: torch.Tensor):
-    """Convert flat policy[B, 4440] to per-head targets on the 7x7 grid.
+def _marginalize_policy(flat_policy: torch.Tensor):
+    """Split flat policy[B, 490] into per-head targets.
+
+    Layout: [place_W(49), place_G(49), place_B(49), remove(49),
+             cap_E(49), cap_NE(49), cap_NW(49), cap_W(49), cap_SW(49), cap_SE(49)]
 
     Returns:
         place_cp: [B, 3*49] color/position targets (channels 0-2)
         place_rm: [B, 49] remove-ring targets (channel 3)
         cap_dir:  [B, 6*49] direction targets (6 channels × 49 grid cells)
     """
-    B = flat_policy.shape[0]
-    device = flat_policy.device
-
-    # Place region [0, 4107): color(3) * 37 * 37, indexed as [color, place_at, remove]
-    place_probs = flat_policy[:, :_PLACE_ONLY_OFFSET].reshape(B, 3, _BOARD_SIZE, _BOARD_SIZE)
-    color_place_hex = place_probs.sum(dim=3)  # [B, 3, 37] marginalize over remove
-    remove_hex = place_probs.sum(dim=(1, 2))  # [B, 37] marginalize over color+place
-
-    # PlaceOnly [4107, 4218): color(3) * 37
-    place_only = flat_policy[:, _PLACE_ONLY_OFFSET:_CAPTURE_OFFSET].reshape(B, 3, _BOARD_SIZE)
-    color_place_hex = color_place_hex + place_only
-
-    # Scatter hex→grid for place heads
-    gi_exp = gi.unsqueeze(0).expand(B, -1)  # [B, 37]
-    place_cp = torch.zeros(B, 3, _GS, device=device)
-    for c in range(3):
-        place_cp[:, c].scatter_add_(1, gi_exp, color_place_hex[:, c])
-    place_cp = place_cp.reshape(B, 3 * _GS)
-
-    place_rm = torch.zeros(B, _GS, device=device)
-    place_rm.scatter_add_(1, gi_exp, remove_hex)
-
-    # Capture region [4218, 4440): direction(6) * 37 + from(37)
-    cap_probs = flat_policy[:, _CAPTURE_OFFSET:].reshape(B, _NUM_DIRS, _BOARD_SIZE)  # [B, 6, 37]
-    cap_dir = torch.zeros(B, _NUM_DIRS, _GS, device=device)
-    for d in range(_NUM_DIRS):
-        cap_dir[:, d].scatter_add_(1, gi_exp, cap_probs[:, d])
-    cap_dir = cap_dir.reshape(B, _NUM_DIRS * _GS)  # [B, 294]
-
+    place_cp = flat_policy[:, :3 * _GS]           # [B, 147]
+    place_rm = flat_policy[:, 3 * _GS:4 * _GS]    # [B, 49]
+    cap_dir  = flat_policy[:, 4 * _GS:]            # [B, 294]
     return place_cp, place_rm, cap_dir
 
 
@@ -300,7 +255,6 @@ class Trainer:
             self.model.parameters(), lr=lr,
             momentum=0.9, weight_decay=weight_decay,
         )
-        self._hex_to_grid = torch.from_numpy(_HEX_TO_GRID).to(self.device)
 
     @property
     def _current_lr(self) -> float:
@@ -324,7 +278,6 @@ class Trainer:
         capture_policy_batches = 0
         num_batches = 0
 
-        gi = self._hex_to_grid
         device_type = self.device.type
         for board, reserve, policy_target, value_target, vo_mask, cap_mask, mid_cap_mask in tqdm(
                 loader, desc="  Training", leave=False, unit="batch"):
@@ -340,7 +293,7 @@ class Trainer:
                 place_logits, cap_dir_logits, value = self.model(board, reserve)
 
             # Convert flat policy to per-head targets
-            place_cp_t, place_rm_t, cap_dir_t = _marginalize_policy(policy_target, gi)
+            place_cp_t, place_rm_t, cap_dir_t = _marginalize_policy(policy_target)
 
             # --- Policy loss ---
             policy_mask = (~vo_mask).float()

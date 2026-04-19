@@ -8,8 +8,6 @@ from zertz.nn.training import (
     _load_hex_perms,
     ZertzDataset,
     _BOARD_SIZE,
-    _PLACE_ONLY_OFFSET,
-    _CAPTURE_OFFSET,
 )
 from zertz.nn.model import NUM_CHANNELS, GRID_SIZE, POLICY_SIZE, RESERVE_SIZE
 
@@ -185,19 +183,25 @@ class TestHexPermutations:
 # ---------------------------------------------------------------------------
 
 def _make_dataset() -> ZertzDataset:
-    """Create a dataset with one position: white marble at hex (1,0), policy on Place move."""
+    """Create a dataset with one position: white marble at hex (1,0), policy on Place move.
+
+    490-format layout: [place_W(49), place_G(49), place_B(49), remove(49), cap_dirs(6*49)]
+    Place(color=W, place_at=(1,0), remove=(2,-1)):
+      - place_cp white: policy[0*49 + grid(1,0)] = policy[0*49 + 25] = policy[25]
+      - place_rm:       policy[3*49 + grid(2,-1)] = policy[3*49 + 18] = policy[165]
+    """
     ds = ZertzDataset(max_size=10)
 
     board = np.zeros((NUM_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
     # White marble at hex (1,0): grid row=3, col=4
     board[0, 3, 4] = 1.0
 
+    GS = GRID_SIZE * GRID_SIZE  # 49
     policy = np.zeros(POLICY_SIZE, dtype=np.float32)
-    # Place white (color=0) at hex (1,0) idx=19, remove hex (2,-1) idx=13 → flat index 716
-    place_at_idx = _hex_to_index(1, 0)   # 19
-    remove_idx = _hex_to_index(2, -1)    # 13
-    policy_idx = 0 * _BOARD_SIZE * _BOARD_SIZE + place_at_idx * _BOARD_SIZE + remove_idx
-    policy[policy_idx] = 0.8
+    place_at_grid = _hex_to_grid_flat(1, 0)   # row=3,col=4 → 25
+    remove_grid   = _hex_to_grid_flat(2, -1)  # row=2,col=4 → 18
+    policy[0 * GS + place_at_grid] = 0.8   # place_cp: white at (1,0)
+    policy[3 * GS + remove_grid]   = 0.8   # place_rm: remove (2,-1)
 
     reserve = np.ones(RESERVE_SIZE, dtype=np.float32)
     ds.add_batch(
@@ -265,22 +269,28 @@ class TestDatasetAugmentation:
         assert result[0, 3, 2] == pytest.approx(1.0)  # new position occupied
 
     def test_augment_r3_policy(self):
-        """R3 (180°): Place white at (1,0) remove (2,-1) → place at (-1,0) remove (-2,1)."""
+        """R3 (180°): Place white at (1,0) remove (2,-1) → place at (-1,0) remove (-2,1).
+
+        490-format: check that place_cp and place_rm cells move correctly under R3.
+        """
         ds = _make_dataset()
+        GS = GRID_SIZE * GRID_SIZE  # 49
+        grid_perm = _GRID_PERMS[3]
+
         policy = ds.policy_targets[0]
-        hex_perm = _HEX_PERMS[3]
+        p = policy.reshape(10, GS)
+        padded = np.concatenate([p, np.zeros((10, 1), dtype=np.float32)], axis=1)
+        p_new = padded[:, grid_perm]  # (10, 49)
 
-        place = policy[:_PLACE_ONLY_OFFSET].reshape(3, _BOARD_SIZE, _BOARD_SIZE)
-        new_place = place[:, hex_perm, :][:, :, hex_perm]
-        new_policy_place = new_place.reshape(-1)
+        # R3: hex(1,0) → hex(-1,0), hex(2,-1) → hex(-2,1)
+        old_place_grid = _hex_to_grid_flat(1, 0)    # 25
+        new_place_grid = _hex_to_grid_flat(-1, 0)   # 23
+        old_remove_grid = _hex_to_grid_flat(2, -1)  # 18
+        new_remove_grid = _hex_to_grid_flat(-2, 1)  # 29
 
-        old_pi = _hex_to_index(1, 0)    # 19
-        old_ri = _hex_to_index(2, -1)   # 13
-        new_pi = _hex_to_index(-1, 0)   # 17
-        new_ri = _hex_to_index(-2, 1)   # 23
-
-        old_idx = 0 * _BOARD_SIZE * _BOARD_SIZE + old_pi * _BOARD_SIZE + old_ri
-        new_idx = 0 * _BOARD_SIZE * _BOARD_SIZE + new_pi * _BOARD_SIZE + new_ri
-
-        assert new_policy_place[new_idx] == pytest.approx(0.8)
-        assert new_policy_place[old_idx] == pytest.approx(0.0)
+        # place_cp (channel 0 = white): value 0.8 should move from old to new grid cell
+        assert p_new[0, new_place_grid]  == pytest.approx(0.8)
+        assert p_new[0, old_place_grid]  == pytest.approx(0.0)
+        # place_rm (channel 3): value 0.8 should move from old to new grid cell
+        assert p_new[3, new_remove_grid] == pytest.approx(0.8)
+        assert p_new[3, old_remove_grid] == pytest.approx(0.0)

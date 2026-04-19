@@ -4,7 +4,7 @@ use rand::distr::Distribution;
 
 use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
 use crate::zertz::{ZertzBoard, ZertzMove, classify_win, WinType};
-use crate::move_encoding::{encode_move, POLICY_SIZE, NN_POLICY_SIZE};
+use crate::move_encoding::{encode_distribution_nn, NN_POLICY_SIZE};
 use core_game::game::{Game, Outcome, Player};
 use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::{MctsSearch, CpuctStrategy};
@@ -465,10 +465,7 @@ pub fn play_selfplay_core(
         // Select and apply moves
         for (i, &gi) in mcts_games.iter().enumerate() {
             let dist = searches[gi].get_pruned_visit_distribution();
-            let mut policy_vec = vec![0.0f32; POLICY_SIZE];
-            for (mv, prob) in &dist {
-                policy_vec[encode_move(mv)] = *prob;
-            }
+            let policy_vec = encode_distribution_nn(&dist);
 
             let is_capture_turn = dist.first().map_or(false, |(mv, _)| matches!(mv, ZertzMove::Capture { .. }));
             let is_mid_capture_turn = boards[gi].is_mid_capture();
@@ -530,7 +527,7 @@ pub fn play_selfplay_core(
     let total_samples: usize = histories.iter().map(|h| h.len()).sum();
     let mut board_data = Vec::with_capacity(total_samples * BOARD_FLAT);
     let mut reserve_data = Vec::with_capacity(total_samples * RESERVE_SIZE);
-    let mut policy_data = Vec::with_capacity(total_samples * POLICY_SIZE);
+    let mut policy_data = Vec::with_capacity(total_samples * NN_POLICY_SIZE);
     let mut value_targets = Vec::with_capacity(total_samples);
     let mut value_only_flags = Vec::with_capacity(total_samples);
     let mut capture_turn_flags = Vec::with_capacity(total_samples);

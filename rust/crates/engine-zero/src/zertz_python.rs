@@ -6,7 +6,7 @@ use numpy::{PyArray1, PyArray2, PyArrayMethods};
 use std::sync::{Arc, Mutex};
 
 use zertz_game::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
-use zertz_game::move_encoding::{POLICY_SIZE, NN_POLICY_SIZE, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
+use zertz_game::move_encoding::{NN_POLICY_SIZE, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
 use zertz_game::notation::{move_to_str, str_to_move};
 use zertz_game::zertz::ZertzBoard;
 use core_game::game::{Game, Outcome, Player};
@@ -127,7 +127,7 @@ impl PyZertzSelfPlayResult {
             (n, RESERVE_SIZE), self.reserve_data.clone(),
         ).unwrap();
         let policies = numpy::ndarray::Array2::from_shape_vec(
-            (n, POLICY_SIZE), self.policy_data.clone(),
+            (n, NN_POLICY_SIZE), self.policy_data.clone(),
         ).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
         (
@@ -519,7 +519,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyZertzSelfPlayResult>()?;
     m.add_class::<PyZertzBattleResult>()?;
     m.add_class::<PyZertzGame>()?;
-    m.add("ZERTZ_POLICY_SIZE", POLICY_SIZE)?;
+    m.add("ZERTZ_POLICY_SIZE", NN_POLICY_SIZE)?;
     m.add("ZERTZ_NUM_CHANNELS", NUM_CHANNELS)?;
     m.add("ZERTZ_GRID_SIZE", GRID_SIZE)?;
     m.add("ZERTZ_RESERVE_SIZE", RESERVE_SIZE)?;
