@@ -11,7 +11,8 @@ def main():
 
     # Self-play training
     train_parser = subparsers.add_parser("train", help="Run self-play training")
-    train_parser.add_argument("--model", type=str, default="zertz.pt")
+    train_parser.add_argument("--name", type=str, default="zertz",
+                              help="Model name; all paths derived as models/{name}/")
     train_parser.add_argument("--device", type=str, default="cuda")
     train_parser.add_argument("--generations", type=int, default=None)
     train_parser.add_argument(
@@ -31,7 +32,6 @@ def main():
     train_parser.add_argument("--max-moves", type=int, default=40)
     train_parser.add_argument("--replay-window", type=int, default=8)
     train_parser.add_argument("--checkpoint-every", type=int, default=10)
-    train_parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/zertz")
     train_parser.add_argument("--playout-cap-p", type=float, default=0.0)
     train_parser.add_argument("--fast-cap", type=int, default=20)
     train_parser.add_argument("--temperature", type=float, default=1.0,
@@ -58,6 +58,8 @@ def main():
                               help="Use Rust-native ORT inference instead of Python eval (requires .onnx model)")
     train_parser.add_argument("--value-loss-scale", type=float, default=1.0,
                               help="Scale factor for value loss in combined loss (default: 1.0)")
+    train_parser.add_argument("--buf-dir", type=str, default=None,
+                              help="Override replay buffer directory (default: models/{name}/)")
 
     # Play mode
     play_parser = subparsers.add_parser("play", help="Play against the AI")
@@ -94,13 +96,12 @@ def main():
             lr_scheduler = lr_scheduler_from_string(args.lr_schedule)
 
         trainer = SelfPlayTrainer(
-            model_path=args.model,
+            name=args.name,
             device=args.device,
             num_blocks=args.blocks,
             channels=args.channels,
             lr=args.lr,
             lr_scheduler=lr_scheduler,
-            checkpoint_dir=args.checkpoint_dir,
         )
         trainer.run(
             num_generations=args.generations,
@@ -124,6 +125,7 @@ def main():
             augment_symmetry=args.augment_symmetry,
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
+            buf_dir=args.buf_dir,
         )
     elif args.command == "battle":
         from zertz.selfplay.battle import run_battle

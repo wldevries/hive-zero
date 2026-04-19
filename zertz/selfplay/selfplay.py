@@ -49,35 +49,39 @@ class SelfPlayTrainer:
 
     def __init__(
         self,
-        model_path: str = "zertz.pt",
+        name: str = "zertz",
         device: str = "cuda",
         num_blocks: int = 6,
         channels: int = 64,
         lr: float = 0.02,
         lr_scheduler: Optional[LRScheduler] = None,
-        checkpoint_dir: str = "checkpoints/zertz",
     ):
-        self.model_path = model_path
-        self.model_name = os.path.splitext(os.path.basename(model_path))[0]
-        self.checkpoint_dir = checkpoint_dir
+        self.name = name
+        self.model_dir = os.path.join("models", name)
+        self.model_path = os.path.join(self.model_dir, f"{name}.pt")
+        self.onnx_path = os.path.join(self.model_dir, f"{name}.onnx")
+        self.log_path = os.path.join(self.model_dir, f"{name}_log.csv")
+        self.checkpoint_dir = os.path.join(self.model_dir, "checkpoints")
         self.device = device
         self.start_generation = 0
 
-        if os.path.exists(model_path):
-            self.model, ckpt = load_checkpoint(model_path)
+        if os.path.exists(self.model_path):
+            self.model, ckpt = load_checkpoint(self.model_path)
             self.start_generation = ckpt.get("generation", 0)
             blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"Resumed from {model_path} (gen {self.start_generation}, "
+                f"Resumed from {self.model_path} (gen {self.start_generation}, "
                 f"{blocks} blocks, {ch} channels, {params / 1e6:.2f}M params)"
             )
         else:
+            os.makedirs(self.model_dir, exist_ok=True)
             self.model = create_model(num_blocks=num_blocks, channels=channels)
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"New model: {num_blocks} blocks, {channels} channels, {params / 1e6:.2f}M params"
+                f"New model '{name}': {num_blocks} blocks, {channels} channels, "
+                f"{params / 1e6:.2f}M params"
             )
 
         self.model.to(device)
@@ -127,16 +131,17 @@ class SelfPlayTrainer:
         augment_symmetry: bool = False,
         use_ort: bool = False,
         value_loss_scale: float = 1.0,
+        buf_dir: Optional[str] = None,
     ):
         from engine_zero import ZertzSelfPlaySession
 
-        log_path = self.model_name + "_log.csv"
-        if not os.path.exists(log_path):
-            with open(log_path, "w") as f:
+        if not os.path.exists(self.log_path):
+            with open(self.log_path, "w") as f:
                 f.write(LOG_HEADER)
 
+        resolved_buf_dir = buf_dir if buf_dir is not None else self.model_dir
         max_buffer = games_per_gen * max_moves * replay_window
-        dataset = ZertzDataset(max_size=max_buffer)
+        dataset = ZertzDataset(max_size=max_buffer, buf_dir=resolved_buf_dir)
         dataset.augment_symmetry = augment_symmetry
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
@@ -188,12 +193,12 @@ class SelfPlayTrainer:
                 else ""
             )
             print(
-                f"\n=== {_cc(self.model_name)}  Gen {generation}  [sims={simulations}{cap_str}] ==="
+                f"\n=== {_cc(self.name)}  Gen {generation}  [sims={simulations}{cap_str}] ==="
             )
 
             onnx_path = None
             if use_ort:
-                onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
+                onnx_path = self.onnx_path
                 if not os.path.exists(onnx_path):
                     print(f"  ORT requested but {onnx_path} not found, exporting...")
                     export_onnx(self.model, onnx_path)
@@ -328,7 +333,7 @@ class SelfPlayTrainer:
                 duration = time.time() - gen_start
 
                 # --- Log each epoch ---
-                with open(log_path, "a") as f:
+                with open(self.log_path, "a") as f:
                     f.write(
                         f"{generation},{epoch + 1},"
                         f"{simulations},{games_per_gen},{result.num_samples},{len(dataset)},"
@@ -348,14 +353,13 @@ class SelfPlayTrainer:
             # --- Save model ---
             metadata = {**train_params, "lr": lr}
             save_checkpoint(self.model, self.model_path, generation=generation, metadata=metadata)
-            onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
-            export_onnx(self.model, onnx_path)
+            export_onnx(self.model, self.onnx_path)
             print(f"  Model saved: {self.model_path} (gen {generation})")
 
             # --- Checkpoint ---
             if generation % checkpoint_every == 0:
                 ckpt_path = os.path.join(
-                    self.checkpoint_dir, f"{self.model_name}_gen{generation:05d}.pt"
+                    self.checkpoint_dir, f"{self.name}_gen{generation:05d}.pt"
                 )
                 save_checkpoint(self.model, ckpt_path, generation=generation, metadata=metadata)
                 print(f"  Checkpoint saved to {ckpt_path}")

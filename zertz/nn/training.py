@@ -1,6 +1,7 @@
 """Training loop for ZertzNet with factorized conv1x1 policy heads."""
 
 from __future__ import annotations
+import os
 import torch
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
@@ -73,20 +74,71 @@ _HEX_TO_GRID = _build_hex_to_grid()
 
 
 class ZertzDataset(Dataset):
-    """Ring-buffer replay dataset for Zertz self-play positions."""
+    """Ring-buffer replay dataset for Zertz self-play positions.
 
-    def __init__(self, max_size: int = 50_000):
+    When `buf_dir` is given, all arrays are stored in a single HDF5 file
+    (`replay.h5`) so the buffer survives process restarts. `_count`/`_size`
+    live as HDF5 attributes in the same file — no separate metadata file.
+    """
+
+    def __init__(self, max_size: int = 50_000, buf_dir: str | None = None):
         self.max_size = max_size
-        self._count = 0
-        self._size = 0
-        self.board_tensors = np.zeros((max_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
-        self.reserve_vectors = np.zeros((max_size, RESERVE_SIZE), dtype=np.float32)
-        self.policy_targets = np.zeros((max_size, POLICY_SIZE), dtype=np.float32)
-        self.value_targets = np.zeros(max_size, dtype=np.float32)
-        self.value_only = np.zeros(max_size, dtype=np.bool_)
-        self.capture_turn = np.zeros(max_size, dtype=np.bool_)
-        self.mid_capture_turn = np.zeros(max_size, dtype=np.bool_)
+        self._h5file = None
         self.augment_symmetry = False
+
+        def _zeros(shape, dtype):
+            return np.zeros(shape, dtype=dtype)
+
+        if buf_dir is not None:
+            import h5py
+            os.makedirs(buf_dir, exist_ok=True)
+            h5path = os.path.join(buf_dir, "replay.h5")
+            resuming = os.path.exists(h5path)
+            self._h5file = h5py.File(h5path, "r+" if resuming else "w")
+
+            if resuming:
+                stored_max = int(self._h5file.attrs["max_size"])
+                if stored_max != max_size:
+                    raise ValueError(
+                        f"Buffer max_size mismatch: stored {stored_max} vs requested {max_size}"
+                    )
+                self._count = int(self._h5file.attrs["count"])
+                self._size = int(self._h5file.attrs["size"])
+                print(f"  Replay buffer resumed: {self._size} samples from {h5path}")
+            else:
+                self._count = 0
+                self._size = 0
+                self._h5file.attrs["max_size"] = max_size
+                self._h5file.attrs["count"] = 0
+                self._h5file.attrs["size"] = 0
+
+            def _ds(name, shape, dtype):
+                if name in self._h5file:
+                    return self._h5file[name]
+                return self._h5file.create_dataset(name, shape=shape, dtype=dtype, track_order=False)
+        else:
+            self._count = 0
+            self._size = 0
+            _ds = lambda name, shape, dtype: _zeros(shape, dtype)
+
+        self.board_tensors    = _ds("board_tensors",    (max_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE), np.float32)
+        self.reserve_vectors  = _ds("reserve_vectors",  (max_size, RESERVE_SIZE),                       np.float32)
+        self.policy_targets   = _ds("policy_targets",   (max_size, POLICY_SIZE),                        np.float32)
+        self.value_targets    = _ds("value_targets",    (max_size,),                                    np.float32)
+        self.value_only       = _ds("value_only",       (max_size,),                                    np.bool_)
+        self.capture_turn     = _ds("capture_turn",     (max_size,),                                    np.bool_)
+        self.mid_capture_turn = _ds("mid_capture_turn", (max_size,),                                    np.bool_)
+
+        if self._h5file is not None:
+            self._h5file.flush()
+
+    def close(self):
+        if self._h5file is not None:
+            self._h5file.close()
+            self._h5file = None
+
+    def __del__(self):
+        self.close()
 
     def add_batch(self, board_tensors: np.ndarray, reserve_vectors: np.ndarray,
                   policy_targets: np.ndarray, value_targets: np.ndarray,
@@ -94,22 +146,47 @@ class ZertzDataset(Dataset):
                   capture_turn: list[bool] | None = None,
                   mid_capture_turn: list[bool] | None = None):
         n = board_tensors.shape[0]
-        boards = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
-        for i in range(n):
-            idx = self._count % self.max_size
-            self.board_tensors[idx] = boards[i]
-            self.reserve_vectors[idx] = reserve_vectors[i]
-            self.policy_targets[idx] = policy_targets[i]
-            self.value_targets[idx] = value_targets[i]
-            self.value_only[idx] = value_only[i]
-            self.capture_turn[idx] = capture_turn[i] if capture_turn is not None else False
-            self.mid_capture_turn[idx] = mid_capture_turn[i] if mid_capture_turn is not None else False
-            self._count += 1
-            self._size = min(self._size + 1, self.max_size)
+        boards   = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
+        vo_arr   = np.asarray(value_only, dtype=np.bool_)
+        ct_arr   = np.asarray(capture_turn, dtype=np.bool_) if capture_turn is not None else np.zeros(n, dtype=np.bool_)
+        mct_arr  = np.asarray(mid_capture_turn, dtype=np.bool_) if mid_capture_turn is not None else np.zeros(n, dtype=np.bool_)
+
+        pairs = [
+            (self.board_tensors,    boards),
+            (self.reserve_vectors,  reserve_vectors),
+            (self.policy_targets,   policy_targets),
+            (self.value_targets,    value_targets),
+            (self.value_only,       vo_arr),
+            (self.capture_turn,     ct_arr),
+            (self.mid_capture_turn, mct_arr),
+        ]
+
+        start = self._count % self.max_size
+        end   = start + n
+        if end <= self.max_size:
+            for arr, data in pairs:
+                arr[start:end] = data
+        else:
+            first = self.max_size - start
+            for arr, data in pairs:
+                arr[start:]     = data[:first]
+                arr[:n - first] = data[first:]
+
+        self._count += n
+        self._size = min(self._size + n, self.max_size)
+
+        if self._h5file is not None:
+            self._h5file.attrs["count"] = self._count
+            self._h5file.attrs["size"]  = self._size
+            self._h5file.flush()
 
     def clear(self):
         self._count = 0
         self._size = 0
+        if self._h5file is not None:
+            self._h5file.attrs["count"] = 0
+            self._h5file.attrs["size"]  = 0
+            self._h5file.flush()
 
     def __len__(self):
         return self._size * 12 if self.augment_symmetry else self._size
