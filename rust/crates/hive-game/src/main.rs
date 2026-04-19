@@ -1,7 +1,7 @@
 mod replay;
 
 use clap::{Parser, Subcommand};
-use core_game::hex::{Hex, hex_neighbors};
+use core_game::hex::hex_neighbors;
 use hive_game::sgf;
 use hive_game::game::Game;
 use hive_game::piece::{PieceColor, PieceType, player_pieces};

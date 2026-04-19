@@ -9,7 +9,7 @@ use zertz_game::mcts;
 // ---------------------------------------------------------------------------
 
 fn run_mcts_demo(simulations: u32) {
-    use mcts::search::{PolicyHeads, POLICY_HEADS_TOTAL, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
+    use mcts::search::{PolicyHeads, POLICY_HEADS_TOTAL, PLACE_HEAD_SIZE};
     use zertz_game::zertz::ZertzBoard;
 
     let board = ZertzBoard::default();
