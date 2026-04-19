@@ -129,6 +129,22 @@ PyTorch CUDA is installed directly via:
 uv pip install torch==2.10.0+cu128 --index-url https://download.pytorch.org/whl/cu128
 ```
 
+## ONNX Runtime (`--use-ort`)
+The Rust `ort` crate loads `onnxruntime.dll` from `.venv/Lib/site-packages/onnxruntime/capi/`.
+The plain `onnxruntime` (CPU) and `onnxruntime-gpu` packages share that directory and overwrite
+each other, so only one may be installed. They are exposed as optional extras:
+
+```bash
+uv sync --extra ort-gpu   # CUDA build (Windows/Linux x64)
+uv sync --extra ort-cpu   # CPU fallback
+uv sync --extra ort-qnn   # QNN/NPU on ARM64
+```
+
+Always invoke `uv run --extra ort-gpu ...` when using `--use-ort`, otherwise `uv sync` will
+remove `onnxruntime-gpu` from the venv. Verify with
+`uv run --no-sync python -c "import onnxruntime as ort; print(ort.get_available_providers())"` —
+a correct install lists `CUDAExecutionProvider`.
+
 ## Dependencies
 - Python 3.12+
 - PyTorch (CUDA 12.8)

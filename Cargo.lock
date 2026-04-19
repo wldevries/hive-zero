@@ -1690,6 +1690,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "core-game",
+ "rand",
+ "rand_distr",
  "zip",
 ]
 

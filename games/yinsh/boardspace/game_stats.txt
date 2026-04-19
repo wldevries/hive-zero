@@ -1,0 +1,53 @@
+Boardspace Yinsh Game Statistics
+================================
+
+Games: 31402 total, 31387 replayed OK, 1 skipped, 14 errors
+
+Results (metadata):
+  P0 wins: 3577 (42.4%)
+  P1 wins: 4812 (57.0%)
+  Draws:   47 (0.6%)
+  Unknown: 22966
+
+First/Second Player Advantage (engine-verified):
+  First player wins:  11869 (43.2%)
+  Second player wins: 15595 (56.8%)
+
+Score Breakdown (engine-verified):
+  3-0:  7653 (27.9%)
+  3-1:  10408 (37.9%)
+  3-2:  9403 (34.2%)
+  Draw: 136
+
+Game Length (all turns):
+  Min: 0, Max: 91, Mean: 56.8, Median: 60.0
+  P10: 36, P25: 52, P75: 68, P90: 74
+
+Normal-Phase Turns per Game:
+  Min: 0, Max: 71, Mean: 40.0, Median: 42.0
+  P10: 23, P25: 35, P75: 48, P90: 55
+
+Valid Moves per Turn (Normal Phase):
+  Min: 1, Max: 120, Mean: 44.2, Median: 40.0
+  P10: 22, P25: 30, P75: 56, P90: 72
+
+Markers Used per Game:
+  Min: 0, Max: 51, Mean: 21.8, Median: 22.0
+  P10: 12, P25: 17, P75: 27, P90: 32
+
+First Ring Placement (top 15):
+  F6: 3209 (10.2%)
+  F5: 897 (2.9%)
+  E5: 887 (2.8%)
+  F2: 861 (2.7%)
+  E6: 829 (2.6%)
+  G7: 763 (2.4%)
+  G6: 743 (2.4%)
+  F7: 739 (2.4%)
+  E4: 686 (2.2%)
+  D5: 683 (2.2%)
+  D3: 648 (2.1%)
+  G5: 637 (2.0%)
+  E7: 635 (2.0%)
+  D7: 627 (2.0%)
+  D4: 626 (2.0%)

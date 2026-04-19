@@ -9,13 +9,14 @@ dependencies = [
     "colorama>=0.4.6",
     "mplcursors>=0.7.1",
     "onnxscript>=0.6.2",
-    "onnxruntime>=1.24.4",
     "tqdm",
     # torch must be installed manually — no ARM64 Windows wheels on PyPI.
     # See CLAUDE.md for install instructions.
+    "h5py>=3.16.0",
 ]
 
 [project.optional-dependencies]
+ort-cpu = ["onnxruntime>=1.24.4"]
 ort-gpu = ["onnxruntime-gpu>=1.24.4"]
 ort-qnn = ["onnxruntime-qnn"]
 
@@ -23,6 +24,7 @@ ort-qnn = ["onnxruntime-qnn"]
 hive = "hive.cli:main"
 zertz = "zertz.cli:main"
 tictactoe = "tictactoe.cli:main"
+yinsh = "yinsh.cli:main"
 
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
@@ -31,7 +33,7 @@ build-backend = "maturin"
 [tool.maturin]
 manifest-path = "rust/crates/engine-zero/Cargo.toml"
 module-name = "engine_zero"
-python-packages = ["hive", "zertz", "tictactoe", "shared"]
+python-packages = ["hive", "zertz", "tictactoe", "yinsh", "shared"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "rust/**/*.toml" }, { file = "rust/**/*.rs" }]
