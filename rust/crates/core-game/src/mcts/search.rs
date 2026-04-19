@@ -520,6 +520,10 @@ impl<G: GameEngine> MctsSearch<G> {
     /// Call `apply_root_dirichlet` afterwards to apply fresh noise to the new
     /// root's children before searching.
     ///
+    /// Orphaned siblings and their subtrees are freed into the arena free list so
+    /// their node slots are reused by subsequent searches. This keeps arena memory
+    /// proportional to the current live tree rather than the full game history.
+    ///
     /// Returns `true` on success, `false` if `mv` was not among the root's children
     /// (caller should fall back to a fresh `init`).
     pub fn reroot(&mut self, mv: G::Move) -> bool
@@ -528,20 +532,34 @@ impl<G: GameEngine> MctsSearch<G> {
     {
         self.stashed_leaves.clear();
 
-        let mut current = self.arena.get(self.root).first_child;
+        let old_root_id = self.root;
+        let mut new_root_id = None;
+
+        // Walk root children: free every branch except the chosen one.
+        let mut current = self.arena.get(old_root_id).first_child;
         while let Some(cid) = current {
+            // Capture next before potentially freeing cid's subtree.
             let next = self.arena.get(cid).next_sibling;
             if self.arena.get(cid).move_from_parent == mv {
-                let node = self.arena.get_mut(cid);
-                node.parent = None;
-                node.dirichlet_noise = 0.0; // root's prior is never read by UCB
-                self.root = cid;
-                self.root_game.as_mut().unwrap().play_move(&mv).ok();
-                return true;
+                new_root_id = Some(cid);
+            } else {
+                self.arena.free_subtree(cid);
             }
             current = next;
         }
-        false
+
+        if let Some(new_root) = new_root_id {
+            let node = self.arena.get_mut(new_root);
+            node.parent = None;
+            node.dirichlet_noise = 0.0; // root's prior is never read by UCB
+            self.root = new_root;
+            self.root_game.as_mut().unwrap().play_move(&mv).ok();
+            // Free the old root node (no longer reachable).
+            self.arena.free_node(old_root_id);
+            true
+        } else {
+            false
+        }
     }
 
     /// Get the best move by visit count.

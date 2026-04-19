@@ -55,6 +55,26 @@ impl<M: Copy> NodeArena<M> {
         self.free_list.clear();
     }
 
+    /// Recursively free a subtree rooted at `root_id` into the free list.
+    /// All descendants (including `root_id`) become available for reuse.
+    pub fn free_subtree(&mut self, root_id: NodeId) {
+        let mut stack = vec![root_id];
+        while let Some(id) = stack.pop() {
+            let node = &self.nodes[id as usize];
+            let mut child = node.first_child;
+            while let Some(cid) = child {
+                stack.push(cid);
+                child = self.nodes[cid as usize].next_sibling;
+            }
+            self.free_list.push(id);
+        }
+    }
+
+    /// Free a single node (no children) into the free list.
+    pub fn free_node(&mut self, id: NodeId) {
+        self.free_list.push(id);
+    }
+
     /// Number of active nodes.
     pub fn len(&self) -> usize {
         self.nodes.len() - 1 // exclude null node

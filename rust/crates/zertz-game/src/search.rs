@@ -109,9 +109,7 @@ pub fn play_battle_core(
     let half = num_games / 2;
 
     let mut boards: Vec<ZertzBoard> = (0..num_games).map(|_| ZertzBoard::default()).collect();
-    // Warm MCTS: trees are rerooted after each move and reused. Capacity sized for
-    // ~80 MCTS searches per game (60 plies + capture sub-moves) × sims per search.
-    let arena_capacity = simulations.saturating_mul(80);
+    let arena_capacity = simulations + 64;
     let mut searches: Vec<MctsSearch<ZertzBoard>> = (0..num_games).map(|_| {
         let mut s = MctsSearch::new(arena_capacity);
         s.params.cpuct_strategy = CpuctStrategy::Constant { c_puct };
@@ -320,9 +318,7 @@ pub fn play_selfplay_core(
     let use_playout_cap = playout_cap_p > 0.0;
 
     let mut boards: Vec<ZertzBoard> = (0..num_games).map(|_| ZertzBoard::default()).collect();
-    // Warm MCTS: trees are rerooted after each move and reused. Capacity sized for
-    // ~80 MCTS searches per game (60 plies + capture sub-moves) × sims per search.
-    let arena_capacity = simulations.saturating_mul(80);
+    let arena_capacity = simulations + 64;
     let mut searches: Vec<MctsSearch<ZertzBoard>> = (0..num_games).map(|_| {
         let mut s = MctsSearch::new(arena_capacity);
         s.params.cpuct_strategy = CpuctStrategy::Constant { c_puct };
