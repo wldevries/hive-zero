@@ -32,22 +32,23 @@ pub struct SearchParams {
     pub cpuct_strategy: CpuctStrategy,
     pub forced_exploration: ForcedExploration,
     pub root_noise: RootNoise,
+    /// Cap children per node expansion to this many (top by policy score).
+    /// Defaults to usize::MAX (no cap). Set to the simulation count to avoid
+    /// allocating children that can never be visited.
+    pub max_children: usize,
 }
 
 impl SearchParams {
     pub fn new(cpuct_strategy: CpuctStrategy, forced_exploration: ForcedExploration, root_noise: RootNoise) -> Self {
-        Self {
-            cpuct_strategy,
-            forced_exploration,
-            root_noise,
-        }
+        Self { cpuct_strategy, forced_exploration, root_noise, max_children: usize::MAX }
     }
 
     pub fn inference(cpuct_strategy: CpuctStrategy) -> Self {
         Self {
             cpuct_strategy,
             forced_exploration: ForcedExploration::None,
-            root_noise: RootNoise::None
+            root_noise: RootNoise::None,
+            max_children: usize::MAX,
         }
     }
 }
@@ -57,7 +58,8 @@ impl Default for SearchParams {
         Self {
             cpuct_strategy: CpuctStrategy::Constant { c_puct: DEFAULT_C_PUCT },
             forced_exploration: ForcedExploration::None,
-            root_noise: RootNoise::None
+            root_noise: RootNoise::None,
+            max_children: usize::MAX,
         }
     }
 }
@@ -285,11 +287,13 @@ pub fn terminal_value(outcome: Outcome, perspective: Player) -> f32 {
 
 /// Expand a node with a policy vector, adding children to the arena.
 /// `game` is the reconstructed game state at this node (not stored in the node).
+/// `max_children` caps how many children are created (top by softmaxed policy score).
 fn expand_with_policy<G: GameEngine>(
     arena: &mut NodeArena<G::Move>,
     node_id: NodeId,
     game: &mut G,
     policy: &[f32],
+    max_children: usize,
 ) {
     arena.get_mut(node_id).is_expanded = true;
     let child_turn = game.next_player().opposite();
@@ -330,12 +334,34 @@ fn expand_with_policy<G: GameEngine>(
         }
     }
 
+    // Collect (score, move_index) pairs, optionally keeping only top-K by score.
+    let n = indexed_moves.len();
+    let keep = n.min(max_children);
+    let mut order: Vec<usize> = (0..n).collect();
+    if keep < n {
+        // Partial sort: move the top-`keep` indices to the front (order within them is arbitrary).
+        order.select_nth_unstable_by(keep - 1, |&a, &b| {
+            scores[b].partial_cmp(&scores[a]).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        order.truncate(keep);
+    }
+
+    // Re-softmax over the kept subset so priors sum to 1.
+    if keep < n {
+        let kept_total: f32 = order.iter().map(|&i| scores[i]).sum();
+        if kept_total > 0.0 {
+            for &i in &order {
+                scores[i] /= kept_total;
+            }
+        }
+    }
+
     let mut first_child_id: Option<NodeId> = None;
     let mut prev_child_id: Option<NodeId> = None;
-    let child_count = indexed_moves.len() as u16;
 
-    for (i, &(_, mv)) in indexed_moves.iter().enumerate() {
-        let child_id = arena.alloc(Some(node_id), mv, scores[i], child_turn); // scores[i] is policy_prior
+    for &i in &order {
+        let (_, mv) = indexed_moves[i];
+        let child_id = arena.alloc(Some(node_id), mv, scores[i], child_turn);
 
         if first_child_id.is_none() {
             first_child_id = Some(child_id);
@@ -347,7 +373,7 @@ fn expand_with_policy<G: GameEngine>(
     }
 
     arena.get_mut(node_id).first_child = first_child_id;
-    arena.get_mut(node_id).child_count = child_count;
+    arena.get_mut(node_id).child_count = keep as u16;
 }
 
 /// Single-game MCTS search engine, generic over any GameEngine.
@@ -381,7 +407,7 @@ impl<G: GameEngine> MctsSearch<G> {
         let root = self.arena.alloc(None, G::pass_move(), 0.0, game.next_player());
         self.root = root;
         let mut game_copy = game.clone();
-        expand_with_policy::<G>(&mut self.arena, root, &mut game_copy, policy);
+        expand_with_policy::<G>(&mut self.arena, root, &mut game_copy, policy, self.params.max_children);
     }
 
     /// Reconstruct the game state at a given node by replaying moves from root.
@@ -469,7 +495,7 @@ impl<G: GameEngine> MctsSearch<G> {
     ) {
         let stashed = std::mem::take(&mut self.stashed_leaves);
         for (i, (leaf, mut game)) in stashed.into_iter().enumerate() {
-            expand_with_policy::<G>(&mut self.arena, leaf, &mut game, &policies[i]);
+            expand_with_policy::<G>(&mut self.arena, leaf, &mut game, &policies[i], self.params.max_children);
             let value = values[i];
             correct_virtual_loss(&mut self.arena, leaf, value);
         }

@@ -113,6 +113,7 @@ pub fn play_battle_core(
     let mut searches: Vec<MctsSearch<ZertzBoard>> = (0..num_games).map(|_| {
         let mut s = MctsSearch::new(arena_capacity);
         s.params.cpuct_strategy = CpuctStrategy::Constant { c_puct };
+        s.params.max_children = simulations;
         s
     }).collect();
     let mut active = vec![true; num_games];
@@ -322,6 +323,7 @@ pub fn play_selfplay_core(
     let mut searches: Vec<MctsSearch<ZertzBoard>> = (0..num_games).map(|_| {
         let mut s = MctsSearch::new(arena_capacity);
         s.params.cpuct_strategy = CpuctStrategy::Constant { c_puct };
+        s.params.max_children = simulations;
         s
     }).collect();
     let mut move_counts: Vec<u32> = vec![0; num_games];
