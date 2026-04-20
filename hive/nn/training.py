@@ -7,6 +7,7 @@ consumes at inference. See docs/policy_heads.md.
 
 from __future__ import annotations
 import math
+import os
 import torch
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
@@ -47,37 +48,84 @@ class HiveDataset(Dataset):
     Probabilities sum to 1 across the union of both per sample.
     """
 
-    def __init__(self, max_size: int = 50_000, grid_size: int = DEFAULT_GRID_SIZE):
+    def __init__(self, max_size: int = 50_000, grid_size: int = DEFAULT_GRID_SIZE,
+                 buf_dir: str | None = None):
         self.max_size = max_size
         self.grid_size = grid_size
-        self._count = 0
-        self._size = 0
+        self._h5file = None
         self.augment_symmetry = False
 
-        # Pre-allocate contiguous arrays
-        self.board_tensors = np.zeros((max_size, NUM_CHANNELS, grid_size, grid_size), dtype=np.float32)
-        self.reserve_vectors = np.zeros((max_size, RESERVE_SIZE), dtype=np.float32)
+        def _zeros(shape, dtype):
+            return np.zeros(shape, dtype=dtype)
 
-        # Sparse placement targets: flat idx = type*G² + cell, prob per legal placement.
-        self.place_idx = np.zeros((max_size, MAX_PLACEMENTS), dtype=np.uint16)
-        self.place_probs = np.zeros((max_size, MAX_PLACEMENTS), dtype=np.float32)
-        self.num_placements = np.zeros(max_size, dtype=np.int32)
+        if buf_dir is not None:
+            import h5py
+            os.makedirs(buf_dir, exist_ok=True)
+            h5path = os.path.join(buf_dir, "replay.h5")
+            resuming = os.path.exists(h5path)
+            self._h5file = h5py.File(h5path, "r+" if resuming else "w")
 
-        # Sparse movement targets: (src_cell, dst_cell, prob) per legal movement pair.
-        self.movement_src = np.zeros((max_size, MAX_MOVE_PAIRS), dtype=np.uint16)
-        self.movement_dst = np.zeros((max_size, MAX_MOVE_PAIRS), dtype=np.uint16)
-        self.movement_probs = np.zeros((max_size, MAX_MOVE_PAIRS), dtype=np.float32)
-        self.num_movements = np.zeros(max_size, dtype=np.int32)
+            if resuming:
+                stored_max = int(self._h5file.attrs["max_size"])
+                stored_gs = int(self._h5file.attrs.get("grid_size", grid_size))
+                if stored_max != max_size:
+                    raise ValueError(
+                        f"Buffer max_size mismatch: stored {stored_max} vs requested {max_size}"
+                    )
+                if stored_gs != grid_size:
+                    raise ValueError(
+                        f"Buffer grid_size mismatch: stored {stored_gs} vs requested {grid_size}. "
+                        f"Delete {h5path} to start fresh."
+                    )
+                self._count = int(self._h5file.attrs["count"])
+                self._size = int(self._h5file.attrs["size"])
+                print(f"  Replay buffer resumed: {self._size} samples from {h5path}")
+            else:
+                self._count = 0
+                self._size = 0
+                self._h5file.attrs["max_size"] = max_size
+                self._h5file.attrs["grid_size"] = grid_size
+                self._h5file.attrs["count"] = 0
+                self._h5file.attrs["size"] = 0
 
-        self.value_targets = np.zeros(max_size, dtype=np.float32)
-        self.value_only = np.zeros(max_size, dtype=np.bool_)
-        self.policy_only = np.zeros(max_size, dtype=np.bool_)
-        self.my_queen_danger = np.zeros(max_size, dtype=np.float32)
-        self.opp_queen_danger = np.zeros(max_size, dtype=np.float32)
-        self.my_queen_escape = np.zeros(max_size, dtype=np.float32)
-        self.opp_queen_escape = np.zeros(max_size, dtype=np.float32)
-        self.my_mobility = np.zeros(max_size, dtype=np.float32)
-        self.opp_mobility = np.zeros(max_size, dtype=np.float32)
+            def _ds(name, shape, dtype):
+                if name in self._h5file:
+                    return self._h5file[name]
+                return self._h5file.create_dataset(name, shape=shape, dtype=dtype, track_order=False)
+        else:
+            self._count = 0
+            self._size = 0
+            _ds = lambda name, shape, dtype: _zeros(shape, dtype)
+
+        self.board_tensors   = _ds("board_tensors",   (max_size, NUM_CHANNELS, grid_size, grid_size), np.float32)
+        self.reserve_vectors = _ds("reserve_vectors", (max_size, RESERVE_SIZE),                       np.float32)
+        self.place_idx       = _ds("place_idx",       (max_size, MAX_PLACEMENTS),                     np.uint16)
+        self.place_probs     = _ds("place_probs",     (max_size, MAX_PLACEMENTS),                     np.float32)
+        self.num_placements  = _ds("num_placements",  (max_size,),                                    np.int32)
+        self.movement_src    = _ds("movement_src",    (max_size, MAX_MOVE_PAIRS),                     np.uint16)
+        self.movement_dst    = _ds("movement_dst",    (max_size, MAX_MOVE_PAIRS),                     np.uint16)
+        self.movement_probs  = _ds("movement_probs",  (max_size, MAX_MOVE_PAIRS),                     np.float32)
+        self.num_movements   = _ds("num_movements",   (max_size,),                                    np.int32)
+        self.value_targets   = _ds("value_targets",   (max_size,),                                    np.float32)
+        self.value_only      = _ds("value_only",      (max_size,),                                    np.bool_)
+        self.policy_only     = _ds("policy_only",     (max_size,),                                    np.bool_)
+        self.my_queen_danger  = _ds("my_queen_danger",  (max_size,), np.float32)
+        self.opp_queen_danger = _ds("opp_queen_danger", (max_size,), np.float32)
+        self.my_queen_escape  = _ds("my_queen_escape",  (max_size,), np.float32)
+        self.opp_queen_escape = _ds("opp_queen_escape", (max_size,), np.float32)
+        self.my_mobility      = _ds("my_mobility",      (max_size,), np.float32)
+        self.opp_mobility     = _ds("opp_mobility",     (max_size,), np.float32)
+
+        if self._h5file is not None:
+            self._h5file.flush()
+
+    def close(self):
+        if self._h5file is not None:
+            self._h5file.close()
+            self._h5file = None
+
+    def __del__(self):
+        self.close()
 
     def add_sample(self, board_tensor: np.ndarray, reserve_vector: np.ndarray,
                    place_idx_arr,   # list/array of int, length <= MAX_PLACEMENTS
@@ -142,33 +190,64 @@ class HiveDataset(Dataset):
                   opp_mobility: np.ndarray | None = None):
         """Bulk insert from contiguous arrays."""
         n = board_tensors.shape[0]
-        boards_flat = board_tensors.reshape(n, NUM_CHANNELS, self.grid_size, self.grid_size)
-        for i in range(n):
-            idx = self._count % self.max_size
-            self.board_tensors[idx] = boards_flat[i]
-            self.reserve_vectors[idx] = reserve_vectors[i]
-            self.place_idx[idx] = place_idx_data[i]
-            self.place_probs[idx] = place_prob_data[i]
-            self.num_placements[idx] = num_placements_arr[i]
-            self.movement_src[idx] = movement_src_data[i]
-            self.movement_dst[idx] = movement_dst_data[i]
-            self.movement_probs[idx] = movement_prob_data[i]
-            self.num_movements[idx] = num_movements_arr[i]
-            self.value_targets[idx] = value_targets[i]
-            self.value_only[idx] = value_only[i]
-            self.policy_only[idx] = policy_only[i]
-            self.my_queen_danger[idx] = my_queen_danger[i] if my_queen_danger is not None else 0.0
-            self.opp_queen_danger[idx] = opp_queen_danger[i] if opp_queen_danger is not None else 0.0
-            self.my_queen_escape[idx] = my_queen_escape[i] if my_queen_escape is not None else 0.0
-            self.opp_queen_escape[idx] = opp_queen_escape[i] if opp_queen_escape is not None else 0.0
-            self.my_mobility[idx] = my_mobility[i] if my_mobility is not None else 0.0
-            self.opp_mobility[idx] = opp_mobility[i] if opp_mobility is not None else 0.0
-            self._count += 1
-            self._size = min(self._size + 1, self.max_size)
+        boards = board_tensors.reshape(n, NUM_CHANNELS, self.grid_size, self.grid_size)
+        vo_arr  = np.asarray(value_only,  dtype=np.bool_)
+        po_arr  = np.asarray(policy_only, dtype=np.bool_)
+        _z = lambda: np.zeros(n, dtype=np.float32)
+        mqd  = my_queen_danger  if my_queen_danger  is not None else _z()
+        oqd  = opp_queen_danger if opp_queen_danger is not None else _z()
+        mqe  = my_queen_escape  if my_queen_escape  is not None else _z()
+        oqe  = opp_queen_escape if opp_queen_escape is not None else _z()
+        mmob = my_mobility      if my_mobility      is not None else _z()
+        omob = opp_mobility     if opp_mobility     is not None else _z()
+
+        pairs = [
+            (self.board_tensors,   boards),
+            (self.reserve_vectors, reserve_vectors),
+            (self.place_idx,       place_idx_data),
+            (self.place_probs,     place_prob_data),
+            (self.num_placements,  num_placements_arr),
+            (self.movement_src,    movement_src_data),
+            (self.movement_dst,    movement_dst_data),
+            (self.movement_probs,  movement_prob_data),
+            (self.num_movements,   num_movements_arr),
+            (self.value_targets,   value_targets),
+            (self.value_only,      vo_arr),
+            (self.policy_only,     po_arr),
+            (self.my_queen_danger,  mqd),
+            (self.opp_queen_danger, oqd),
+            (self.my_queen_escape,  mqe),
+            (self.opp_queen_escape, oqe),
+            (self.my_mobility,      mmob),
+            (self.opp_mobility,     omob),
+        ]
+
+        start = self._count % self.max_size
+        end   = start + n
+        if end <= self.max_size:
+            for arr, data in pairs:
+                arr[start:end] = data
+        else:
+            first = self.max_size - start
+            for arr, data in pairs:
+                arr[start:]     = data[:first]
+                arr[:n - first] = data[first:]
+
+        self._count += n
+        self._size = min(self._size + n, self.max_size)
+
+        if self._h5file is not None:
+            self._h5file.attrs["count"] = self._count
+            self._h5file.attrs["size"]  = self._size
+            self._h5file.flush()
 
     def clear(self):
         self._count = 0
         self._size = 0
+        if self._h5file is not None:
+            self._h5file.attrs["count"] = 0
+            self._h5file.attrs["size"]  = 0
+            self._h5file.flush()
 
     def __len__(self):
         return self._size * 12 if self.augment_symmetry else self._size

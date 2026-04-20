@@ -296,6 +296,7 @@ class SelfPlayTrainer:
         use_ort: bool = False,
         use_heuristic: bool = False,
         value_loss_scale: float = 1.0,
+        buf_dir: Optional[str] = None,
     ):
         """Run the full training loop.
 
@@ -360,8 +361,11 @@ class SelfPlayTrainer:
                 self._run_checkpoint_eval(self.start_generation, eval_sims, eval_games)
 
         # Replay buffer: keep last `replay_window` generations of data (worst case: all games hit max_moves)
+        resolved_buf_dir = buf_dir if buf_dir is not None else os.path.dirname(os.path.abspath(self.model_path))
         replay_buffer = HiveDataset(
-            max_size=replay_window * games_per_gen * max_moves, grid_size=self.grid_size
+            max_size=replay_window * games_per_gen * max_moves,
+            grid_size=self.grid_size,
+            buf_dir=resolved_buf_dir,
         )
         replay_buffer.augment_symmetry = augment_symmetry
 

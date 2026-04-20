@@ -295,6 +295,12 @@ def main():
         action="store_true",
         help="Use Rust-native ORT inference instead of Python eval (requires .onnx model)",
     )
+    train_parser.add_argument(
+        "--buf-dir",
+        type=str,
+        default=None,
+        help="Directory for HDF5 replay buffer (default: same directory as --model)",
+    )
 
     # Supervised pre-training
     pretrain_parser = subparsers.add_parser(
@@ -632,6 +638,7 @@ def main():
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
             use_heuristic=args.use_heuristic,
+            buf_dir=args.buf_dir,
         )
     else:
         # Default: UHP engine
