@@ -72,7 +72,8 @@ def main():
     )
     train_parser.add_argument("--training-batch-size", type=int, default=512)
     train_parser.add_argument(
-        "--model", type=str, default="model.pt", help="Model file path"
+        "--name", type=str, default="hive",
+        help="Model name; all paths derived as models/{name}/",
     )
     train_parser.add_argument(
         "--device", type=str, default="cuda", help="Device: cuda or cpu"
@@ -586,7 +587,7 @@ def main():
             lr_scheduler = lr_scheduler_from_string(args.lr_schedule)
 
         trainer = SelfPlayTrainer(
-            model_path=args.model,
+            name=args.name,
             device=_resolve_device(args.device),
             num_blocks=args.blocks,
             channels=args.channels,

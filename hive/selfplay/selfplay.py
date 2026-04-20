@@ -202,27 +202,28 @@ class SelfPlayTrainer:
 
     def __init__(
         self,
-        model_path: str = "model.pt",
+        name: str = "hive",
         device: str = "cpu",
         num_blocks: int = 6,
         channels: int = 64,
         num_attention_layers: int = 0,
-        checkpoint_dir: str = "checkpoints",
         lr: float = 0.02,
         lr_scheduler: Optional[LRScheduler] = None,
         grid_size: int = 23,
     ):
-        self.model_path = model_path
-        self.model_name = os.path.splitext(os.path.basename(model_path))[0]
-        self.checkpoint_dir = checkpoint_dir
+        self.name = name
+        self.model_dir = os.path.join("models", name)
+        self.model_path = os.path.join(self.model_dir, f"{name}.pt")
+        self.model_name = name
+        self.checkpoint_dir = os.path.join(self.model_dir, "checkpoints")
         self.device = device
         self.num_blocks = num_blocks
         self.channels = channels
         self.grid_size = grid_size
         self.start_generation = 0
 
-        if os.path.exists(model_path):
-            self.model, ckpt = load_checkpoint(model_path)
+        if os.path.exists(self.model_path):
+            self.model, ckpt = load_checkpoint(self.model_path)
             self.start_generation = ckpt.get("generation", 0)
             blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
@@ -230,7 +231,7 @@ class SelfPlayTrainer:
             gs = self.model.grid_size
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"Resumed from {model_path} (generation {self.start_generation}, "
+                f"Resumed from {self.model_path} (generation {self.start_generation}, "
                 f"{blocks} blocks, {ch} channels, {attn} attn layers, grid {gs}x{gs}, {params / 1e6:.2f}M params)"
             )
             if blocks != num_blocks or ch != channels:
@@ -240,6 +241,7 @@ class SelfPlayTrainer:
                 )
             self.grid_size = gs
         else:
+            os.makedirs(self.model_dir, exist_ok=True)
             self.model = create_model(
                 num_blocks,
                 channels,
@@ -335,7 +337,7 @@ class SelfPlayTrainer:
         }
 
         # Training log (CSV, truncated on fresh start)
-        self._log_path = f"{self.model_name}_log.csv"
+        self._log_path = os.path.join(self.model_dir, f"{self.name}_log.csv")
         log_path = self._log_path
         if self.start_generation == 0:
             with open(log_path, "w") as f:
@@ -361,7 +363,7 @@ class SelfPlayTrainer:
                 self._run_checkpoint_eval(self.start_generation, eval_sims, eval_games)
 
         # Replay buffer: keep last `replay_window` generations of data (worst case: all games hit max_moves)
-        resolved_buf_dir = buf_dir if buf_dir is not None else os.path.dirname(os.path.abspath(self.model_path))
+        resolved_buf_dir = buf_dir if buf_dir is not None else self.model_dir
         replay_buffer = HiveDataset(
             max_size=replay_window * games_per_gen * max_moves,
             grid_size=self.grid_size,
