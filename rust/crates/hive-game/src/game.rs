@@ -1,6 +1,6 @@
 /// Game state management for Hive.
 
-use core_game::hex::{Hex, hex_neighbors};
+use core_game::hex::{Hex, hex_distance, hex_neighbors};
 use crate::board::Board;
 use crate::piece::{Piece, PieceColor, PieceType, PIECE_COUNTS, ALL_PIECE_TYPES, player_pieces};
 use crate::rules::{get_moves, get_placements};
@@ -184,11 +184,20 @@ pub struct Game {
     repetition_history: Vec<u64>,
 }
 
-// Heuristic weights and scaling constants
-const HEURISTIC_DANGER_WEIGHT: f32 = 1.0;
-const HEURISTIC_ESCAPE_WEIGHT: f32 = 1.0;
-const HEURISTIC_MOBILITY_WEIGHT: f32 = 0.2;
-const HEURISTIC_TOTAL_SCALE: f32 = 1.0;
+// Exponential queen danger table (normalized boardspace queen_safety: 0,-5,-10,-15,-40,-65,-120 / 120)
+const QUEEN_DANGER_TABLE: [f32; 7] = [0.0, 0.042, 0.083, 0.125, 0.333, 0.542, 1.0];
+
+// Heuristic weights — sum = 4.05; TOTAL_SCALE normalizes to [-1, 1] without clamping.
+// DANGER dominates (as in boardspace); ESCAPE is secondary and correlated with DANGER.
+// LEGALMOVES subsumes pinned-piece immobility (pinned pieces contribute 0 moves).
+const HEURISTIC_DANGER_WEIGHT:     f32 = 2.00;
+const HEURISTIC_ESCAPE_WEIGHT:     f32 = 0.60;
+const HEURISTIC_ATTACK_WEIGHT:     f32 = 0.50;
+const HEURISTIC_SHUTOUT_WEIGHT:    f32 = 0.40;
+const HEURISTIC_LEGALMOVES_WEIGHT: f32 = 0.25;
+const HEURISTIC_DROP_WEIGHT:       f32 = 0.15;
+const HEURISTIC_MOBILITY_WEIGHT:   f32 = 0.15;
+const HEURISTIC_TOTAL_SCALE:       f32 = 1.0 / 4.05;
 
 impl Game {
     const ZOBRIST_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -549,8 +558,11 @@ impl Game {
                 let neighbors = hex_neighbors(pos)
                     .iter()
                     .filter(|&&neighbor| self.board.is_occupied(neighbor))
-                    .count() as f32;
-                (neighbors / 6.0).min(1.0)
+                    .count();
+                // Enemy beetle on top counts as one extra virtual neighbor (~0.75 in boardspace).
+                let beetle_on_top = self.board.top_piece(pos) != Some(queen);
+                let effective = (neighbors + usize::from(beetle_on_top)).min(6);
+                QUEEN_DANGER_TABLE[effective]
             }
         }
     }
@@ -628,30 +640,84 @@ impl Game {
         (mobile_count as f32 / total_pieces).min(1.0)
     }
 
+    // Own pieces near enemy queen, weighted by 1/distance (0-1).
+    fn attack_pressure(&self, attacker: PieceColor) -> f32 {
+        let defender = attacker.opposite();
+        let queen = Piece::new(defender, PieceType::Queen, 1);
+        let queen_pos = match self.board.piece_position(queen) {
+            None => return 0.0,
+            Some(p) => p,
+        };
+        let mut pressure = 0.0f32;
+        let on_board = self.board.pieces_on_board(attacker);
+        for &piece in &on_board {
+            if let Some(pos) = self.board.piece_position(piece) {
+                let dist = hex_distance(pos, queen_pos);
+                if dist > 0 && dist <= 4 {
+                    pressure += 1.0 / dist as f32;
+                }
+            }
+        }
+        (pressure / 6.0).min(1.0)
+    }
+
+    // Total legal moves available (normalized) and shutout flag (1.0 if zero moves).
+    fn legal_moves_info(&self, color: PieceColor) -> (f32, f32) {
+        let mut count: usize = 0;
+        if self.queen_placed(color) && !self.must_place_queen_for(color) {
+            let articulation_points = self.board.articulation_points();
+            let mut board_clone = self.board.clone();
+            let on_board = self.board.pieces_on_board(color);
+            for &piece in &on_board {
+                count += get_moves(piece, &mut board_clone, &articulation_points).len();
+            }
+        }
+        let in_reserve = self.reserves.pieces_in_reserve(color);
+        if !in_reserve.is_empty() {
+            let placement_hexes = get_placements(color, &self.board);
+            if !placement_hexes.is_empty() {
+                let placeable = if self.must_place_queen_for(color) { 1 } else { in_reserve.len() };
+                count += placeable * placement_hexes.len();
+            }
+        }
+        let score = (count as f32 / 15.0).min(1.0);
+        let shutout = if count == 0 { 1.0 } else { 0.0 };
+        (score, shutout)
+    }
+
+    // Valid placement hexes available, normalized (0-1). Zero if reserve is empty.
+    fn drop_count(&self, color: PieceColor) -> f32 {
+        if self.reserves.pieces_in_reserve(color).is_empty() {
+            return 0.0;
+        }
+        let placements = get_placements(color, &self.board);
+        (placements.len() as f32 / 10.0).min(1.0)
+    }
+
     /// Heuristic evaluation for unfinished games.
     /// Returns (white_score, black_score) in range [-1, 1].
-    /// Based on queen danger, escape mobility, and overall piece mobility.
     pub fn heuristic_value(&self) -> (f32, f32) {
-        // Queen danger: neighbors/6 (0-1, higher is worse)
-        let w_danger = self.queen_danger(PieceColor::White);
-        let b_danger = self.queen_danger(PieceColor::Black);
-
-        // Queen escape: legal slide destinations / 2 (0-1, higher is better)
-        let w_escape = self.queen_escape(PieceColor::White);
-        let b_escape = self.queen_escape(PieceColor::Black);
-
-        // Piece mobility: fraction of pieces on board that can move (0-1, higher is better)
-        let w_mob = self.piece_mobility(PieceColor::White);
-        let b_mob = self.piece_mobility(PieceColor::Black);
-
-        let rel_danger = b_danger - w_danger;
-        let rel_escape = w_escape - b_escape;
-        let rel_mobility = w_mob - b_mob;
+        let w_danger  = self.queen_danger(PieceColor::White);
+        let b_danger  = self.queen_danger(PieceColor::Black);
+        let w_escape  = self.queen_escape(PieceColor::White);
+        let b_escape  = self.queen_escape(PieceColor::Black);
+        let w_attack  = self.attack_pressure(PieceColor::White);
+        let b_attack  = self.attack_pressure(PieceColor::Black);
+        let (w_legal, w_shutout) = self.legal_moves_info(PieceColor::White);
+        let (b_legal, b_shutout) = self.legal_moves_info(PieceColor::Black);
+        let w_drop    = self.drop_count(PieceColor::White);
+        let b_drop    = self.drop_count(PieceColor::Black);
+        let w_mob     = self.piece_mobility(PieceColor::White);
+        let b_mob     = self.piece_mobility(PieceColor::Black);
 
         let w_score = (HEURISTIC_TOTAL_SCALE * (
-            HEURISTIC_DANGER_WEIGHT * rel_danger +
-            HEURISTIC_ESCAPE_WEIGHT * rel_escape +
-            HEURISTIC_MOBILITY_WEIGHT * rel_mobility
+            HEURISTIC_DANGER_WEIGHT     * (b_danger  - w_danger)  +
+            HEURISTIC_ESCAPE_WEIGHT     * (w_escape  - b_escape)  +
+            HEURISTIC_ATTACK_WEIGHT     * (w_attack  - b_attack)  +
+            HEURISTIC_LEGALMOVES_WEIGHT * (w_legal   - b_legal)   +
+            HEURISTIC_SHUTOUT_WEIGHT    * (b_shutout - w_shutout) +
+            HEURISTIC_DROP_WEIGHT       * (w_drop    - b_drop)    +
+            HEURISTIC_MOBILITY_WEIGHT   * (w_mob     - b_mob)
         )).clamp(-1.0, 1.0);
 
         (w_score, -w_score)

@@ -77,10 +77,10 @@ rust/crates/
 - **Symmetry augmentation**: D6 hex symmetries (12 transforms), active and in use via `--augment-symmetry`.
 - **Replay buffer**: in-memory only, not persisted to disk. Lost on process exit. Pretrain and selfplay run as separate processes so the buffer is always empty at the start of selfplay.
 - **Fast-cap turns**: no Dirichlet noise, play strongest move, added to buffer with value-only training (policy loss masked)
-- **Heuristic value** for unfinished games: queen neighbor pressure only (no draw penalty)
+- **Heuristic value** for unfinished games: multi-component positional score combining queen danger (exponential lookup from boardspace weights), queen escape routes, attack pressure (own pieces near enemy queen weighted by 1/distance), total legal move count, shutout penalty (zero legal moves), pinned piece fraction, drop destination count, and piece mobility. All computed as relative (white − black) and clamped to [−1, 1].
 - **Auxiliary heads**: Six sigmoid outputs from a dedicated pathway off the trunk (conv1x1→FC64→FC6), predicting per-position metrics for both current and opponent player. Trained with MSE, always active (not masked). Provides gradient signal on every position even in drawn games.
-  - Queen danger (neighbors/6, 0–1)
-  - Queen escape (legal slide destinations / 6, 0–1)
+  - Queen danger (exponential lookup table, 0–1; previously neighbors/6)
+  - Queen escape (legal slide destinations / 2, 0–1)
   - Piece mobility (fraction of pieces with ≥1 legal move, 0–1)
 - **Opening diversity**: Two mechanisms to avoid early-game convergence:
   - `--random-opening-moves MIN-MAX`: play N random moves (uniform in [min, max]) before MCTS takes over
