@@ -144,7 +144,7 @@ Follows UHP MoveString format:
 
 ## Zertz
 
-A separate AlphaZero-style engine for [Zertz](https://boardgamegeek.com/boardgame/596/zertz) is included under `zertz/`. It uses the same Rust game backend (`engine_zero`) and PyTorch training loop.
+An AlphaZero-style engine for [Zertz](https://boardgamegeek.com/boardgame/596/zertz) is included under `zertz/`. It uses the same Rust game backend (`engine_zero`) and PyTorch training loop.
 
 ### Train Zertz
 
@@ -209,6 +209,47 @@ uv run python scripts/plot_log.py zertz_b4_c128_log.csv
 ```
 
 Plots win percentages, loss curves, game length, and win conditions (white/grey/black/combo) across iterations. The window geometry is remembered between runs.
+
+## Yinsh
+
+An AlphaZero-style engine for [YINSH](https://boardgamegeek.com/boardgame/7854/yinsh) is included under `yinsh/`. It uses the same Rust game backend (`engine_zero`) and PyTorch training loop.
+
+### Train Yinsh
+
+```bash
+uv run yinsh train \
+  --name yinsh_b8_c96 \
+  --blocks 8 --channels 96 \
+  --games 16 --simulations 200 \
+  --device cuda \
+  --play-batch-size 8
+```
+
+Key training flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | `yinsh` | Model name; paths derived as `models/{name}/` |
+| `--blocks` | 8 | Residual blocks |
+| `--channels` | 96 | Network channels |
+| `--games` | 16 | Self-play games per generation |
+| `--simulations` | 200 | MCTS simulations per move |
+| `--max-moves` | 400 | Max moves per game |
+| `--replay-window` | 8 | Replay buffer size (in generations) |
+| `--playout-cap-p` | 0.0 | Fraction of full-search turns (KataGo-style) |
+| `--fast-cap` | 30 | Simulations for fast-search turns |
+| `--play-batch-size` | 8 | MCTS rounds per GPU inference call |
+| `--temp-threshold` | 20 | Move number after which temperature drops to 0 |
+| `--augment-symmetry` | off | Apply D6 hex symmetry augmentation |
+| `--lr` | 0.02 | Learning rate |
+| `--checkpoint-every` | 10 | Save checkpoint every N generations |
+| `--time-limit` | None | Stop after N minutes |
+
+### Battle Two Models
+
+```bash
+uv run yinsh battle models/yinsh/checkpoints/yinsh_gen00100.pt models/yinsh/yinsh.pt --games 20
+```
 
 ## License
 

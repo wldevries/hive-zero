@@ -1,9 +1,8 @@
 # Hive AI Engine
 
 ## Project Overview
-A Hive AI engine in Python + Rust implementing the Universal Hive Protocol (UHP) over stdin/stdout.
-Uses AlphaZero-style MCTS + neural network for move selection.
-All game logic, MCTS, and encoding run in Rust (`engine_zero` via PyO3) for performance.
+A multi-game AlphaZero-style AI engine in Python + Rust. Supports Hive (primary, with UHP protocol), Zertz, Yinsh, and TicTacToe (pipeline validation).
+All game logic, MCTS, and encoding run in Rust (`engine_zero` via PyO3) for performance. Python handles NN inference and training only.
 
 ## Architecture
 ```
@@ -14,6 +13,12 @@ hive/
   uhp/         - UHP stdin/stdout protocol engine
   selfplay/    - Self-play training loop (Rust-only, no Python MCTS)
     selfplay.py       - SelfPlayTrainer orchestrator + RustParallelSelfPlay (Rust MCTS, Python GPU callback)
+zertz/
+  nn/          - PyTorch model + YinshDataset training loop
+  selfplay/    - Self-play training loop (Rust MCTS, Python GPU callback)
+yinsh/
+  nn/          - PyTorch model + YinshDataset training loop
+  selfplay/    - Self-play training loop (Rust MCTS, Python GPU callback)
 rust/crates/
   core-game/src/       - Game abstractions and shared Rust logic
     game.rs            - Game/NNGame/Outcome traits
@@ -36,11 +41,19 @@ rust/crates/
     zertz.rs           - Board, rules, move types
     board_encoding.rs  - Board tensor encoding
     move_encoding.rs   - Factorized policy encoding
+  yinsh-game/src/      - Yinsh game logic
+    board.rs           - Board state, 85-cell hex grid, phases
+    board_encoding.rs  - Board tensor encoding
+    move_encoding.rs   - Policy encoding (59 channels × 11×11)
+    hex.rs             - Hex coordinates for the YINSH board shape
+    search.rs          - Self-play / battle / best-move core
+    notation.rs        - Move notation
   engine-zero/src/     - PyO3 extension module `engine_zero`
     hive_python.rs     - PyO3 bindings: HiveGame (includes best_move MCTS loop)
     hive_selfplay.rs   - Hive self-play session (parallel MCTS, Python inference callback)
     tictactoe_python.rs - PyO3 bindings: TTTSelfPlaySession, TTTGame
     zertz_python.rs    - PyO3 bindings: ZertzGame
+    yinsh_python.rs    - PyO3 bindings: YinshSelfPlaySession, YinshGame
     inference.rs       - Shared inference helpers
     lib.rs             - Module registration
 ```
@@ -103,11 +116,24 @@ Zertz games end naturally before ~40 turns because rings are removed from the bo
 making the game finite by construction. When win rates converge to ~50/50, value loss rises because
 balanced outcomes are harder to predict — fix is higher simulation count.
 
+### Yinsh architecture
+- **Board encoding**: 9 channels on 11×11 grid (85-cell YINSH board). Channels 0-1: my/opp rings. Channels 2-3: my/opp markers. Channel 4: valid cell mask. Channels 5-8: phase flags (Setup, Normal, RemoveRow, RemoveRing) broadcast over valid cells. Reserve vector of 6 floats: markers_in_pool/51, my_score/3, opp_score/3, my_rings_on_board/5, opp_rings_on_board/5, rings_placed_total/10. All current-player-relative.
+- **Policy encoding**: 59 channels × 11×11 = POLICY_SIZE 7139. All moves use `PolicyIndex::Single`.
+  - Channel 0: PlaceRing destination (Setup phase)
+  - Channels 1-3: RemoveRow start × direction 0/1/2 (RemoveRow phase)
+  - Channel 4: RemoveRing target (RemoveRing phase)
+  - Channels 5-58: MoveRing — channel = 5 + dir_idx × 9 + (dist−1), value at source cell (Normal phase)
+- **Game phases**: Setup (place 5 rings each) → Normal (move rings, flipping markers) → RemoveRow (choose row of 5 to remove) → RemoveRing (remove one of your rings). Phase transitions are sequential same-player turns, handled by MCTS backprop same as Zertz mid-captures.
+- **Win condition**: first to remove 3 rings (complete 3 rows of 5 markers).
+- **Training data**: flat POLICY_SIZE visit distributions; single cross-entropy policy loss (no factorized heads).
+
 ## Package Manager
 Use `uv` for all dependency management. Do NOT use pip directly.
 ```bash
 uv run hive                       # Start UHP engine (default)
-uv run hive train                 # Run self-play training
+uv run hive train                 # Run Hive self-play training
+uv run zertz train                # Run Zertz self-play training
+uv run yinsh train                # Run Yinsh self-play training
 uv run python -m pytest tests/    # Run tests
 ```
 
