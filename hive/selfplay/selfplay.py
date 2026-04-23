@@ -298,6 +298,7 @@ class SelfPlayTrainer:
         use_ort: bool = False,
         use_heuristic: bool = False,
         value_loss_scale: float = 1.0,
+        aux_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
     ):
         """Run the full training loop.
@@ -699,6 +700,7 @@ class SelfPlayTrainer:
                         replay_buffer,
                         batch_size=batch_size,
                         value_loss_scale=value_loss_scale,
+                        aux_loss_scale=aux_loss_scale,
                     )
                     lr = self.trainer._current_lr
                     total_s = f"{losses['total_loss']:.4f}"

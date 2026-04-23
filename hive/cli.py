@@ -221,6 +221,12 @@ def main():
         help="Scale factor for value loss in combined loss (default: 1.0)",
     )
     train_parser.add_argument(
+        "--aux-loss-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for auxiliary loss (default: 1.0, set to 0 to disable)",
+    )
+    train_parser.add_argument(
         "--resign-threshold",
         type=float,
         default=-0.97,
@@ -638,6 +644,7 @@ def main():
             comment=args.comment,
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
+            aux_loss_scale=args.aux_loss_scale,
             use_heuristic=args.use_heuristic,
             buf_dir=args.buf_dir,
         )
