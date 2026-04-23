@@ -18,6 +18,7 @@ from tqdm import tqdm
 from .model import HiveNet, create_model
 from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
 from ..encoding.move_encoder import NUM_PLACE_CHANNELS
+from shared.replay_buffer import handle_buffer_size_mismatch
 
 # Per-sample caps on the sparse legal-action target. Must match the Rust side
 # (hive_selfplay.rs training_data()).
@@ -69,9 +70,10 @@ class HiveDataset(Dataset):
                 stored_max = int(self._h5file.attrs["max_size"])
                 stored_gs = int(self._h5file.attrs.get("grid_size", grid_size))
                 if stored_max != max_size:
-                    raise ValueError(
-                        f"Buffer max_size mismatch: stored {stored_max} vs requested {max_size}"
+                    max_size, self._h5file = handle_buffer_size_mismatch(
+                        self._h5file, h5path, max_size
                     )
+                    self.max_size = max_size
                 if stored_gs != grid_size:
                     raise ValueError(
                         f"Buffer grid_size mismatch: stored {stored_gs} vs requested {grid_size}. "

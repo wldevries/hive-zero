@@ -10,6 +10,7 @@ from typing import Optional
 from tqdm import tqdm
 
 from .model import ZertzNet, create_model, NUM_CHANNELS, GRID_SIZE, POLICY_SIZE, RESERVE_SIZE
+from shared.replay_buffer import handle_buffer_size_mismatch
 
 _BOARD_SIZE = 37  # number of valid hex cells on the Zertz board
 _NUM_DIRS = 6
@@ -79,9 +80,10 @@ class ZertzDataset(Dataset):
             if resuming:
                 stored_max = int(self._h5file.attrs["max_size"])
                 if stored_max != max_size:
-                    raise ValueError(
-                        f"Buffer max_size mismatch: stored {stored_max} vs requested {max_size}"
+                    max_size, self._h5file = handle_buffer_size_mismatch(
+                        self._h5file, h5path, max_size
                     )
+                    self.max_size = max_size
                 stored_policy_size = int(self._h5file["policy_targets"].shape[1]) if "policy_targets" in self._h5file else 4440
                 if stored_policy_size != POLICY_SIZE:
                     raise ValueError(

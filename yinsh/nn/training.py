@@ -27,6 +27,7 @@ from .model import (
     YinshNet,
     create_model,
 )
+from shared.replay_buffer import handle_buffer_size_mismatch
 
 _GS = GRID_SIZE * GRID_SIZE  # 121
 
@@ -152,9 +153,10 @@ class YinshDataset(Dataset):
             if resuming:
                 stored_max = int(self._h5file.attrs["max_size"])
                 if stored_max != max_size:
-                    raise ValueError(
-                        f"Buffer max_size mismatch: stored {stored_max} vs requested {max_size}"
+                    max_size, self._h5file = handle_buffer_size_mismatch(
+                        self._h5file, h5path, max_size
                     )
+                    self.max_size = max_size
                 self._count = int(self._h5file.attrs["count"])
                 self._size = int(self._h5file.attrs["size"])
                 print(f"  Replay buffer resumed: {self._size} samples from {h5path}")
