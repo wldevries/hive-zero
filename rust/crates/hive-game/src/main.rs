@@ -457,6 +457,9 @@ fn run_stats(games_path: &str) {
     let mut move_freq: HashMap<String, u64> = HashMap::new();
     let mut total_movements: u64 = 0;
 
+    // Valid move count per turn
+    let mut valid_moves_per_turn: Vec<u32> = Vec::new();
+
     // Turn queen was played
     let mut white_queen_turn: Vec<u32> = Vec::new();
     let mut black_queen_turn: Vec<u32> = Vec::new();
@@ -486,8 +489,11 @@ fn run_stats(games_path: &str) {
             }
 
             let mut game = Game::new();
+            let mut game_vm: Vec<u32> = Vec::new();
             let replay = panic::catch_unwind(AssertUnwindSafe(|| {
-                sgf::replay_into_game(&text, &mut game)
+                sgf::replay_into_game_verbose(&text, &mut game, |g, _| {
+                    game_vm.push(g.valid_moves().len() as u32);
+                })
             }));
             match replay {
                 Ok(Ok(_)) => {}
@@ -508,6 +514,7 @@ fn run_stats(games_path: &str) {
                 }
             }
             replayed_ok += 1;
+            valid_moves_per_turn.extend_from_slice(&game_vm);
 
             // Result
             match game.state.as_str() {
@@ -688,8 +695,11 @@ fn run_stats(games_path: &str) {
         }
 
         let mut game = Game::new();
+        let mut game_vm: Vec<u32> = Vec::new();
         let replay = panic::catch_unwind(AssertUnwindSafe(|| {
-            sgf::replay_into_game(&text, &mut game)
+            sgf::replay_into_game_verbose(&text, &mut game, |g, _| {
+                game_vm.push(g.valid_moves().len() as u32);
+            })
         }));
         match replay {
             Ok(Ok(_)) => {}
@@ -712,6 +722,7 @@ fn run_stats(games_path: &str) {
             }
         }
         replayed_ok += 1;
+        valid_moves_per_turn.extend_from_slice(&game_vm);
 
         match game.state.as_str() {
             "WhiteWins" => white_wins += 1,
@@ -808,6 +819,30 @@ fn run_stats(games_path: &str) {
         println!("  Median: {:8.1}", median);
         println!("  P10:    {:5}", lengths[n/10]);
         println!("  P90:    {:5}", lengths[n*9/10]);
+        println!();
+    }
+
+    if !valid_moves_per_turn.is_empty() {
+        valid_moves_per_turn.sort_unstable();
+        let n = valid_moves_per_turn.len();
+        let sum: u64 = valid_moves_per_turn.iter().map(|&x| x as u64).sum();
+        let avg = sum as f64 / n as f64;
+        let median = if n % 2 == 0 {
+            (valid_moves_per_turn[n/2-1] + valid_moves_per_turn[n/2]) as f64 / 2.0
+        } else { valid_moves_per_turn[n/2] as f64 };
+        let pp = |p: f64| -> u32 {
+            let idx = ((n as f64 - 1.0) * p / 100.0).round() as usize;
+            valid_moves_per_turn[idx.min(n - 1)]
+        };
+        println!("--- Valid Moves per Turn (n={n}) ---");
+        println!("  Min:    {:8}", valid_moves_per_turn[0]);
+        println!("  Max:    {:8}", valid_moves_per_turn[n-1]);
+        println!("  Mean:   {:11.1}", avg);
+        println!("  Median: {:11.1}", median);
+        println!("  P10:    {:8}", pp(10.0));
+        println!("  P25:    {:8}", pp(25.0));
+        println!("  P75:    {:8}", pp(75.0));
+        println!("  P90:    {:8}", pp(90.0));
         println!();
     }
 
@@ -1032,6 +1067,24 @@ fn run_stats(games_path: &str) {
         writeln!(f).ok();
         writeln!(f, "Beetle on losing queen: {} ({:.1}% of decisive)",
             beetle_on_queen_wins, pct(beetle_on_queen_wins, decisive)).ok();
+        writeln!(f).ok();
+        if !valid_moves_per_turn.is_empty() {
+            let n = valid_moves_per_turn.len();
+            let sum: u64 = valid_moves_per_turn.iter().map(|&x| x as u64).sum();
+            let avg = sum as f64 / n as f64;
+            let median = if n % 2 == 0 {
+                (valid_moves_per_turn[n/2-1] + valid_moves_per_turn[n/2]) as f64 / 2.0
+            } else { valid_moves_per_turn[n/2] as f64 };
+            let pp = |p: f64| -> u32 {
+                let idx = ((n as f64 - 1.0) * p / 100.0).round() as usize;
+                valid_moves_per_turn[idx.min(n - 1)]
+            };
+            writeln!(f, "Valid Moves per Turn (n={n}):").ok();
+            writeln!(f, "  Min={}, Max={}, Mean={:.1}, Median={:.1}",
+                valid_moves_per_turn[0], valid_moves_per_turn[n-1], avg, median).ok();
+            writeln!(f, "  P10={}, P25={}, P75={}, P90={}",
+                pp(10.0), pp(25.0), pp(75.0), pp(90.0)).ok();
+        }
         println!("Wrote {}", stats_path.display());
     }
 

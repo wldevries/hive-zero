@@ -4,20 +4,24 @@ Boardspace Hive Game Statistics
 Games: 238756 total, 146115 replayed OK, 92641 skipped (expansion), 0 errors
 
 Results:
-  White wins: 63902 (47.2%)
-  Black wins: 64924 (47.9%)
-  Draws: 6670 (4.9%)
-  In progress: 10619
+  White wins: 61963 (48.9%)
+  Black wins: 62750 (49.5%)
+  Draws: 2008 (1.6%)
+  In progress: 19394
 
 First Player (White) Advantage:
-  White (1st) wins: 63902 (49.6%)
-  Black (2nd) wins: 64924 (50.4%)
+  White (1st) wins: 61963 (49.7%)
+  Black (2nd) wins: 62750 (50.3%)
 
-Game Length (moves): min=0, max=381, mean=42.5, median=39.0
+Game Length (moves): min=0, max=220, mean=41.4, median=38.0
 
 First Bug (White): ["S=53096", "G=44357", "B=24196", "A=18961", "Q=4513"]
 Second Bug (Black): ["S=48480", "G=47472", "B=28829", "A=16732", "Q=3500"]
 
-Pieces on Board at End: min=0, max=22, mean=18.9
+Pieces on Board at End: min=0, max=22, mean=18.8
 
-Beetle on losing queen: 7185 (5.6% of decisive)
+Beetle on losing queen: 6905 (5.5% of decisive)
+
+Valid Moves per Turn (n=6050037):
+  Min=0, Max=175, Mean=44.4, Median=40.0
+  P10=14, P25=23, P75=62, P90=85

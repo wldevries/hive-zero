@@ -198,7 +198,7 @@ pub fn replay_into_game(content: &str, game: &mut Game) -> Result<usize, String>
 pub fn replay_into_game_verbose(
     content: &str,
     game: &mut Game,
-    mut on_move: impl FnMut(&Game, &Move),
+    mut on_move: impl FnMut(&mut Game, &Move),
 ) -> Result<usize, String> {
     replay_into_game_inner(content, game, &mut on_move)
 }
@@ -206,7 +206,7 @@ pub fn replay_into_game_verbose(
 fn replay_into_game_inner(
     content: &str,
     game: &mut Game,
-    on_move: &mut impl FnMut(&Game, &Move),
+    on_move: &mut impl FnMut(&mut Game, &Move),
 ) -> Result<usize, String> {
     let mut origin: Option<(i32, i32)> = None;
     let mut move_count: usize = 0;
