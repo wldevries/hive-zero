@@ -27,7 +27,7 @@ use crate::game::{Game, Move};
 use core_game::game::PolicyIndex;
 
 /// Bilinear embedding dimension for the Q·K movement head.
-pub const BILINEAR_DIM: usize = 8;
+pub const BILINEAR_DIM: usize = 32;
 /// Conceptual "channels" for policy_size = NUM_POLICY_CHANNELS * G * G:
 ///   5 placement + D Q-channels + D K-channels.
 pub const NUM_POLICY_CHANNELS: usize = 5 + 2 * BILINEAR_DIM;

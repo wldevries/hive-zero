@@ -144,10 +144,19 @@ def _game_to_boardspace_sgf(game, game_idx: int, generation: int, model_name: st
 
 def _export_games_to_zip(games, zip_path: str, generation: int, model_name: str) -> int:
     """Write all games as SGF files into a zip archive. Returns number of games written."""
+    _outcome_tag = {
+        "WhiteWins": "white",
+        "BlackWins": "black",
+        "Draw": "draw",
+        "DrawByRepetition": "draw_rep",
+    }
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for i, game in enumerate(games, 1):
             sgf = _game_to_boardspace_sgf(game, i, generation, model_name)
-            zf.writestr(f"gen{generation:05d}_game{i:04d}.sgf", sgf)
+            state = game.state if isinstance(game.state, str) else game.state.value
+            outcome = _outcome_tag.get(state, "unknown")
+            moves = game.move_count
+            zf.writestr(f"gen{generation:05d}_game{i:04d}_{outcome}_{moves}t.sgf", sgf)
     return len(games)
 
 

@@ -17,7 +17,7 @@ MCTS scoring:
 
 from .board_encoder import DEFAULT_GRID_SIZE, GRID_SIZE
 
-BILINEAR_DIM = 8            # D — embedding dimension for Q·K movement head
+BILINEAR_DIM = 32           # D — embedding dimension for Q·K movement head
 NUM_POLICY_CHANNELS = 5 + 2 * BILINEAR_DIM   # = 21
 NUM_PLACE_CHANNELS = 5       # placement head channels
 POLICY_SIZE = NUM_POLICY_CHANNELS * GRID_SIZE * GRID_SIZE  # default 21*23*23 = 11109
