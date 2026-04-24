@@ -172,9 +172,9 @@ class UHPEngine:
                 b = torch.tensor(np.asarray(board_batch)).to(device)
                 r = torch.tensor(np.asarray(reserve_batch)).to(device)
                 with torch.no_grad():
-                    policy_logits, values, _ = model(b, r)
+                    policy_logits, wdl, _ = model(b, r)
                 policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
-                vals = values.cpu().numpy().flatten()
+                vals = (wdl[:, 0] - wdl[:, 2]).cpu().numpy().flatten()
                 return policy.astype(np.float32), vals.astype(np.float32)
 
             move_str = self.game.best_move(eval_fn, simulations=self.simulations)

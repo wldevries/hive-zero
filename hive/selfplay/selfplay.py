@@ -238,9 +238,9 @@ class RustParallelSelfPlay:
             bt = bt.to(device, non_blocking=use_pinned)
             rv = rv.to(device, non_blocking=use_pinned)
             with torch.no_grad():
-                policy_logits, values, _ = model(bt, rv)
+                policy_logits, wdl, _ = model(bt, rv)
             policy = policy_logits.float().cpu().numpy()
-            vals = values.float().cpu().numpy().flatten()
+            vals = (wdl[:, 0] - wdl[:, 2]).float().cpu().numpy()
             return policy.astype(np.float32), vals.astype(np.float32)
 
         return eval_fn

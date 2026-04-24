@@ -29,7 +29,7 @@ class HiveNet(nn.Module):
             k_head:     Conv1x1(C -> D, G, G)  [K embeddings for movement dst]
           Output: flat (batch, (5+2D)*G*G) = [place | Q | K]
           Movement prior: Q[src] · K[dst] / sqrt(D)
-        - Value head: conv(1x1) -> flatten -> FC(256) -> tanh
+        - Value head: conv(1x1) -> flatten -> FC(256) -> softmax(3) [W, D, L]
         - Auxiliary head: conv(1x1) -> flatten -> FC(64) -> sigmoid
           (my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility)
     """
@@ -71,11 +71,11 @@ class HiveNet(nn.Module):
         self.policy_q     = nn.Conv2d(channels, bilinear_dim, 1)        # (B,D,G,G)
         self.policy_k     = nn.Conv2d(channels, bilinear_dim, 1)        # (B,D,G,G)
 
-        # Value head
+        # Value head (KataGo-style WDL: win / draw / loss)
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(1)
         self.value_fc1 = nn.Linear(grid_size * grid_size, 256)
-        self.value_fc2 = nn.Linear(256, 1)
+        self.value_fc2 = nn.Linear(256, 3)
 
         # Auxiliary head (own pathway from trunk)
         # Outputs: [my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility]
@@ -93,7 +93,7 @@ class HiveNet(nn.Module):
 
         Returns:
             policy_logits: (batch, 7*G*G) flat = [place_part | src_part | dst_part]
-            value: (batch, 1) in [-1, 1]
+            wdl: (batch, 3) — softmax probabilities [P(win), P(draw), P(loss)]
             aux: (batch, 6) in [0, 1] — [my_qd, opp_qd, my_qe, opp_qe, my_mob, opp_mob]
         """
         # Broadcast reserve spatially and concat with board tensor
@@ -117,11 +117,11 @@ class HiveNet(nn.Module):
         k     = self.policy_k(p).flatten(1)      # (B, D*G*G)
         policy_logits = torch.cat([place, q, k], dim=1)  # (B, (5+2D)*G*G)
 
-        # Value head
+        # Value head: WDL distribution (win / draw / loss)
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.flatten(1)
         v = F.relu(self.value_fc1(v))
-        value = torch.tanh(self.value_fc2(v))
+        wdl = F.softmax(self.value_fc2(v), dim=1)  # (batch, 3): [W, D, L]
 
         # Auxiliary head (own pathway from trunk)
         qd = F.relu(self.qd_bn(self.qd_conv(x)))
@@ -129,7 +129,7 @@ class HiveNet(nn.Module):
         qd = F.relu(self.qd_fc1(qd))
         aux = torch.sigmoid(self.qd_fc2(qd))
 
-        return policy_logits, value, aux
+        return policy_logits, wdl, aux
 
 
 def create_model(num_blocks: int = 10, channels: int = 128,
@@ -158,11 +158,28 @@ def save_checkpoint(model: HiveNet, path: str, generation: int = 0,
     torch.save(checkpoint, path)
 
 
+class _OnnxExportWrapper(nn.Module):
+    """Wraps HiveNet for ONNX export, collapsing WDL to a W-L scalar value.
+
+    The Rust ORT engine expects `value` as (B, 1) — W minus L from the WDL
+    head. This wrapper computes that reduction so the ONNX graph is self-
+    contained and the Rust side needs no changes.
+    """
+    def __init__(self, model: "HiveNet"):
+        super().__init__()
+        self.model = model
+
+    def forward(self, board: torch.Tensor, reserve: torch.Tensor):
+        policy, wdl, aux = self.model(board, reserve)
+        value = wdl[:, 0:1] - wdl[:, 2:3]  # (B, 1) W - L
+        return policy, value, aux
+
+
 def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
     """Export model to ONNX format for Rust-native inference via ort.
 
     Inputs: board_tensor (B, 39, G, G), reserve (B, 10)
-    Outputs: policy (B, 11*G*G), value (B, 1), aux (B, 6)
+    Outputs: policy (B, 11*G*G), value (B, 1) W-L scalar, aux (B, 6)
 
     If batch_size is given the batch dimension is baked in as a static value,
     which lets QNN/HTP compile the graph once at session creation rather than
@@ -176,6 +193,7 @@ def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
     b = batch_size or 1
     dummy_board = torch.zeros(b, NUM_CHANNELS, g, g, device=device)
     dummy_reserve = torch.zeros(b, RESERVE_SIZE, device=device)
+    wrapper = _OnnxExportWrapper(model).eval()
     input_names = ["board", "reserve"]
     output_names = ["policy", "value", "aux"]
     import logging
@@ -184,7 +202,7 @@ def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
     _onnx_logger.setLevel(logging.WARNING)
     dynamic_shapes = None if batch_size else ({0: "batch"}, {0: "batch"})
     torch.onnx.export(
-        model,
+        wrapper,
         (dummy_board, dummy_reserve),
         path,
         input_names=input_names,

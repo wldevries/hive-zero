@@ -25,6 +25,14 @@ from shared.replay_buffer import handle_buffer_size_mismatch
 MAX_PLACEMENTS = 128
 MAX_MOVE_PAIRS = 256
 
+
+def _scalar_to_wdl(v: torch.Tensor) -> torch.Tensor:
+    """Convert scalar value targets in [-1, 1] to (W, D, L) soft targets summing to 1."""
+    w = v.clamp(min=0)
+    l = (-v).clamp(min=0)
+    d = 1.0 - w - l
+    return torch.stack([w, d, l], dim=1)
+
 # ---------------------------------------------------------------------------
 # Hex D6 symmetry: lazy-loaded per grid_size.
 # ---------------------------------------------------------------------------
@@ -411,7 +419,7 @@ class Trainer:
             aux_target = aux_target.to(device)
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                policy_logits, value, aux = self.model(board, reserve)
+                policy_logits, wdl, aux = self.model(board, reserve)
 
             B = board.size(0)
             gs = board.size(-1)
@@ -453,8 +461,10 @@ class Trainer:
             policy_weight = (~vo_mask).float()
             policy_loss = (per_sample_policy * policy_weight).mean()
 
-            # Value loss: MSE, masked for policy-only samples.
-            per_sample_value = (value.squeeze(1) - value_target.squeeze(1)) ** 2
+            # Value loss: cross-entropy on WDL soft targets, masked for policy-only samples.
+            wdl_target = _scalar_to_wdl(value_target.squeeze(1))  # (B, 3)
+            log_wdl = torch.log(wdl.float().clamp(min=1e-7))
+            per_sample_value = -(wdl_target * log_wdl).sum(dim=1)
             value_weight = (~po_mask).float()
             value_loss = (per_sample_value * value_weight).mean()
 

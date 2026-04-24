@@ -38,9 +38,9 @@ def _make_eval_fn(model, device):
         rv = rv.to(device, non_blocking=use_pinned)
         with torch.no_grad():
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                policy_logits, values, _ = model(bt, rv)
+                policy_logits, wdl, _ = model(bt, rv)
         policy = policy_logits.float().cpu().numpy().astype(np.float32)
-        vals = values.float().cpu().numpy().flatten().astype(np.float32)
+        vals = (wdl[:, 0] - wdl[:, 2]).float().cpu().numpy().flatten().astype(np.float32)
         return policy, vals
 
     return eval_fn
