@@ -308,6 +308,13 @@ def main():
         default=None,
         help="Directory for HDF5 replay buffer (default: same directory as --model)",
     )
+    train_parser.add_argument(
+        "--no-export-sgf",
+        dest="export_sgf",
+        action="store_false",
+        help="Disable per-generation SGF zip export (default: enabled)",
+    )
+    train_parser.set_defaults(export_sgf=True)
 
     # Supervised pre-training
     pretrain_parser = subparsers.add_parser(
@@ -647,6 +654,7 @@ def main():
             aux_loss_scale=args.aux_loss_scale,
             use_heuristic=args.use_heuristic,
             buf_dir=args.buf_dir,
+            export_sgf=args.export_sgf,
         )
     else:
         # Default: UHP engine

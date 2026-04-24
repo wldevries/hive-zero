@@ -341,6 +341,12 @@ impl PyGame {
         hive_game::uhp::parse_and_play_uhp(&mut self.game, move_str)
     }
 
+    /// Recentering shift (dq, dr) applied to all pieces by the last move.
+    /// Accumulate these to convert current-frame axial coords back to SGF-frame coords.
+    fn last_recenter_shift(&self) -> (i8, i8) {
+        self.game.last_recenter_shift()
+    }
+
     /// Run MCTS for `simulations` sims and return the best move as a UHP string.
     /// eval_fn(board_4d[N, C, H, W], reserve[N, R]) -> (policy[N, P], value[N])
     #[pyo3(signature = (eval_fn, simulations=800, c_puct=1.5))]

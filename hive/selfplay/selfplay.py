@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+import zipfile
 from typing import Optional
 
 import numpy as np
@@ -38,6 +39,116 @@ _cc = lambda v: _c(v, colorama.Fore.CYAN)  # scores / percentages
 
 from ..nn.model import create_model, export_onnx, load_checkpoint, save_checkpoint
 from ..nn.training import HiveDataset, Trainer
+
+
+_BS_ORIGIN_COL = 13  # 'N'
+_BS_ORIGIN_ROW = 13
+
+
+def _axial_to_boardspace(q: int, r: int) -> tuple[str, str]:
+    """Convert axial hex coords to Boardspace column-letter + row-number."""
+    col = q + _BS_ORIGIN_COL
+    row = -r + _BS_ORIGIN_ROW
+    if col < 0:
+        col_str = f"{-col}A"
+    elif col > 25:
+        col_str = f"{col - 25}Z"
+    else:
+        col_str = chr(ord("A") + col)
+    return col_str, str(row)
+
+
+def _game_to_boardspace_sgf(game, game_idx: int, generation: int, model_name: str) -> str:
+    """Convert a PyGame to Boardspace-compatible SGF (GM[27], P0/P1 actions, grid coords)."""
+    import datetime
+
+    from engine_zero import HiveGame
+
+    gs = game.game_string
+    parts = gs.split(";")
+    state = parts[1] if len(parts) > 1 else "Unknown"
+    moves = parts[3:] if len(parts) > 3 else []
+
+    re_map = {
+        "WhiteWins": "Game won by White",
+        "BlackWins": "Game won by Black",
+        "Draw": "The game is a draw",
+        "DrawByRepetition": "The game is a draw",
+    }
+    re_str = re_map.get(state, "?")
+
+    dt_str = datetime.datetime.now().strftime("%a %b %d %H:%M:%S UTC %Y")
+    gn = f"HV-White-Black-gen{generation:05d}-{game_idx:04d}"
+
+    lines = [
+        " (;",
+        "GM[27]VV[1]",
+        "CM[0,1]",
+        "TC[None]",
+        "SU[hive 2 0 101]",
+        f"DT[{dt_str}]",
+        f"GN[{gn}]",
+        f"RE[{re_str}]",
+        'P0[id "White"]',
+        'P1[id "Black"]',
+        "; P0[0 Start P0]",
+    ]
+
+    g = HiveGame()
+    action_num = 1
+    cum_q, cum_r = 0, 0  # cumulative recentering offset
+
+    for move_idx, uhp_move in enumerate(moves):
+        uhp_move = uhp_move.strip()
+        player_idx = move_idx % 2
+        p = f"P{player_idx}"
+        color = "W" if player_idx == 0 else "B"
+
+        if uhp_move.lower() == "pass":
+            lines.append(f"; {p}[{action_num} Pass ]TM[0]")
+            action_num += 1
+            lines.append(f"; {p}[{action_num} Done ]TM[0]")
+            action_num += 1
+            g.play_move_uhp("pass")
+            dq, dr = g.last_recenter_shift()
+            cum_q += dq
+            cum_r += dr
+            continue
+
+        piece_str = uhp_move.split()[0]
+        if not g.play_move_uhp(uhp_move):
+            continue
+
+        dq, dr = g.last_recenter_shift()
+        cum_q += dq
+        cum_r += dr
+
+        top = {ps: pos for pos, ps in g.all_top_pieces()}
+        dest = top.get(piece_str, (0, 0))
+        # Subtract cumulative offset to get back to SGF-frame coords
+        sgf_q = dest[0] - cum_q
+        sgf_r = dest[1] - cum_r
+        col_str, row_str = _axial_to_boardspace(sgf_q, sgf_r)
+
+        lines.append(f"; {p}[{action_num} Move {color} {piece_str} {col_str} {row_str} .]TM[0]")
+        action_num += 1
+        lines.append(f"; {p}[{action_num} Done ]TM[0]")
+        action_num += 1
+
+    lines.append(";")
+    lines.append("P0[time 0:00:00 ]")
+    lines.append("P1[time 0:00:00 ]")
+    lines.append(")")
+    return "\n".join(lines)
+
+
+def _export_games_to_zip(games, zip_path: str, generation: int, model_name: str) -> int:
+    """Write all games as SGF files into a zip archive. Returns number of games written."""
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for i, game in enumerate(games, 1):
+            sgf = _game_to_boardspace_sgf(game, i, generation, model_name)
+            zf.writestr(f"gen{generation:05d}_game{i:04d}.sgf", sgf)
+    return len(games)
 
 
 class RustParallelSelfPlay:
@@ -300,6 +411,7 @@ class SelfPlayTrainer:
         value_loss_scale: float = 1.0,
         aux_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
+        export_sgf: bool = True,
     ):
         """Run the full training loop.
 
@@ -691,6 +803,14 @@ class SelfPlayTrainer:
                     board_strs.append(g.render_board())
                 rendered = _render_boards_horizontally(board_strs, labels=labels)
                 print("\n".join("    " + line for line in rendered.split("\n")))
+
+            # Export games to SGF zip
+            if export_sgf:
+                sgf_dir = os.path.join(self.model_dir, "selfplay_sgf")
+                os.makedirs(sgf_dir, exist_ok=True)
+                zip_path = os.path.join(sgf_dir, f"gen{generation:05d}.zip")
+                n = _export_games_to_zip(finished_games_all, zip_path, generation, self.model_name)
+                print(f"  SGF export: {n} games → {zip_path}")
 
             # Train on replay buffer
             train_start = time.time()
