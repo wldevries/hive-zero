@@ -192,23 +192,20 @@ def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
     dummy_board = torch.zeros(b, NUM_CHANNELS, g, g, device=device)
     dummy_reserve = torch.zeros(b, RESERVE_SIZE, device=device)
     wrapper = _OnnxExportWrapper(model).eval()
-    import logging
-    _onnx_logger = logging.getLogger("onnxscript")
-    _prev_level = _onnx_logger.level
-    _onnx_logger.setLevel(logging.WARNING)
-    dynamic_shapes = None if batch_size else ({0: "batch"}, {0: "batch"})
+    dynamic_axes = None if batch_size else {
+        "board": {0: "batch"}, "reserve": {0: "batch"},
+        "policy": {0: "batch"}, "value": {0: "batch"}, "aux": {0: "batch"},
+    }
     torch.onnx.export(
         wrapper,
         (dummy_board, dummy_reserve),
         path,
         input_names=["board", "reserve"],
         output_names=["policy", "value", "aux"],
-        dynamic_shapes=dynamic_shapes,
-        dynamo=True,
-        verbose=False,
-        opset_version=21,
+        dynamic_axes=dynamic_axes,
+        opset_version=17,
+        dynamo=False,
     )
-    _onnx_logger.setLevel(_prev_level)
     if was_training:
         model.train()
     size_mb = os.path.getsize(path) / (1024 * 1024)
