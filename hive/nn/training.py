@@ -98,7 +98,7 @@ class HiveDataset(Dataset):
                     )
                 self._count = int(self._h5file.attrs["count"])
                 self._size = int(self._h5file.attrs["size"])
-                print(f"  Replay buffer resumed: {self._size} samples from {h5path}")
+                print(f"  Replay buffer resumed: {self._size}/{max_size} samples from {h5path}")
             else:
                 self._count = 0
                 self._size = 0
@@ -270,6 +270,10 @@ class HiveDataset(Dataset):
 
     def __len__(self):
         return self._size * 12 if self.augment_symmetry else self._size
+
+    @property
+    def raw_size(self) -> int:
+        return self._size
 
     def __getitem__(self, idx):
         if self.augment_symmetry:

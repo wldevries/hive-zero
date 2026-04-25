@@ -779,7 +779,7 @@ class SelfPlayTrainer:
                 f"  {games_per_gen} games: {total_positions} new positions{fast_str} "
                 f"(play={play_time:.1f}s, buf={buf_time:.1f}s, "
                 f"{total_positions / max(game_time, 0.1):.0f} pos/s), "
-                f"buffer: {len(replay_buffer)}"
+                f"buffer: {replay_buffer.raw_size}/{replay_buffer.max_size}"
             )
 
             # Show boards of decisive games
@@ -853,7 +853,7 @@ class SelfPlayTrainer:
                 f.write(
                     f"{generation},MCTS,{simulations},"
                     f"{wins_w},{wins_b},{draws_total},{resignations},{total_positions},"
-                    f"{len(replay_buffer)},{losses['total_loss']:.6f},"
+                    f"{replay_buffer.raw_size},{losses['total_loss']:.6f},"
                     f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
                     f"{losses.get('qd_loss', 0):.6f},"
                     f"{lr:.8f},{play_time + train_time:.1f},{csv_comment(self._comment)},"
@@ -1125,7 +1125,7 @@ class SelfPlayTrainer:
             with open(self._log_path, "a") as f:
                 f.write(
                     f"{generation},eval,{eval_config['simulations']},{w},{l},{d},0,0,"
-                    f"{len(replay_buffer) if replay_buffer else 0},"
+                    f"{replay_buffer.raw_size if replay_buffer else 0},"
                     f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n"
                 )
         except Exception as e:
