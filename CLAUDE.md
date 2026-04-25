@@ -87,7 +87,7 @@ rust/crates/
   - `--opening-book PATH`: use boardspace game openings, with `--boardspace-frac` controlling the mix vs random openings
 - **Resignation**: `--resign-threshold` (default -0.97) with `--resign-min-moves` safety. Calibration games (10%) play to completion to measure false positive rate.
 - **Skip timeout games**: `--skip-timeout-games` discards all training data from games that hit the move cap
-- **RustSelfPlaySession**: full simulation loop in Rust with a single Python GPU callback (or ORT) per inference batch. Inference is the bottleneck; MCTS ops (init, expand_and_backprop) use rayon across games but are negligible relative to GPU time.
+- **RustSelfPlaySession**: full simulation loop in Rust with a single Python GPU callback (or ORT) per inference batch. Inference is the bottleneck; MCTS ops (init, expand_and_backprop) are negligible relative to GPU time.
 
 ### Known issue: self-play draw convergence (Hive only)
 From-scratch Hive self-play converges to draws within a few iterations. The network can't learn to win
@@ -176,7 +176,6 @@ a correct install lists `CUDAExecutionProvider`.
 - PyTorch (CUDA 12.8)
 - numpy
 - Rust toolchain + maturin (for building the native extension)
-- rayon (Rust, for parallel MCTS)
 
 ## UHP Commands
 `info`, `newgame`, `play`, `validmoves`, `bestmove`, `undo`, `options`, `pass`

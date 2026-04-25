@@ -16,5 +16,4 @@ yinsh-game = { path = "../yinsh-game" }
 pyo3 = { version = "0.28.3", features = ["extension-module"] }
 numpy = "0.28.0"
 rand = { workspace = true }
-rayon = "1.10"
 ort = { version = "2.0.0-rc.12", features = ["load-dynamic", "cuda", "qnn", "api-22"] }
