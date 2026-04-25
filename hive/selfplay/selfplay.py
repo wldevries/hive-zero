@@ -18,7 +18,8 @@ from ..encoding.move_encoder import policy_size as compute_policy_size
 LOG_HEADER = (
     "iter,mode,simulations,wins_w,wins_b,draws,resignations,positions,buffer,"
     "loss,policy_loss,value_loss,qd_loss,lr,duration_s,comment,qe_loss,mob_loss,"
-    "avg_game_len,med_game_len,avg_decisive_len,med_decisive_len\n"
+    "avg_game_len,med_game_len,avg_decisive_len,med_decisive_len,"
+    "mcts_top1_mean,mcts_top1_std,mcts_depth_mean,mcts_depth_std,mcts_moves_mean,mcts_moves_std\n"
 )
 
 import colorama
@@ -858,7 +859,10 @@ class SelfPlayTrainer:
                     f"{losses.get('qd_loss', 0):.6f},"
                     f"{lr:.8f},{play_time + train_time:.1f},{csv_comment(self._comment)},"
                     f"{losses.get('qe_loss', 0):.6f},{losses.get('mob_loss', 0):.6f},"
-                    f"{avg_gl:.1f},{med_gl},{avg_dl:.1f},{med_dl}\n"
+                    f"{avg_gl:.1f},{med_gl},{avg_dl:.1f},{med_dl},"
+                    f"{ss.top1_mean:.4f},{ss.top1_std:.4f},"
+                    f"{ss.depth_mean:.2f},{ss.depth_std:.2f},"
+                    f"{ss.valid_moves_mean:.1f},{ss.valid_moves_std:.1f}\n"
                 )
             self._comment = ""
 
