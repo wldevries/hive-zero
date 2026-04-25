@@ -302,6 +302,7 @@ class Trainer:
             momentum=0.9,
             weight_decay=weight_decay,
         )
+        self._compiled = torch.compile(self.model, dynamic=True)
 
     @property
     def _current_lr(self) -> float:
@@ -332,7 +333,7 @@ class Trainer:
             value_only_mask = value_only_mask.to(self.device)
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                policy_logits, value = self.model(board, reserve)
+                policy_logits, value = self._compiled(board, reserve)
 
             # Policy loss: skip value-only (fast-cap) turns.
             policy_active = ~value_only_mask

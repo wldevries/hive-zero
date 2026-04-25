@@ -377,6 +377,7 @@ class Trainer:
             self.model.parameters(), lr=lr,
             momentum=0.9, weight_decay=weight_decay,
         )
+        self._compiled = torch.compile(self.model, dynamic=True)
 
     @property
     def _current_lr(self) -> float:
@@ -419,7 +420,7 @@ class Trainer:
             aux_target = aux_target.to(device)
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                policy_logits, wdl, aux = self.model(board, reserve)
+                policy_logits, wdl, aux = self._compiled(board, reserve)
 
             B = board.size(0)
             gs = board.size(-1)

@@ -257,6 +257,7 @@ class Trainer:
             self.model.parameters(), lr=lr,
             momentum=0.9, weight_decay=weight_decay,
         )
+        self._compiled = torch.compile(self.model, dynamic=True)
 
     @property
     def _current_lr(self) -> float:
@@ -292,7 +293,7 @@ class Trainer:
             mid_cap_mask = mid_cap_mask.to(self.device)  # kept for value logging split
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                place_logits, cap_dir_logits, value = self.model(board, reserve)
+                place_logits, cap_dir_logits, value = self._compiled(board, reserve)
 
             # Convert flat policy to per-head targets
             place_cp_t, place_rm_t, cap_dir_t = _marginalize_policy(policy_target)
