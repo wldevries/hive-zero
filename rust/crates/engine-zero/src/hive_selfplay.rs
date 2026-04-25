@@ -190,6 +190,8 @@ fn into_py_selfplay_result(result: search::SelfPlayResult) -> PySelfPlayResult {
             top1_std: result.top1_visit_fraction_std,
             depth_mean: result.search_depth_mean,
             depth_std: result.search_depth_std,
+            valid_moves_mean: result.valid_moves_mean,
+            valid_moves_std: result.valid_moves_std,
         },
     }
 }
@@ -214,6 +216,10 @@ pub struct PySearchStats {
     pub depth_mean: f32,
     #[pyo3(get)]
     pub depth_std: f32,
+    #[pyo3(get)]
+    pub valid_moves_mean: f32,
+    #[pyo3(get)]
+    pub valid_moves_std: f32,
 }
 
 #[pyclass(name = "SelfPlayResult")]

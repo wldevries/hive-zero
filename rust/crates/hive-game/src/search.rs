@@ -67,6 +67,8 @@ pub struct SelfPlayResult {
     pub top1_visit_fraction_std: f32,
     pub search_depth_mean: f32,
     pub search_depth_std: f32,
+    pub valid_moves_mean: f32,
+    pub valid_moves_std: f32,
 }
 
 struct TurnRecord {
@@ -265,6 +267,9 @@ pub fn play_selfplay_core(
     let mut session_depth_sum = 0.0f64;
     let mut session_depth_sum_sq = 0.0f64;
     let mut session_depth_count = 0u64;
+    let mut session_moves_sum = 0.0f64;
+    let mut session_moves_sum_sq = 0.0f64;
+    let mut session_moves_count = 0u64;
     // True once reroot has been called for a game; the arena is warm and no root
     // inference is needed.  Reset to false when a game ends or plays a pass.
     let mut search_warm = vec![false; num_games];
@@ -497,6 +502,10 @@ pub fn play_selfplay_core(
                 session_depth_sum += ds;
                 session_depth_sum_sq += dss;
                 session_depth_count += dc;
+                let moves = searches[game_index].root_child_count() as f64;
+                session_moves_sum += moves;
+                session_moves_sum_sq += moves * moves;
+                session_moves_count += 1;
             }
 
             if let Some(threshold) = resign_threshold {
@@ -847,6 +856,8 @@ pub fn play_selfplay_core(
         mean_std(session_top1_sum, session_top1_sum_sq, session_top1_count);
     let (search_depth_mean, search_depth_std) =
         mean_std(session_depth_sum, session_depth_sum_sq, session_depth_count);
+    let (valid_moves_mean, valid_moves_std) =
+        mean_std(session_moves_sum, session_moves_sum_sq, session_moves_count);
 
     Ok(SelfPlayResult {
         grid_size,
@@ -887,6 +898,8 @@ pub fn play_selfplay_core(
         top1_visit_fraction_std,
         search_depth_mean,
         search_depth_std,
+        valid_moves_mean,
+        valid_moves_std,
     })
 }
 

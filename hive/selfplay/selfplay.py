@@ -767,7 +767,8 @@ class SelfPlayTrainer:
             ss = result.search_stats
             print(
                 f"  MCTS: top-1 {ss.top1_mean:.2f}±{ss.top1_std:.2f}  "
-                f"depth {ss.depth_mean:.1f}±{ss.depth_std:.1f}"
+                f"depth {ss.depth_mean:.1f}±{ss.depth_std:.1f}  "
+                f"moves {ss.valid_moves_mean:.1f}±{ss.valid_moves_std:.1f}"
             )
             if result.calibration_would_resign > 0:
                 print(
