@@ -63,6 +63,10 @@ pub struct SelfPlayResult {
     pub calibration_false_positives: u32,
     pub use_playout_cap: bool,
     pub final_games: Vec<Game>,
+    pub top1_visit_fraction_mean: f32,
+    pub top1_visit_fraction_std: f32,
+    pub search_depth_mean: f32,
+    pub search_depth_std: f32,
 }
 
 struct TurnRecord {
@@ -153,6 +157,14 @@ pub fn best_move_core(
         .map(|(mv, _)| mv)
         .unwrap_or_else(Move::pass);
     Ok(best)
+}
+
+fn mean_std(sum: f64, sum_sq: f64, count: u64) -> (f32, f32) {
+    if count == 0 { return (0.0, 0.0); }
+    let n = count as f64;
+    let mean = sum / n;
+    let var = (sum_sq / n) - mean * mean;
+    (mean as f32, var.max(0.0).sqrt() as f32)
 }
 
 pub fn play_selfplay_core(
@@ -247,6 +259,12 @@ pub fn play_selfplay_core(
 
     let mut full_search_turns = 0u32;
     let mut total_turns = 0u32;
+    let mut session_top1_sum = 0.0f64;
+    let mut session_top1_sum_sq = 0.0f64;
+    let mut session_top1_count = 0u64;
+    let mut session_depth_sum = 0.0f64;
+    let mut session_depth_sum_sq = 0.0f64;
+    let mut session_depth_count = 0u64;
     // True once reroot has been called for a game; the arena is warm and no root
     // inference is needed.  Reset to false when a game ends or plays a pass.
     let mut search_warm = vec![false; num_games];
@@ -468,6 +486,17 @@ pub fn play_selfplay_core(
         for (index, &game_index) in mcts_games.iter().enumerate() {
             if child_counts[index] == 0 {
                 continue;
+            }
+
+            let (ds, dss, dc) = searches[game_index].take_depth_stats();
+            if is_full[index] {
+                let top1 = searches[game_index].root_top1_visit_fraction() as f64;
+                session_top1_sum += top1;
+                session_top1_sum_sq += top1 * top1;
+                session_top1_count += 1;
+                session_depth_sum += ds;
+                session_depth_sum_sq += dss;
+                session_depth_count += dc;
             }
 
             if let Some(threshold) = resign_threshold {
@@ -814,6 +843,11 @@ pub fn play_selfplay_core(
         }
     }
 
+    let (top1_visit_fraction_mean, top1_visit_fraction_std) =
+        mean_std(session_top1_sum, session_top1_sum_sq, session_top1_count);
+    let (search_depth_mean, search_depth_std) =
+        mean_std(session_depth_sum, session_depth_sum_sq, session_depth_count);
+
     Ok(SelfPlayResult {
         grid_size,
         board_data: result_board_data,
@@ -849,6 +883,10 @@ pub fn play_selfplay_core(
         calibration_false_positives,
         use_playout_cap,
         final_games: games,
+        top1_visit_fraction_mean,
+        top1_visit_fraction_std,
+        search_depth_mean,
+        search_depth_std,
     })
 }
 

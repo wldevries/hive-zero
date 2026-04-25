@@ -139,14 +139,16 @@ fn best_child<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params: &SearchPar
 /// Select a leaf node by traversing the tree.
 /// If forced_playouts is true, at the root level, children with fewer visits
 /// than their forced minimum get infinite urgency (KataGo forced playouts).
-fn select_leaf<M: Copy>(arena: &NodeArena<M>, root: NodeId, params: &SearchParams) -> NodeId {
+/// Returns (leaf_node_id, depth) where depth is the number of edges from root.
+fn select_leaf<M: Copy>(arena: &NodeArena<M>, root: NodeId, params: &SearchParams) -> (NodeId, u32) {
     let eps = dir_epsilon(params);
     let mut node_id = root;
+    let mut depth = 0u32;
     let mut is_root = true;
     loop {
         let node = arena.get(node_id);
         if !node.is_expanded || node.first_child.is_none() {
-            return node_id;
+            return (node_id, depth);
         }
         if is_root {
             node_id = match params.forced_exploration {
@@ -156,6 +158,7 @@ fn select_leaf<M: Copy>(arena: &NodeArena<M>, root: NodeId, params: &SearchParam
         } else {
             node_id = best_child(arena, node_id, params, eps);
         }
+        depth += 1;
         is_root = false;
     }
 }
@@ -386,6 +389,10 @@ pub struct MctsSearch<G: GameEngine> {
     stashed_leaves: Vec<(NodeId, G)>,
     /// Whether to use forced playouts at the root (KataGo-style).
     pub params: SearchParams,
+    /// Running depth stats across simulations since last take_depth_stats call.
+    depth_sum: f64,
+    depth_sum_sq: f64,
+    depth_count: u64,
 }
 
 impl<G: GameEngine> MctsSearch<G> {
@@ -396,6 +403,9 @@ impl<G: GameEngine> MctsSearch<G> {
             root_game: None,
             stashed_leaves: Vec::new(),
             params: SearchParams::default(),
+            depth_sum: 0.0,
+            depth_sum_sq: 0.0,
+            depth_count: 0,
         }
     }
 
@@ -408,6 +418,9 @@ impl<G: GameEngine> MctsSearch<G> {
         self.root = root;
         let mut game_copy = game.clone();
         expand_with_policy::<G>(&mut self.arena, root, &mut game_copy, policy, self.params.max_children);
+        self.depth_sum = 0.0;
+        self.depth_sum_sq = 0.0;
+        self.depth_count = 0;
     }
 
     /// Reconstruct the game state at a given node by replaying moves from root.
@@ -437,7 +450,11 @@ impl<G: GameEngine> MctsSearch<G> {
         let mut leaf_ids = Vec::new();
 
         for _ in 0..batch_size {
-            let leaf = select_leaf(&self.arena, self.root, &self.params);
+            let (leaf, depth) = select_leaf(&self.arena, self.root, &self.params);
+            let d = depth as f64;
+            self.depth_sum += d;
+            self.depth_sum_sq += d * d;
+            self.depth_count += 1;
 
             // Reconstruct game state at the leaf
             let game = self.reconstruct_game(leaf);
@@ -749,6 +766,35 @@ impl<G: GameEngine> MctsSearch<G> {
     /// Total visit count at the root.
     pub fn root_visit_count(&self) -> u32 {
         self.arena.get(self.root).visit_count
+    }
+
+    /// Fraction of root child visits held by the single most-visited child.
+    /// Returns 0.0 if no children have been visited yet.
+    pub fn root_top1_visit_fraction(&self) -> f32 {
+        let root = self.arena.get(self.root);
+        let mut max_visits = 0u32;
+        let mut total_visits = 0u32;
+        let mut child_id = root.first_child;
+        while let Some(cid) = child_id {
+            let child = self.arena.get(cid);
+            if child.visit_count > max_visits {
+                max_visits = child.visit_count;
+            }
+            total_visits += child.visit_count;
+            child_id = child.next_sibling;
+        }
+        if total_visits == 0 { return 0.0; }
+        max_visits as f32 / total_visits as f32
+    }
+
+    /// Return accumulated depth stats (sum, sum_sq, count) and reset the accumulators.
+    /// depth is the number of edges from root to the simulation leaf.
+    pub fn take_depth_stats(&mut self) -> (f64, f64, u64) {
+        let result = (self.depth_sum, self.depth_sum_sq, self.depth_count);
+        self.depth_sum = 0.0;
+        self.depth_sum_sq = 0.0;
+        self.depth_count = 0;
+        result
     }
 
     /// Mean value estimate at the root, from the root player's own perspective.

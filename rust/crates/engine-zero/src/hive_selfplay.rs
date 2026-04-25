@@ -185,6 +185,12 @@ fn into_py_selfplay_result(result: search::SelfPlayResult) -> PySelfPlayResult {
         calibration_false_positives: result.calibration_false_positives,
         use_playout_cap: result.use_playout_cap,
         final_games: result.final_games,
+        search_stats: PySearchStats {
+            top1_mean: result.top1_visit_fraction_mean,
+            top1_std: result.top1_visit_fraction_std,
+            depth_mean: result.search_depth_mean,
+            depth_std: result.search_depth_std,
+        },
     }
 }
 
@@ -195,6 +201,19 @@ fn into_py_battle_result(result: search::BattleResult) -> PyHiveBattleResult {
         draws: result.draws,
         game_lengths: result.game_lengths,
     }
+}
+
+#[pyclass(name = "SearchStats")]
+#[derive(Clone)]
+pub struct PySearchStats {
+    #[pyo3(get)]
+    pub top1_mean: f32,
+    #[pyo3(get)]
+    pub top1_std: f32,
+    #[pyo3(get)]
+    pub depth_mean: f32,
+    #[pyo3(get)]
+    pub depth_std: f32,
 }
 
 #[pyclass(name = "SelfPlayResult")]
@@ -233,6 +252,7 @@ pub struct PySelfPlayResult {
     calibration_false_positives: u32,
     use_playout_cap: bool,
     final_games: Vec<Game>,
+    search_stats: PySearchStats,
 }
 
 #[pymethods]
@@ -369,6 +389,10 @@ impl PySelfPlayResult {
     fn calibration_would_resign(&self) -> u32 { self.calibration_would_resign }
     #[getter]
     fn calibration_false_positives(&self) -> u32 { self.calibration_false_positives }
+    #[getter]
+    fn search_stats(&self) -> PySearchStats {
+        self.search_stats.clone()
+    }
 
     fn final_games(&self) -> Vec<crate::hive_python::PyGame> {
         self.final_games
@@ -639,6 +663,7 @@ impl PyHiveBattleResult {
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySelfPlaySession>()?;
     m.add_class::<PySelfPlayResult>()?;
+    m.add_class::<PySearchStats>()?;
     m.add_class::<PyHiveBattleResult>()?;
     Ok(())
 }
