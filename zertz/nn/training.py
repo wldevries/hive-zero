@@ -266,7 +266,8 @@ class Trainer:
     def train_epoch(self, dataset: ZertzDataset, batch_size: int = 256, value_loss_scale: float = 1.0) -> dict:
         """Train one epoch with factorized policy heads. Returns loss dict."""
         self.model.train()
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        drop = self.device.type == "cuda"
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=drop)
 
         total_policy_loss = 0.0
         total_value_loss = 0.0

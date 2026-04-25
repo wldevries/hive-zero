@@ -315,7 +315,8 @@ class Trainer:
         value_loss_scale: float = 1.0,
     ) -> dict:
         self.model.train()
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        drop = self.device.type == "cuda"
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=drop)
 
         total_policy_loss = 0.0
         total_value_loss = 0.0
