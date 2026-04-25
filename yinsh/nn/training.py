@@ -302,7 +302,7 @@ class Trainer:
             momentum=0.9,
             weight_decay=weight_decay,
         )
-        self._compiled = torch.compile(self.model, dynamic=True)
+        self._compiled = torch.compile(self.model, dynamic=True) if self.device.type == "cuda" else self.model
 
     @property
     def _current_lr(self) -> float:
