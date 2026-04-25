@@ -6,37 +6,50 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from shared.nn.attention import SpatialAttention
+from shared.nn.gpba import GlobalPoolBias
 from shared.nn.resblock import ResBlock
 from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
 from ..encoding.move_encoder import NUM_POLICY_CHANNELS, NUM_PLACE_CHANNELS, BILINEAR_DIM
 
 
+def _describe_trunk(trunk_spec: list[dict]) -> str:
+    """Human-readable trunk summary, e.g. '5×res → gpba → 5×res → gpba → attn'."""
+    parts = []
+    for spec in trunk_spec:
+        t = spec["type"]
+        c = spec.get("count", 1)
+        parts.append(f"{c}x{t}" if c > 1 else t)
+    return " -> ".join(parts)
+
+
 class HiveNet(nn.Module):
-    """AlphaZero-style network with bilinear Q·K policy, value, and auxiliary heads.
+    """AlphaZero-style network with configurable trunk, bilinear Q·K policy, value, and auxiliary heads.
 
-    Reserve vector is broadcast spatially and concatenated with the board
-    tensor before the trunk, so the trunk sees both board state and global
-    context (reserves) through all residual blocks.
+    The trunk is a sequence of named layer types controlled by trunk_spec:
+        "res"  — ResBlock (standard 2-conv residual)
+        "gpba" — GlobalPoolBias (KataGo-style global context injection)
+        "attn" — SpatialAttention (multi-head self-attention with adaLN-Zero)
 
-    Architecture:
-        - Broadcast reserve + concat with board tensor
-        - Input convolution
-        - Residual tower (num_blocks blocks)
-        - Self-attention layers (global relationship reasoning)
-        - Policy heads (concatenated into flat vector):
-            place_head: Conv1x1(C -> 5, G, G)  [placement: piece_type x dest]
-            q_head:     Conv1x1(C -> D, G, G)  [Q embeddings for movement src]
-            k_head:     Conv1x1(C -> D, G, G)  [K embeddings for movement dst]
-          Output: flat (batch, (5+2D)*G*G) = [place | Q | K]
-          Movement prior: Q[src] · K[dst] / sqrt(D)
-        - Value head: conv(1x1) -> flatten -> FC(256) -> softmax(3) [W, D, L]
-        - Auxiliary head: conv(1x1) -> flatten -> FC(64) -> sigmoid
-          (my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility)
+    Each spec entry has a "type" field and an optional "count" (default 1).
+    Example: [{"type": "res", "count": 5}, {"type": "gpba"}, {"type": "res", "count": 5}]
+
+    Reserve vector is broadcast spatially and concatenated before the trunk.
+    SpatialAttention layers additionally receive it as an adaLN-Zero conditioning signal.
+
+    Policy heads (concatenated flat output):
+        place_head: Conv1×1(C → 5, G, G)   placement logits per piece type
+        q_head:     Conv1×1(C → D, G, G)   Q embeddings for movement source
+        k_head:     Conv1×1(C → D, G, G)   K embeddings for movement destination
+      Output: (batch, (5+2D)×G²) = [place | Q | K]
+      Movement prior: Q[src] · K[dst] / sqrt(D)
+
+    Value head:  conv → flatten → FC(256) → softmax(3)  [W, D, L]
+    Auxiliary head: conv → flatten → FC(64) → sigmoid(6)
+        [my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility]
     """
 
-    def __init__(self, num_blocks: int = 10, channels: int = 128,
-                 grid_size: int = DEFAULT_GRID_SIZE,
-                 num_attention_layers: int = 0,
+    def __init__(self, channels: int = 64, grid_size: int = DEFAULT_GRID_SIZE,
+                 trunk: list[dict] | None = None,
                  bilinear_dim: int = BILINEAR_DIM):
         super().__init__()
         self.game = "hive"
@@ -47,83 +60,76 @@ class HiveNet(nn.Module):
         self.grid_size = grid_size
         self.bilinear_dim = bilinear_dim
 
-        # Input convolution (board channels + broadcast reserve)
+        trunk_spec = trunk or [{"type": "res", "count": 6}]
+        self.trunk_spec = trunk_spec
+
         self.input_conv = nn.Conv2d(NUM_CHANNELS + RESERVE_SIZE, channels, 3, padding=1, bias=False)
         self.input_bn = nn.BatchNorm2d(channels)
 
-        # Residual tower
-        self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
+        self.trunk = nn.ModuleList()
+        for spec in trunk_spec:
+            layer_type = spec["type"]
+            count = spec.get("count", 1)
+            for _ in range(count):
+                if layer_type == "res":
+                    self.trunk.append(ResBlock(channels))
+                elif layer_type == "gpba":
+                    self.trunk.append(GlobalPoolBias(channels))
+                elif layer_type == "attn":
+                    self.trunk.append(SpatialAttention(channels, cond_dim=RESERVE_SIZE))
+                else:
+                    raise ValueError(f"Unknown trunk layer type: {layer_type!r}")
 
-        # Self-attention layers with adaLN-Zero (conditioned on reserve vector)
-        self.attention_layers = nn.ModuleList(
-            [SpatialAttention(channels, cond_dim=RESERVE_SIZE) for _ in range(num_attention_layers)]
-        )
-
-        # Bilinear Q·K policy heads — share a common conv+BN, then 3 output heads.
-        # place_head: (B, 5, G, G)  - one channel per piece type, placement logits
-        # q_head:     (B, D, G, G)  - Q embeddings for movement source
-        # k_head:     (B, D, G, G)  - K embeddings for movement destination
-        # Concatenated flat output: (B, (5+2D)*G*G) = [place | Q | K]
         self.num_policy_channels = NUM_POLICY_CHANNELS
         self.policy_conv = nn.Conv2d(channels, channels, 1, bias=False)
         self.policy_bn = nn.BatchNorm2d(channels)
-        self.policy_place = nn.Conv2d(channels, NUM_PLACE_CHANNELS, 1)  # (B,5,G,G)
-        self.policy_q     = nn.Conv2d(channels, bilinear_dim, 1)        # (B,D,G,G)
-        self.policy_k     = nn.Conv2d(channels, bilinear_dim, 1)        # (B,D,G,G)
+        self.policy_place = nn.Conv2d(channels, NUM_PLACE_CHANNELS, 1)
+        self.policy_q     = nn.Conv2d(channels, bilinear_dim, 1)
+        self.policy_k     = nn.Conv2d(channels, bilinear_dim, 1)
 
-        # Value head (KataGo-style WDL: win / draw / loss)
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(1)
         self.value_fc1 = nn.Linear(grid_size * grid_size, 256)
         self.value_fc2 = nn.Linear(256, 3)
 
-        # Auxiliary head (own pathway from trunk)
-        # Outputs: [my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility]
         self.qd_conv = nn.Conv2d(channels, 1, 1, bias=False)
         self.qd_bn = nn.BatchNorm2d(1)
         self.qd_fc1 = nn.Linear(grid_size * grid_size, 64)
         self.qd_fc2 = nn.Linear(64, 6)
 
     def forward(self, board_tensor: torch.Tensor, reserve_vector: torch.Tensor):
-        """Forward pass.
-
+        """
         Args:
-            board_tensor: (batch, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
+            board_tensor:  (batch, NUM_CHANNELS, G, G)
             reserve_vector: (batch, RESERVE_SIZE)
 
         Returns:
-            policy_logits: (batch, 7*G*G) flat = [place_part | src_part | dst_part]
-            wdl: (batch, 3) — softmax probabilities [P(win), P(draw), P(loss)]
-            aux: (batch, 6) in [0, 1] — [my_qd, opp_qd, my_qe, opp_qe, my_mob, opp_mob]
+            policy_logits: (batch, (5+2D)×G²) — [place | Q | K]
+            wdl:           (batch, 3) softmax — [P(win), P(draw), P(loss)]
+            aux:           (batch, 6) sigmoid
         """
-        # Broadcast reserve spatially and concat with board tensor
         g = board_tensor.size(-1)
         r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, g, g)
-        x = torch.cat([board_tensor, r], dim=1)  # (B, 19+10, G, G)
+        x = torch.cat([board_tensor, r], dim=1)
 
-        # Shared trunk
         x = F.relu(self.input_bn(self.input_conv(x)))
-        for block in self.res_blocks:
-            x = block(x)
+        for layer in self.trunk:
+            if isinstance(layer, SpatialAttention):
+                x = layer(x, reserve_vector)
+            else:
+                x = layer(x)
 
-        # Self-attention (global reasoning, conditioned on reserve vector)
-        for attn in self.attention_layers:
-            x = attn(x, reserve_vector)
-
-        # Bilinear Q·K policy heads
         p = F.relu(self.policy_bn(self.policy_conv(x)))
-        place = self.policy_place(p).flatten(1)  # (B, 5*G*G)
-        q     = self.policy_q(p).flatten(1)      # (B, D*G*G)
-        k     = self.policy_k(p).flatten(1)      # (B, D*G*G)
-        policy_logits = torch.cat([place, q, k], dim=1)  # (B, (5+2D)*G*G)
+        place = self.policy_place(p).flatten(1)
+        q     = self.policy_q(p).flatten(1)
+        k     = self.policy_k(p).flatten(1)
+        policy_logits = torch.cat([place, q, k], dim=1)
 
-        # Value head: WDL distribution (win / draw / loss)
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.flatten(1)
         v = F.relu(self.value_fc1(v))
-        wdl = F.softmax(self.value_fc2(v), dim=1)  # (batch, 3): [W, D, L]
+        wdl = F.softmax(self.value_fc2(v), dim=1)
 
-        # Auxiliary head (own pathway from trunk)
         qd = F.relu(self.qd_bn(self.qd_conv(x)))
         qd = qd.flatten(1)
         qd = F.relu(self.qd_fc1(qd))
@@ -132,25 +138,26 @@ class HiveNet(nn.Module):
         return policy_logits, wdl, aux
 
 
-def create_model(num_blocks: int = 10, channels: int = 128,
-                 grid_size: int = DEFAULT_GRID_SIZE,
-                 num_attention_layers: int = 0,
-                 bilinear_dim: int = BILINEAR_DIM) -> HiveNet:
-    """Create a new HiveNet model."""
-    return HiveNet(num_blocks=num_blocks, channels=channels, grid_size=grid_size,
-                   num_attention_layers=num_attention_layers, bilinear_dim=bilinear_dim)
+def create_model(model_config: dict | None = None) -> HiveNet:
+    """Create a new HiveNet from a model config dict."""
+    cfg = model_config or {}
+    return HiveNet(
+        channels=cfg.get("channels", 64),
+        grid_size=cfg.get("grid_size", DEFAULT_GRID_SIZE),
+        trunk=cfg.get("trunk"),
+        bilinear_dim=cfg.get("bilinear_dim", BILINEAR_DIM),
+    )
 
 
 def save_checkpoint(model: HiveNet, path: str, generation: int = 0,
                     metadata: dict | None = None):
-    """Save model with training metadata."""
+    """Save model with architecture config and training metadata."""
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "game": "hive",
-        "num_blocks": model.res_blocks.__len__(),
         "channels": model.input_conv.out_channels,
-        "num_attention_layers": len(model.attention_layers),
         "grid_size": model.grid_size,
+        "trunk": model.trunk_spec,
         "bilinear_dim": model.bilinear_dim,
         "generation": generation,
         "metadata": metadata or {},
@@ -159,31 +166,22 @@ def save_checkpoint(model: HiveNet, path: str, generation: int = 0,
 
 
 class _OnnxExportWrapper(nn.Module):
-    """Wraps HiveNet for ONNX export, collapsing WDL to a W-L scalar value.
-
-    The Rust ORT engine expects `value` as (B, 1) — W minus L from the WDL
-    head. This wrapper computes that reduction so the ONNX graph is self-
-    contained and the Rust side needs no changes.
-    """
+    """Wraps HiveNet for ONNX export, collapsing WDL to a W-L scalar value."""
     def __init__(self, model: "HiveNet"):
         super().__init__()
         self.model = model
 
     def forward(self, board: torch.Tensor, reserve: torch.Tensor):
         policy, wdl, aux = self.model(board, reserve)
-        value = wdl[:, 0:1] - wdl[:, 2:3]  # (B, 1) W - L
+        value = wdl[:, 0:1] - wdl[:, 2:3]
         return policy, value, aux
 
 
 def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
-    """Export model to ONNX format for Rust-native inference via ort.
+    """Export model to ONNX for Rust-native ORT inference.
 
-    Inputs: board_tensor (B, 39, G, G), reserve (B, 10)
-    Outputs: policy (B, 11*G*G), value (B, 1) W-L scalar, aux (B, 6)
-
-    If batch_size is given the batch dimension is baked in as a static value,
-    which lets QNN/HTP compile the graph once at session creation rather than
-    JIT-compiling per unique batch size at runtime.
+    Inputs:  board_tensor (B, NUM_CHANNELS, G, G), reserve (B, RESERVE_SIZE)
+    Outputs: policy (B, (5+2D)×G²), value (B, 1) W-L scalar, aux (B, 6)
     """
     import os
     g = model.grid_size
@@ -194,8 +192,6 @@ def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
     dummy_board = torch.zeros(b, NUM_CHANNELS, g, g, device=device)
     dummy_reserve = torch.zeros(b, RESERVE_SIZE, device=device)
     wrapper = _OnnxExportWrapper(model).eval()
-    input_names = ["board", "reserve"]
-    output_names = ["policy", "value", "aux"]
     import logging
     _onnx_logger = logging.getLogger("onnxscript")
     _prev_level = _onnx_logger.level
@@ -205,8 +201,8 @@ def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
         wrapper,
         (dummy_board, dummy_reserve),
         path,
-        input_names=input_names,
-        output_names=output_names,
+        input_names=["board", "reserve"],
+        output_names=["policy", "value", "aux"],
         dynamic_shapes=dynamic_shapes,
         dynamo=True,
         verbose=False,
@@ -223,36 +219,20 @@ def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
 def load_checkpoint(path: str) -> tuple[HiveNet, dict]:
     """Load model from checkpoint. Returns (model, checkpoint_dict)."""
     checkpoint = torch.load(path, weights_only=False)
-    num_blocks = checkpoint.get("num_blocks", 10)
-    channels = checkpoint.get("channels", 128)
+    channels = checkpoint.get("channels", 64)
     grid_size = checkpoint.get("grid_size", DEFAULT_GRID_SIZE)
-    num_attention_layers = checkpoint.get("num_attention_layers", 0)
+    trunk = checkpoint.get("trunk")
     bilinear_dim = checkpoint.get("bilinear_dim", BILINEAR_DIM)
-    model = HiveNet(num_blocks=num_blocks, channels=channels, grid_size=grid_size,
-                    num_attention_layers=num_attention_layers, bilinear_dim=bilinear_dim)
+    model = HiveNet(channels=channels, grid_size=grid_size, trunk=trunk, bilinear_dim=bilinear_dim)
 
-    # Support both checkpoint format and raw state_dict
     state_dict = checkpoint.get("model_state_dict", checkpoint)
-    # Filter out keys with shape mismatches (e.g. aux head grew from 2 to 6 outputs)
     model_state = model.state_dict()
     compatible = {k: v for k, v in state_dict.items()
                   if k in model_state and v.shape == model_state[k].shape}
     model.load_state_dict(compatible, strict=False)
     if "model_state_dict" not in checkpoint:
         checkpoint = {"generation": 0, "metadata": {}}
-    # Backwards compat: old checkpoints use "iteration"
     if "generation" not in checkpoint and "iteration" in checkpoint:
         checkpoint["generation"] = checkpoint.pop("iteration")
-
     model.eval()
     return model, checkpoint
-
-
-# Keep simple aliases for backward compat
-def save_model(model: HiveNet, path: str):
-    save_checkpoint(model, path)
-
-
-def load_model(path: str, num_blocks: int = 10, channels: int = 128) -> HiveNet:
-    model, _ = load_checkpoint(path)
-    return model

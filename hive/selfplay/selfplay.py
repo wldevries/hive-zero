@@ -37,7 +37,7 @@ _cy = lambda v: _c(v, colorama.Fore.YELLOW)  # draws / secondary losses
 _cr = lambda v: _c(v, colorama.Fore.RED)  # total loss / losses in eval
 _cc = lambda v: _c(v, colorama.Fore.CYAN)  # scores / percentages
 
-from ..nn.model import create_model, export_onnx, load_checkpoint, save_checkpoint
+from ..nn.model import create_model, export_onnx, load_checkpoint, save_checkpoint, _describe_trunk
 from ..nn.training import HiveDataset, Trainer
 
 
@@ -324,12 +324,9 @@ class SelfPlayTrainer:
         self,
         name: str = "hive",
         device: str = "cpu",
-        num_blocks: int = 6,
-        channels: int = 64,
-        num_attention_layers: int = 0,
+        model_config: dict | None = None,
         lr: float = 0.02,
         lr_scheduler: Optional[LRScheduler] = None,
-        grid_size: int = 23,
     ):
         self.name = name
         self.model_dir = os.path.join("models", name)
@@ -337,43 +334,31 @@ class SelfPlayTrainer:
         self.model_name = name
         self.checkpoint_dir = os.path.join(self.model_dir, "checkpoints")
         self.device = device
-        self.num_blocks = num_blocks
-        self.channels = channels
-        self.grid_size = grid_size
         self.start_generation = 0
 
         if os.path.exists(self.model_path):
             self.model, ckpt = load_checkpoint(self.model_path)
             self.start_generation = ckpt.get("generation", 0)
-            blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
-            attn = len(self.model.attention_layers)
             gs = self.model.grid_size
+            trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
                 f"Resumed from {self.model_path} (generation {self.start_generation}, "
-                f"{blocks} blocks, {ch} channels, {attn} attn layers, grid {gs}x{gs}, {params / 1e6:.2f}M params)"
+                f"{ch}ch, {trunk_desc}, grid {gs}x{gs}, {params / 1e6:.2f}M params)"
             )
-            if blocks != num_blocks or ch != channels:
-                print(
-                    f"  WARNING: --blocks {num_blocks} --channels {channels} ignored "
-                    f"(checkpoint shape: {blocks} blocks, {ch} channels)"
-                )
-            self.grid_size = gs
         else:
             os.makedirs(self.model_dir, exist_ok=True)
-            self.model = create_model(
-                num_blocks,
-                channels,
-                grid_size=grid_size,
-                num_attention_layers=num_attention_layers,
-            )
+            self.model = create_model(model_config)
+            ch = self.model.input_conv.out_channels
+            gs = self.model.grid_size
+            trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"Created new model ({num_blocks} blocks, {channels} channels, "
-                f"{num_attention_layers} attn layers, grid {grid_size}x{grid_size}, {params / 1e6:.2f}M params)"
+                f"Created new model ({ch}ch, {trunk_desc}, grid {gs}x{gs}, {params / 1e6:.2f}M params)"
             )
 
+        self.grid_size = self.model.grid_size
         self.model.to(device)
         self.lr_scheduler = lr_scheduler
         self.trainer = Trainer(self.model, device=device, lr=lr)

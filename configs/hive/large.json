@@ -1,0 +1,13 @@
+{
+  "channels": 192,
+  "grid_size": 17,
+  "bilinear_dim": 32,
+  "trunk": [
+    {"type": "res", "count": 6},
+    {"type": "gpba"},
+    {"type": "res", "count": 6},
+    {"type": "gpba"},
+    {"type": "res", "count": 4},
+    {"type": "attn"}
+  ]
+}

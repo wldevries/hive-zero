@@ -1,8 +1,34 @@
 """CLI entry point for the Hive AI engine."""
 
 import argparse
+import json
+import os
 
 from shared.lr_scheduler import lr_scheduler_from_string
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_HERE)
+_DEFAULT_MODEL_CONFIG_PATH = os.path.join(_REPO_ROOT, "configs", "hive", "medium.json")
+
+_FALLBACK_MODEL_CONFIG = {
+    "channels": 64,
+    "grid_size": 17,
+    "trunk": [{"type": "res", "count": 6}],
+    "bilinear_dim": 32,
+}
+
+
+def _load_model_config(path: str | None) -> dict:
+    """Load model config from a JSON file, falling back to the repo default."""
+    if path is None:
+        path = _DEFAULT_MODEL_CONFIG_PATH
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        if path != _DEFAULT_MODEL_CONFIG_PATH:
+            raise
+        return _FALLBACK_MODEL_CONFIG
 
 
 def _resolve_device(device: str) -> str:
@@ -79,22 +105,11 @@ def main():
         "--device", type=str, default="cuda", help="Device: cuda or cpu"
     )
     train_parser.add_argument(
-        "--blocks", type=int, default=6, help="Residual blocks in network"
-    )
-    train_parser.add_argument(
-        "--channels", type=int, default=64, help="Channels in network"
-    )
-    train_parser.add_argument(
-        "--attention-layers",
-        type=int,
-        default=0,
-        help="Self-attention layers after CNN trunk (default: 0)",
-    )
-    train_parser.add_argument(
-        "--grid-size",
-        type=int,
-        default=23,
-        help="NN encoding grid size (must be odd, default 23)",
+        "--model-config",
+        type=str,
+        default=None,
+        help="Path to model config JSON (default: configs/hive/default.json). "
+             "Ignored when resuming from an existing checkpoint.",
     )
     train_parser.add_argument(
         "--max-moves", type=int, default=200, help="Max moves per self-play game"
@@ -337,19 +352,12 @@ def main():
     )
     pretrain_parser.add_argument("--model", default="model.pt")
     pretrain_parser.add_argument("--device", default="cuda")
-    pretrain_parser.add_argument("--blocks", type=int, default=6)
-    pretrain_parser.add_argument("--channels", type=int, default=64)
     pretrain_parser.add_argument(
-        "--attention-layers",
-        type=int,
-        default=0,
-        help="Self-attention layers after CNN trunk (default: 0)",
-    )
-    pretrain_parser.add_argument(
-        "--grid-size",
-        type=int,
-        default=23,
-        help="NN encoding grid size (must be odd, default 23)",
+        "--model-config",
+        type=str,
+        default=None,
+        help="Path to model config JSON (default: configs/hive/default.json). "
+             "Ignored when resuming from an existing checkpoint.",
     )
     pretrain_parser.add_argument(
         "--lr", type=float, default=0.005, help="Learning rate (default: 0.005)"
@@ -507,11 +515,8 @@ def main():
         pretrainer = Pretrainer(
             model_path=args.model,
             device=_resolve_device(args.device),
-            num_blocks=args.blocks,
-            channels=args.channels,
-            num_attention_layers=args.attention_layers,
+            model_config=_load_model_config(args.model_config),
             lr=args.lr,
-            grid_size=args.grid_size,
         )
         pretrainer.run(
             games=games,
@@ -602,12 +607,9 @@ def main():
         trainer = SelfPlayTrainer(
             name=args.name,
             device=_resolve_device(args.device),
-            num_blocks=args.blocks,
-            channels=args.channels,
-            num_attention_layers=args.attention_layers,
+            model_config=_load_model_config(args.model_config),
             lr=args.lr,
             lr_scheduler=lr_scheduler,
-            grid_size=args.grid_size,
         )
         eval_config = None
         if args.eval_every > 0:

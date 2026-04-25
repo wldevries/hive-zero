@@ -358,13 +358,10 @@ class Pretrainer:
         self,
         model_path: str = "model.pt",
         device: str = "cuda",
-        num_blocks: int = 6,
-        channels: int = 64,
-        num_attention_layers: int = 0,
+        model_config: dict | None = None,
         lr: float = 0.005,
-        grid_size: int = 23,
     ):
-        from ..nn.model import create_model, load_checkpoint, save_checkpoint, export_onnx
+        from ..nn.model import create_model, load_checkpoint, save_checkpoint, export_onnx, _describe_trunk
         from ..nn.training import Trainer
 
         self.model_path = model_path
@@ -375,25 +372,24 @@ class Pretrainer:
         if os.path.exists(model_path):
             self.model, ckpt = load_checkpoint(model_path)
             it = ckpt.get("generation", 0)
-            blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
-            attn = len(self.model.attention_layers)
             gs = self.model.grid_size
+            trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
                 f"Resumed from {model_path} "
-                f"(iteration {it}, {blocks}b×{ch}ch, {attn} attn, grid {gs}x{gs}, {params/1e6:.2f}M params)"
+                f"(iteration {it}, {ch}ch, {trunk_desc}, grid {gs}x{gs}, {params/1e6:.2f}M params)"
             )
-            grid_size = gs
         else:
-            self.model = create_model(num_blocks, channels, grid_size=grid_size,
-                                      num_attention_layers=num_attention_layers)
+            self.model = create_model(model_config)
+            ch = self.model.input_conv.out_channels
+            gs = self.model.grid_size
+            trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"Created new model ({num_blocks} blocks, {channels} channels, "
-                f"{num_attention_layers} attn layers, grid {grid_size}x{grid_size}, {params/1e6:.2f}M params)"
+                f"Created new model ({ch}ch, {trunk_desc}, grid {gs}x{gs}, {params/1e6:.2f}M params)"
             )
-        self.grid_size = grid_size
+        self.grid_size = self.model.grid_size
 
         self.model.to(device)
         self.trainer = Trainer(self.model, device=device, lr=lr)
