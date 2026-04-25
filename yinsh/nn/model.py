@@ -117,28 +117,22 @@ def load_checkpoint(path: str) -> tuple[YinshNet, dict]:
 
 def export_onnx(model: YinshNet, path: str):
     """Export to ONNX for Rust-native inference via the `ort` crate."""
-    import logging
-
     was_training = model.training
     model.eval()
     device = next(model.parameters()).device
     dummy_board = torch.zeros(1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE, device=device)
     dummy_reserve = torch.zeros(1, RESERVE_SIZE, device=device)
-    onnx_logger = logging.getLogger("onnxscript")
-    prev_level = onnx_logger.level
-    onnx_logger.setLevel(logging.WARNING)
     torch.onnx.export(
         model,
         (dummy_board, dummy_reserve),
         path,
         input_names=["board", "reserve"],
         output_names=["policy", "value"],
-        dynamic_shapes=({0: "batch_board"}, {0: "batch_reserve"}),
-        dynamo=True,
-        verbose=False,
-        opset_version=21,
+        dynamic_axes={"board": {0: "batch"}, "reserve": {0: "batch"},
+                      "policy": {0: "batch"}, "value": {0: "batch"}},
+        opset_version=17,
+        dynamo=False,
     )
-    onnx_logger.setLevel(prev_level)
     if was_training:
         model.train()
     size_mb = os.path.getsize(path) / (1024 * 1024)

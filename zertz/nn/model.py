@@ -116,25 +116,17 @@ def export_onnx(model: ZertzNet, path: str):
     dummy_reserve = torch.zeros(1, RESERVE_SIZE).cuda()
     input_names = ["board", "reserve"]
     output_names = ["place", "cap_dir", "value"]
-    import logging
-    _onnx_logger = logging.getLogger("onnxscript")
-    _prev_level = _onnx_logger.level
-    _onnx_logger.setLevel(logging.WARNING)
     torch.onnx.export(
         model,
         (dummy_board, dummy_reserve),
         path,
         input_names=input_names,
         output_names=output_names,
-        dynamic_shapes=(
-            {0: "batch_board"},
-            {0: "batch_reserve"}
-        ),
-        dynamo=True,
-        verbose=False,
-        opset_version=21,
+        dynamic_axes={"board": {0: "batch"}, "reserve": {0: "batch"},
+                      "place": {0: "batch"}, "cap_dir": {0: "batch"}, "value": {0: "batch"}},
+        opset_version=17,
+        dynamo=False,
     )
-    _onnx_logger.setLevel(_prev_level)
     if was_training:
         model.train()
     size_mb = os.path.getsize(path) / (1024 * 1024)
