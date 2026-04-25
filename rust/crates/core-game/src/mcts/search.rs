@@ -609,6 +609,7 @@ impl<G: GameEngine> MctsSearch<G> {
     pub fn best_move(&self) -> Option<G::Move> {
         let root = self.arena.get(self.root);
         let mut best_visits = 0u32;
+        let mut best_value = f32::NEG_INFINITY;
         let mut best_move = None;
 
         let mut child_id = root.first_child;
@@ -616,6 +617,10 @@ impl<G: GameEngine> MctsSearch<G> {
             let child = self.arena.get(cid);
             if child.visit_count > best_visits {
                 best_visits = child.visit_count;
+                best_value = child.value();
+                best_move = Some(child.move_from_parent);
+            } else if child.visit_count == best_visits && best_move.is_some() && child.value() > best_value {
+                best_value = child.value();
                 best_move = Some(child.move_from_parent);
             }
             child_id = child.next_sibling;

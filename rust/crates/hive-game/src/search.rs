@@ -152,12 +152,7 @@ pub fn best_move_core(
         done += num_leaves;
     }
 
-    let best = search
-        .get_pruned_visit_distribution()
-        .into_iter()
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-        .map(|(mv, _)| mv)
-        .unwrap_or_else(Move::pass);
+    let best = search.best_move().unwrap_or_else(Move::pass);
     Ok(best)
 }
 
@@ -552,12 +547,8 @@ pub fn play_selfplay_core(
             let mut probs: Vec<f32> = dist.iter().map(|(_, prob)| *prob).collect();
 
             if temp == 0.0 || !is_full[index] {
-                let best_index = probs
-                    .iter()
-                    .enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                    .map(|(best_index, _)| best_index)
-                    .unwrap();
+                let best_mv = search.best_move().unwrap();
+                let best_index = dist.iter().position(|(mv, _)| mv == &best_mv).unwrap();
                 for prob in &mut probs {
                     *prob = 0.0;
                 }
@@ -1087,15 +1078,7 @@ pub fn play_battle_core(
         }
 
         for &game_index in &mcts_games {
-            let dist = searches[game_index].get_visit_distribution();
-            let mv = if dist.is_empty() {
-                Move::pass()
-            } else {
-                dist.iter()
-                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-                    .map(|(mv, _)| *mv)
-                    .unwrap()
-            };
+            let mv = searches[game_index].best_move().unwrap_or_else(Move::pass);
 
             if mv.is_pass() {
                 games[game_index].play_pass();
