@@ -37,12 +37,21 @@ def _scalar_to_wdl(v: torch.Tensor) -> torch.Tensor:
 # Hex D6 symmetry: lazy-loaded per grid_size.
 # ---------------------------------------------------------------------------
 _SYM_PERMS_CACHE: dict[int, list] = {}
+_BAD_CELLS_CACHE: dict[int, np.ndarray] = {}
 
 def _load_sym_perms(grid_size: int):
     if grid_size not in _SYM_PERMS_CACHE:
         from engine_zero import d6_grid_permutations
         _SYM_PERMS_CACHE[grid_size] = [np.array(p) for p in d6_grid_permutations(grid_size)]
     return _SYM_PERMS_CACHE[grid_size]
+
+def _load_bad_cells(grid_size: int) -> np.ndarray:
+    """Flat mask of cells where |s|=|q+r| > half_grid — these clip under non-{0°,180°} D6 rotations."""
+    if grid_size not in _BAD_CELLS_CACHE:
+        half = grid_size // 2
+        rows, cols = np.meshgrid(np.arange(grid_size), np.arange(grid_size), indexing='ij')
+        _BAD_CELLS_CACHE[grid_size] = (np.abs(2 * half - rows - cols) > half).ravel()
+    return _BAD_CELLS_CACHE[grid_size]
 
 
 class HiveDataset(Dataset):
@@ -278,6 +287,14 @@ class HiveDataset(Dataset):
         m_dst = self.movement_dst[base_idx].copy()
         m_prob = self.movement_probs[base_idx].copy()
         n_m = int(self.num_movements[base_idx])
+
+        # Rotations 1,2,4,5 and all 6 mirrors involve s=-(q+r) and clip pieces
+        # in the square-grid corners (|s|>half_grid). Skip those augmentations.
+        # Identity (sym=0) and 180° (sym=3) never clip.
+        if sym not in (0, 3) and self.augment_symmetry:
+            bad = _load_bad_cells(self.grid_size)
+            if board[:10].reshape(10, -1)[:, bad].any():
+                sym = 0
 
         if sym != 0:
             gs = self.grid_size

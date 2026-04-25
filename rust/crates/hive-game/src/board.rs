@@ -524,6 +524,8 @@ impl Board {
 
         // If all occupied hexes are already inside the NN view (plus a 1-hex
         // placement buffer), do not shift this turn.
+        // Uses hex-radius (max(|q|,|r|,|s|) ≤ margin) so pieces also stay within
+        // the inscribed hexagon of the NN grid — preventing D6 augmentation clipping.
         let mut all_within_view = true;
         // Distance from full board edge to NN view edge, then +1 for the buffer.
         // Clamp to `GRID_SIZE` so malformed larger values do not underflow.
@@ -533,7 +535,7 @@ impl Board {
             for c in 0..GRID_SIZE {
                 if !self.grid[r][c].is_empty() {
                     let h = grid_to_hex(r, c);
-                    if h.0.abs() > margin || h.1.abs() > margin {
+                    if h.0.abs() > margin || h.1.abs() > margin || (h.0 as i32 + h.1 as i32).abs() > margin as i32 {
                         all_within_view = false;
                         break;
                     }
