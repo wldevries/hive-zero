@@ -174,8 +174,7 @@ class UHPEngine:
                 with torch.no_grad():
                     policy_logits, wdl, _ = model(b, r)
                 policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
-                vals = (wdl[:, 0] - wdl[:, 2]).cpu().numpy().flatten()
-                return policy.astype(np.float32), vals.astype(np.float32)
+                return policy.astype(np.float32), wdl.cpu().numpy().astype(np.float32)
 
             move_str = self.game.best_move(eval_fn, simulations=self.simulations)
 

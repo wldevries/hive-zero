@@ -32,6 +32,7 @@ struct SelfPlayConfig {
     use_heuristic: bool,
     grid_size: usize,
     fixed_batch_size: Option<usize>,
+    draw_contempt: f32,
 }
 
 fn call_python_eval_bf16(
@@ -41,6 +42,7 @@ fn call_python_eval_bf16(
     reserves: &[f32],
     batch_size: usize,
     grid_size: usize,
+    contempt: f32,
 ) -> Result<(Vec<f32>, Vec<f32>), String> {
     let board_flat = NUM_CHANNELS * grid_size * grid_size;
     let boards_bf16: Vec<u16> = boards.iter().map(|&value| f32_to_bf16(value)).collect();
@@ -60,22 +62,26 @@ fn call_python_eval_bf16(
     let result = eval_fn.call1((board_4d, reserve_np)).map_err(|e| e.to_string())?;
     let tuple = result
         .cast::<PyTuple>()
-        .map_err(|_| "eval_fn must return (policy, value) tuple".to_string())?;
+        .map_err(|_| "eval_fn must return (policy, wdl) tuple".to_string())?;
     let policy_arr = tuple
         .get_item(0)
         .map_err(|e| e.to_string())?
         .cast::<PyArray2<f32>>()
         .map_err(|e| e.to_string())?
         .readonly();
-    let value_arr = tuple
+    let wdl_arr = tuple
         .get_item(1)
         .map_err(|e| e.to_string())?
-        .cast::<PyArray1<f32>>()
+        .cast::<PyArray2<f32>>()
         .map_err(|e| e.to_string())?
         .readonly();
+    let wdl = wdl_arr.as_slice().map_err(|e| e.to_string())?;
+    let values: Vec<f32> = (0..batch_size)
+        .map(|i| wdl[i * 3] - wdl[i * 3 + 2] - contempt * wdl[i * 3 + 1])
+        .collect();
     Ok((
         policy_arr.as_slice().map_err(|e| e.to_string())?.to_vec(),
-        value_arr.as_slice().map_err(|e| e.to_string())?.to_vec(),
+        values,
     ))
 }
 
@@ -439,6 +445,7 @@ impl PySelfPlaySession {
         use_heuristic = false,
         grid_size = 23,
         fixed_batch_size = None,
+        draw_contempt = 0.0,
     ))]
     fn new(
         num_games: usize,
@@ -463,6 +470,7 @@ impl PySelfPlaySession {
         use_heuristic: bool,
         grid_size: usize,
         fixed_batch_size: Option<usize>,
+        draw_contempt: f32,
     ) -> Self {
         PySelfPlaySession {
             config: SelfPlayConfig {
@@ -488,6 +496,7 @@ impl PySelfPlaySession {
                 use_heuristic,
                 grid_size,
                 fixed_batch_size,
+                draw_contempt,
             },
         }
     }
@@ -522,7 +531,11 @@ impl PySelfPlaySession {
                                 RESERVE_SIZE,
                             )
                             .map_err(|e| e.to_string())?;
-                        Ok((result.policy, result.value))
+                        let contempt = cfg.draw_contempt;
+                        let values: Vec<f32> = (0..batch_size)
+                            .map(|i| result.wdl[i * 3] - result.wdl[i * 3 + 2] - contempt * result.wdl[i * 3 + 1])
+                            .collect();
+                        Ok((result.policy, values))
                     },
                     boards,
                     reserves,
@@ -553,6 +566,7 @@ impl PySelfPlaySession {
                 cfg.skip_timeout_games,
                 cfg.use_heuristic,
                 cfg.grid_size,
+                cfg.draw_contempt,
                 core_eval,
                 progress_core,
                 opening_sequences,
@@ -572,6 +586,7 @@ impl PySelfPlaySession {
                             chunk_reserves,
                             batch_size,
                             cfg.grid_size,
+                            cfg.draw_contempt,
                         )
                     },
                     boards,
@@ -603,6 +618,7 @@ impl PySelfPlaySession {
                 cfg.skip_timeout_games,
                 cfg.use_heuristic,
                 cfg.grid_size,
+                cfg.draw_contempt,
                 core_eval,
                 progress_core,
                 opening_sequences,
@@ -624,10 +640,10 @@ impl PySelfPlaySession {
         let cfg = &self.config;
         let progress_core = make_battle_progress(py, progress_fn);
         let core_eval1: search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
-            call_python_eval_bf16(py, eval_fn1, boards, reserves, batch_size, cfg.grid_size)
+            call_python_eval_bf16(py, eval_fn1, boards, reserves, batch_size, cfg.grid_size, 0.0)
         });
         let core_eval2: search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
-            call_python_eval_bf16(py, eval_fn2, boards, reserves, batch_size, cfg.grid_size)
+            call_python_eval_bf16(py, eval_fn2, boards, reserves, batch_size, cfg.grid_size, 0.0)
         });
 
         let result = play_battle_core(

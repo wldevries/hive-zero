@@ -36,11 +36,14 @@ pub struct SearchParams {
     /// Defaults to usize::MAX (no cap). Set to the simulation count to avoid
     /// allocating children that can never be visited.
     pub max_children: usize,
+    /// Draw contempt: scalar value = W - L - contempt * D.
+    /// Terminal draws return -contempt. Default 0.0 (draws are neutral at 0).
+    pub draw_contempt: f32,
 }
 
 impl SearchParams {
     pub fn new(cpuct_strategy: CpuctStrategy, forced_exploration: ForcedExploration, root_noise: RootNoise) -> Self {
-        Self { cpuct_strategy, forced_exploration, root_noise, max_children: usize::MAX }
+        Self { cpuct_strategy, forced_exploration, root_noise, max_children: usize::MAX, draw_contempt: 0.0 }
     }
 
     pub fn inference(cpuct_strategy: CpuctStrategy) -> Self {
@@ -49,6 +52,7 @@ impl SearchParams {
             forced_exploration: ForcedExploration::None,
             root_noise: RootNoise::None,
             max_children: usize::MAX,
+            draw_contempt: 0.0,
         }
     }
 }
@@ -60,6 +64,7 @@ impl Default for SearchParams {
             forced_exploration: ForcedExploration::None,
             root_noise: RootNoise::None,
             max_children: usize::MAX,
+            draw_contempt: 0.0,
         }
     }
 }
@@ -278,10 +283,12 @@ fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real
 }
 
 /// Terminal game value from a perspective.
-pub fn terminal_value(outcome: Outcome, perspective: Player) -> f32 {
+/// `contempt` is the draw contempt: draws return -contempt, matching the WDL
+/// formula `W - L - contempt * D` applied to terminal WDL (0,1,0) for a draw.
+pub fn terminal_value(outcome: Outcome, perspective: Player, contempt: f32) -> f32 {
     match outcome {
         Outcome::Ongoing => 0.0,
-        Outcome::Draw => 0.5, // causes contempt for draw state for the player playing the last move
+        Outcome::Draw => -contempt,
         Outcome::WonBy(winner) => {
             if winner == perspective { 1.0 } else { -1.0 }
         }
@@ -460,7 +467,7 @@ impl<G: GameEngine> MctsSearch<G> {
             let game = self.reconstruct_game(leaf);
 
             if game.is_game_over() {
-                let value = terminal_value(game.outcome(), game.next_player());
+                let value = terminal_value(game.outcome(), game.next_player(), self.params.draw_contempt);
                 backpropagate(&mut self.arena, leaf, value);
             } else {
                 // Apply virtual loss so subsequent selections in this batch diverge.

@@ -166,22 +166,22 @@ def save_checkpoint(model: HiveNet, path: str, generation: int = 0,
 
 
 class _OnnxExportWrapper(nn.Module):
-    """Wraps HiveNet for ONNX export, collapsing WDL to a W-L scalar value."""
+    """Wraps HiveNet for ONNX export, passing WDL (B, 3) through directly."""
     def __init__(self, model: "HiveNet"):
         super().__init__()
         self.model = model
 
     def forward(self, board: torch.Tensor, reserve: torch.Tensor):
         policy, wdl, aux = self.model(board, reserve)
-        value = wdl[:, 0:1] - wdl[:, 2:3]
-        return policy, value, aux
+        return policy, wdl, aux
 
 
 def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
     """Export model to ONNX for Rust-native ORT inference.
 
     Inputs:  board_tensor (B, NUM_CHANNELS, G, G), reserve (B, RESERVE_SIZE)
-    Outputs: policy (B, (5+2D)×G²), value (B, 1) W-L scalar, aux (B, 6)
+    Outputs: policy (B, (5+2D)×G²), wdl (B, 3) [P(win), P(draw), P(loss)], aux (B, 6)
+    Contempt is applied in the Rust caller as W - L - contempt * D.
     """
     import os
     g = model.grid_size
@@ -194,14 +194,14 @@ def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
     wrapper = _OnnxExportWrapper(model).eval()
     dynamic_axes = None if batch_size else {
         "board": {0: "batch"}, "reserve": {0: "batch"},
-        "policy": {0: "batch"}, "value": {0: "batch"}, "aux": {0: "batch"},
+        "policy": {0: "batch"}, "wdl": {0: "batch"}, "aux": {0: "batch"},
     }
     torch.onnx.export(
         wrapper,
         (dummy_board, dummy_reserve),
         path,
         input_names=["board", "reserve"],
-        output_names=["policy", "value", "aux"],
+        output_names=["policy", "wdl", "aux"],
         dynamic_axes=dynamic_axes,
         opset_version=17,
         dynamo=False,

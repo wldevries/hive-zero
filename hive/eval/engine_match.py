@@ -322,8 +322,7 @@ class ModelEngine:
             with torch.no_grad():
                 policy_logits, wdl, _ = model(bt_, rv_)
             policy = torch.softmax(policy_logits.float(), dim=1).cpu().numpy()
-            vals = (wdl[:, 0] - wdl[:, 2]).float().cpu().numpy().flatten()
-            return policy.astype(np.float32), vals.astype(np.float32)
+            return policy.astype(np.float32), wdl.float().cpu().numpy().astype(np.float32)
 
         move_str = game.best_move(eval_fn, self.simulations, 1.5)
 
@@ -456,8 +455,7 @@ def run_parallel_match(
             with torch.no_grad():
                 policy_logits, wdl, _ = model(bt, rv)
             policy = torch.softmax(policy_logits.float(), dim=1).cpu().numpy()
-            vals = (wdl[:, 0] - wdl[:, 2]).float().cpu().numpy().flatten()
-            return policy.astype(np.float32), vals.astype(np.float32)
+            return policy.astype(np.float32), wdl.float().cpu().numpy().astype(np.float32)
         return eval_fn
 
     eval_fn1 = make_eval_fn(engine1.model, engine1.device)

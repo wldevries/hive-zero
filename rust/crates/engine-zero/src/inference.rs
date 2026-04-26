@@ -43,8 +43,8 @@ pub trait ZertzInference {
 pub struct HiveInferenceResult {
     /// Flattened policy logits: [B * policy_size]
     pub policy: Vec<f32>,
-    /// Value per sample: [B]
-    pub value: Vec<f32>,
+    /// WDL probabilities: [B * 3], layout per sample: [P(win), P(draw), P(loss)]
+    pub wdl: Vec<f32>,
 }
 
 /// Result of a batch inference call for Zertz.
@@ -176,11 +176,11 @@ impl HiveOrtEngine {
         ])?;
 
         let (_, policy_data) = outputs["policy"].try_extract_tensor::<f32>()?;
-        let (_, value_data) = outputs["value"].try_extract_tensor::<f32>()?;
+        let (_, wdl_data) = outputs["wdl"].try_extract_tensor::<f32>()?;
 
         Ok(HiveInferenceResult {
             policy: policy_data.to_vec(),
-            value: value_data.to_vec(),
+            wdl: wdl_data.to_vec(),
         })
     }
 }

@@ -190,6 +190,7 @@ class RustParallelSelfPlay:
         random_opening_moves: int | tuple[int, int] = 0,
         skip_timeout_games: bool = False,
         use_heuristic: bool = False,
+        draw_contempt: float = 0.0,
         **kwargs,
     ):
         self.model = model
@@ -212,6 +213,7 @@ class RustParallelSelfPlay:
         self.random_opening_moves = random_opening_moves
         self.skip_timeout_games = skip_timeout_games
         self.use_heuristic = use_heuristic
+        self.draw_contempt = draw_contempt
 
     def _eval_fn(self):
         """Return a callable for Rust's GPU inference callback."""
@@ -227,7 +229,7 @@ class RustParallelSelfPlay:
                 n = board_4d.shape[0]
                 return (
                     np.ones((n, ps), dtype=np.float32) / ps,
-                    np.zeros(n, dtype=np.float32),
+                    np.zeros((n, 3), dtype=np.float32),
                 )
             # Data arrives as uint16 (raw bf16 bits) from Rust — reinterpret as bfloat16
             use_pinned = str(device).startswith("cuda")
@@ -241,8 +243,7 @@ class RustParallelSelfPlay:
             with torch.no_grad():
                 policy_logits, wdl, _ = model(bt, rv)
             policy = policy_logits.float().cpu().numpy()
-            vals = (wdl[:, 0] - wdl[:, 2]).float().cpu().numpy()
-            return policy.astype(np.float32), vals.astype(np.float32)
+            return policy.astype(np.float32), wdl.float().cpu().numpy().astype(np.float32)
 
         return eval_fn
 
@@ -288,6 +289,7 @@ class RustParallelSelfPlay:
             skip_timeout_games=self.skip_timeout_games,
             use_heuristic=self.use_heuristic,
             grid_size=grid_size,
+            draw_contempt=self.draw_contempt,
         )
 
         pbar = tqdm(total=self.max_moves, unit="turn", desc="  Self-play", leave=False)
@@ -407,6 +409,7 @@ class SelfPlayTrainer:
         aux_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
         export_sgf: bool = True,
+        draw_contempt: float = 0.0,
     ):
         """Run the full training loop.
 
@@ -602,6 +605,7 @@ class SelfPlayTrainer:
                 random_opening_moves=random_opening_moves,
                 skip_timeout_games=skip_timeout_games,
                 use_heuristic=use_heuristic,
+                draw_contempt=draw_contempt,
             )
 
             ort_path = None

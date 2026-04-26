@@ -40,8 +40,7 @@ def _make_eval_fn(model, device):
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 policy_logits, wdl, _ = model(bt, rv)
         policy = policy_logits.float().cpu().numpy().astype(np.float32)
-        vals = (wdl[:, 0] - wdl[:, 2]).float().cpu().numpy().flatten().astype(np.float32)
-        return policy, vals
+        return policy, wdl.float().cpu().numpy().astype(np.float32)
 
     return eval_fn
 

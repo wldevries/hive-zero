@@ -186,6 +186,7 @@ pub fn play_selfplay_core(
     skip_timeout_games: bool,
     use_heuristic: bool,
     grid_size: usize,
+    draw_contempt: f32,
     mut eval_fn: EvalFn<'_>,
     mut progress_fn: Option<SelfPlayProgressFn<'_>>,
     opening_sequences: Vec<Vec<String>>,
@@ -193,11 +194,12 @@ pub fn play_selfplay_core(
     let use_playout_cap = playout_cap_p > 0.0;
     let board_size = NUM_CHANNELS * grid_size * grid_size;
     let policy_size = move_encoding::policy_size(grid_size);
-    let search_params = SearchParams::new(
+    let mut search_params = SearchParams::new(
         CpuctStrategy::Constant { c_puct },
         if forced_playouts { ForcedExploration::Soft { selection_k: 0.5, pruning_k: 2.0 } } else { ForcedExploration::None },
         RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon },
     );
+    search_params.draw_contempt = draw_contempt;
 
     let mut games: Vec<Game> = (0..num_games)
         .map(|_| Game::new_tournament_with_grid_size(grid_size))

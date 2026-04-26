@@ -20,6 +20,7 @@ fn call_python_eval(
     reserves: &[f32],
     batch_size: usize,
     grid_size: usize,
+    contempt: f32,
 ) -> Result<(Vec<f32>, Vec<f32>), String> {
     let board_size = NUM_CHANNELS * grid_size * grid_size;
     let board_arr = numpy::ndarray::Array2::from_shape_vec(
@@ -40,22 +41,26 @@ fn call_python_eval(
     let result = eval_fn.call1((board_4d, reserve_np)).map_err(|e| e.to_string())?;
     let tuple = result
         .cast::<PyTuple>()
-        .map_err(|_| "eval_fn must return (policy, value)".to_string())?;
+        .map_err(|_| "eval_fn must return (policy, wdl)".to_string())?;
     let policy = tuple
         .get_item(0)
         .map_err(|e| e.to_string())?
         .cast::<PyArray2<f32>>()
         .map_err(|e| e.to_string())?
         .readonly();
-    let value = tuple
+    let wdl_arr = tuple
         .get_item(1)
         .map_err(|e| e.to_string())?
-        .cast::<PyArray1<f32>>()
+        .cast::<PyArray2<f32>>()
         .map_err(|e| e.to_string())?
         .readonly();
+    let wdl = wdl_arr.as_slice().map_err(|e| e.to_string())?;
+    let values: Vec<f32> = (0..batch_size)
+        .map(|i| wdl[i * 3] - wdl[i * 3 + 2] - contempt * wdl[i * 3 + 1])
+        .collect();
     Ok((
         policy.as_slice().map_err(|e| e.to_string())?.to_vec(),
-        value.as_slice().map_err(|e| e.to_string())?.to_vec(),
+        values,
     ))
 }
 
@@ -348,14 +353,15 @@ impl PyGame {
     }
 
     /// Run MCTS for `simulations` sims and return the best move as a UHP string.
-    /// eval_fn(board_4d[N, C, H, W], reserve[N, R]) -> (policy[N, P], value[N])
-    #[pyo3(signature = (eval_fn, simulations=800, c_puct=1.5))]
+    /// eval_fn(board_4d[N, C, H, W], reserve[N, R]) -> (policy[N, P], wdl[N, 3])
+    #[pyo3(signature = (eval_fn, simulations=800, c_puct=1.5, draw_contempt=0.0))]
     fn best_move(
         &mut self,
         _py: Python<'_>,
         eval_fn: &Bound<'_, PyAny>,
         simulations: usize,
         c_puct: f32,
+        draw_contempt: f32,
     ) -> PyResult<String> {
         if self.game.is_game_over() {
             return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
@@ -366,13 +372,14 @@ impl PyGame {
 
         let gs = self.game.nn_grid_size;
         let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
-            call_python_eval(eval_fn, boards, reserves, batch_size, gs)
+            call_python_eval(eval_fn, boards, reserves, batch_size, gs, draw_contempt)
         });
-        let search_params = SearchParams::new(
+        let mut search_params = SearchParams::new(
             CpuctStrategy::Constant { c_puct },
             ForcedExploration::None,
             RootNoise::None,
         );
+        search_params.draw_contempt = draw_contempt;
         let best = best_move_core(&self.game, simulations, &search_params, core_eval)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         Ok(if best.piece.is_none() {
@@ -384,12 +391,13 @@ impl PyGame {
 
     /// Run MCTS using a pre-loaded ORT/QNN session (no Python eval callback).
     /// Use `HiveOrtSession` to load the session once; reuse it across calls.
-    #[pyo3(signature = (ort_session, simulations=800, c_puct=1.5))]
+    #[pyo3(signature = (ort_session, simulations=800, c_puct=1.5, draw_contempt=0.0))]
     fn best_move_ort(
         &mut self,
         ort_session: &mut PyHiveOrtSession,
         simulations: usize,
         c_puct: f32,
+        draw_contempt: f32,
     ) -> PyResult<String> {
         if self.game.is_game_over() {
             return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
@@ -403,14 +411,20 @@ impl PyGame {
         let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
             engine
                 .infer_batch(boards, reserves, batch_size, NUM_CHANNELS, gs, RESERVE_SIZE)
-                .map(|r: crate::inference::HiveInferenceResult| (r.policy, r.value))
+                .map(|r: crate::inference::HiveInferenceResult| {
+                    let values: Vec<f32> = (0..batch_size)
+                        .map(|i| r.wdl[i * 3] - r.wdl[i * 3 + 2] - draw_contempt * r.wdl[i * 3 + 1])
+                        .collect();
+                    (r.policy, values)
+                })
                 .map_err(|e| e.to_string())
         });
-        let search_params = SearchParams::new(
+        let mut search_params = SearchParams::new(
             CpuctStrategy::Constant { c_puct },
             ForcedExploration::None,
             RootNoise::None,
         );
+        search_params.draw_contempt = draw_contempt;
         let best = best_move_core(&self.game, simulations, &search_params, core_eval)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         Ok(if best.piece.is_none() {

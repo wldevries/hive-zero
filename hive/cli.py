@@ -308,6 +308,13 @@ def main():
         help="Use heuristic value for draw/timeout training targets",
     )
     train_parser.add_argument(
+        "--draw-contempt",
+        type=float,
+        default=0.0,
+        help="Draw contempt: MCTS value = W - L - contempt * D; terminal draws = -contempt. "
+             "Positive = avoid draws, negative = seek draws (default: 0.0)",
+    )
+    train_parser.add_argument(
         "--augment-symmetry",
         action="store_true",
         help="Apply random D6 hex symmetry augmentation during training (12x effective data)",
@@ -657,6 +664,7 @@ def main():
             use_heuristic=args.use_heuristic,
             buf_dir=args.buf_dir,
             export_sgf=args.export_sgf,
+            draw_contempt=args.draw_contempt,
         )
     else:
         # Default: UHP engine
