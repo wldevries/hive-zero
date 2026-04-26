@@ -172,7 +172,8 @@ class UHPEngine:
                 b = torch.tensor(np.asarray(board_batch)).to(device)
                 r = torch.tensor(np.asarray(reserve_batch)).to(device)
                 with torch.no_grad():
-                    policy_logits, wdl, _ = model(b, r)
+                    policy_logits, wdl_logits, _ = model(b, r)
+                    wdl = torch.softmax(wdl_logits, dim=1)
                 policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
                 return policy.astype(np.float32), wdl.cpu().numpy().astype(np.float32)
 

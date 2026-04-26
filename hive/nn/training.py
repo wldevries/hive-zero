@@ -442,7 +442,7 @@ class Trainer:
             aux_target = aux_target.to(device)
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                policy_logits, wdl, aux = self._compiled(board, reserve)
+                policy_logits, wdl_logits, aux = self._compiled(board, reserve)
 
             B = board.size(0)
             gs = board.size(-1)
@@ -486,7 +486,7 @@ class Trainer:
 
             # Value loss: cross-entropy on WDL soft targets, masked for policy-only samples.
             wdl_target = _scalar_to_wdl(value_target.squeeze(1))  # (B, 3)
-            log_wdl = torch.log(wdl.float().clamp(min=1e-7))
+            log_wdl = torch.log_softmax(wdl_logits.float(), dim=1)
             per_sample_value = -(wdl_target * log_wdl).sum(dim=1)
             value_weight = (~po_mask).float()
             value_loss = (per_sample_value * value_weight).mean()

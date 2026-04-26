@@ -105,7 +105,10 @@ class HiveNet(nn.Module):
 
         Returns:
             policy_logits: (batch, (5+2D)×G²) — [place | Q | K]
-            wdl:           (batch, 3) softmax — [P(win), P(draw), P(loss)]
+            wdl_logits:    (batch, 3) raw logits — callers softmax as needed.
+                           Training uses log_softmax for stability; the ONNX
+                           wrapper softmaxes before export so ORT consumers
+                           (Rust) still see probabilities.
             aux:           (batch, 6) sigmoid
         """
         g = board_tensor.size(-1)
@@ -128,14 +131,14 @@ class HiveNet(nn.Module):
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.flatten(1)
         v = F.relu(self.value_fc1(v))
-        wdl = F.softmax(self.value_fc2(v), dim=1)
+        wdl_logits = self.value_fc2(v)
 
         qd = F.relu(self.qd_bn(self.qd_conv(x)))
         qd = qd.flatten(1)
         qd = F.relu(self.qd_fc1(qd))
         aux = torch.sigmoid(self.qd_fc2(qd))
 
-        return policy_logits, wdl, aux
+        return policy_logits, wdl_logits, aux
 
 
 def create_model(model_config: dict | None = None) -> HiveNet:
@@ -172,7 +175,8 @@ class _OnnxExportWrapper(nn.Module):
         self.model = model
 
     def forward(self, board: torch.Tensor, reserve: torch.Tensor):
-        policy, wdl, aux = self.model(board, reserve)
+        policy, wdl_logits, aux = self.model(board, reserve)
+        wdl = F.softmax(wdl_logits, dim=1)
         return policy, wdl, aux
 
 

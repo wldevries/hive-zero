@@ -38,7 +38,8 @@ def _make_eval_fn(model, device):
         rv = rv.to(device, non_blocking=use_pinned)
         with torch.no_grad():
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                policy_logits, wdl, _ = model(bt, rv)
+                policy_logits, wdl_logits, _ = model(bt, rv)
+                wdl = torch.softmax(wdl_logits, dim=1)
         policy = policy_logits.float().cpu().numpy().astype(np.float32)
         return policy, wdl.float().cpu().numpy().astype(np.float32)
 

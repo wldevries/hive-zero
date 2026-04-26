@@ -320,7 +320,8 @@ class ModelEngine:
             bt_ = bt_.to(device, non_blocking=use_pinned)
             rv_ = rv_.to(device, non_blocking=use_pinned)
             with torch.no_grad():
-                policy_logits, wdl, _ = model(bt_, rv_)
+                policy_logits, wdl_logits, _ = model(bt_, rv_)
+                wdl = torch.softmax(wdl_logits, dim=1)
             policy = torch.softmax(policy_logits.float(), dim=1).cpu().numpy()
             return policy.astype(np.float32), wdl.float().cpu().numpy().astype(np.float32)
 
@@ -453,7 +454,8 @@ def run_parallel_match(
             bt = bt.to(device, non_blocking=use_pinned)
             rv = rv.to(device, non_blocking=use_pinned)
             with torch.no_grad():
-                policy_logits, wdl, _ = model(bt, rv)
+                policy_logits, wdl_logits, _ = model(bt, rv)
+                wdl = torch.softmax(wdl_logits, dim=1)
             policy = torch.softmax(policy_logits.float(), dim=1).cpu().numpy()
             return policy.astype(np.float32), wdl.float().cpu().numpy().astype(np.float32)
         return eval_fn
