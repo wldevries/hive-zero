@@ -42,8 +42,7 @@ fn call_python_eval_bf16(
     reserves: &[f32],
     batch_size: usize,
     grid_size: usize,
-    contempt: f32,
-) -> Result<(Vec<f32>, Vec<f32>), String> {
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
     let board_flat = NUM_CHANNELS * grid_size * grid_size;
     let boards_bf16: Vec<u16> = boards.iter().map(|&value| f32_to_bf16(value)).collect();
     let reserves_bf16: Vec<u16> = reserves.iter().map(|&value| f32_to_bf16(value)).collect();
@@ -76,12 +75,19 @@ fn call_python_eval_bf16(
         .map_err(|e| e.to_string())?
         .readonly();
     let wdl = wdl_arr.as_slice().map_err(|e| e.to_string())?;
-    let values: Vec<f32> = (0..batch_size)
-        .map(|i| wdl[i * 3] - wdl[i * 3 + 2] - contempt * wdl[i * 3 + 1])
-        .collect();
+    // Split WDL into the zero-sum W−L scalar and the symmetric D probability.
+    // MCTS applies contempt at value() time; baking it into the scalar here
+    // would corrupt the draw component under the sign-flip backprop convention.
+    let mut values = Vec::with_capacity(batch_size);
+    let mut draws = Vec::with_capacity(batch_size);
+    for i in 0..batch_size {
+        values.push(wdl[i * 3] - wdl[i * 3 + 2]);
+        draws.push(wdl[i * 3 + 1]);
+    }
     Ok((
         policy_arr.as_slice().map_err(|e| e.to_string())?.to_vec(),
         values,
+        draws,
     ))
 }
 
@@ -92,15 +98,16 @@ fn infer_padded<F>(
     actual: usize,
     target: usize,
     grid_size: usize,
-) -> Result<(Vec<f32>, Vec<f32>), String>
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>
 where
-    F: FnMut(&[f32], &[f32], usize) -> Result<(Vec<f32>, Vec<f32>), String>,
+    F: FnMut(&[f32], &[f32], usize) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>,
 {
     let policy_size = move_encoding::policy_size(grid_size);
     let board_size = NUM_CHANNELS * grid_size * grid_size;
 
     let mut out_policy = Vec::with_capacity(actual * policy_size);
     let mut out_value = Vec::with_capacity(actual);
+    let mut out_draw = Vec::with_capacity(actual);
 
     let mut offset = 0usize;
     while offset < actual {
@@ -108,25 +115,27 @@ where
         let board_slice = &boards[offset * board_size..(offset + chunk) * board_size];
         let reserve_slice = &reserves[offset * RESERVE_SIZE..(offset + chunk) * RESERVE_SIZE];
 
-        let (mut policy, mut value) = if chunk == target {
+        let (mut policy, mut value, mut draw) = if chunk == target {
             infer_once(board_slice, reserve_slice, target)?
         } else {
             let mut padded_boards = board_slice.to_vec();
             padded_boards.resize(target * board_size, 0.0);
             let mut padded_reserves = reserve_slice.to_vec();
             padded_reserves.resize(target * RESERVE_SIZE, 0.0);
-            let (mut policy, mut value) = infer_once(&padded_boards, &padded_reserves, target)?;
+            let (mut policy, mut value, mut draw) = infer_once(&padded_boards, &padded_reserves, target)?;
             policy.truncate(chunk * policy_size);
             value.truncate(chunk);
-            (policy, value)
+            draw.truncate(chunk);
+            (policy, value, draw)
         };
 
         out_policy.append(&mut policy);
         out_value.append(&mut value);
+        out_draw.append(&mut draw);
         offset += chunk;
     }
 
-    Ok((out_policy, out_value))
+    Ok((out_policy, out_value, out_draw))
 }
 
 fn make_selfplay_progress<'py>(
@@ -531,11 +540,16 @@ impl PySelfPlaySession {
                                 RESERVE_SIZE,
                             )
                             .map_err(|e| e.to_string())?;
-                        let contempt = cfg.draw_contempt;
-                        let values: Vec<f32> = (0..batch_size)
-                            .map(|i| result.wdl[i * 3] - result.wdl[i * 3 + 2] - contempt * result.wdl[i * 3 + 1])
-                            .collect();
-                        Ok((result.policy, values))
+                        // Split WDL: W−L is zero-sum (sign-flipped in backprop),
+                        // D is symmetric (added unflipped). Contempt is applied
+                        // at MCTS value() time, not baked in here.
+                        let mut values = Vec::with_capacity(batch_size);
+                        let mut draws = Vec::with_capacity(batch_size);
+                        for i in 0..batch_size {
+                            values.push(result.wdl[i * 3] - result.wdl[i * 3 + 2]);
+                            draws.push(result.wdl[i * 3 + 1]);
+                        }
+                        Ok((result.policy, values, draws))
                     },
                     boards,
                     reserves,
@@ -586,7 +600,6 @@ impl PySelfPlaySession {
                             chunk_reserves,
                             batch_size,
                             cfg.grid_size,
-                            cfg.draw_contempt,
                         )
                     },
                     boards,
@@ -640,10 +653,10 @@ impl PySelfPlaySession {
         let cfg = &self.config;
         let progress_core = make_battle_progress(py, progress_fn);
         let core_eval1: search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
-            call_python_eval_bf16(py, eval_fn1, boards, reserves, batch_size, cfg.grid_size, 0.0)
+            call_python_eval_bf16(py, eval_fn1, boards, reserves, batch_size, cfg.grid_size)
         });
         let core_eval2: search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
-            call_python_eval_bf16(py, eval_fn2, boards, reserves, batch_size, cfg.grid_size, 0.0)
+            call_python_eval_bf16(py, eval_fn2, boards, reserves, batch_size, cfg.grid_size)
         });
 
         let result = play_battle_core(

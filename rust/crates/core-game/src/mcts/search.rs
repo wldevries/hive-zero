@@ -79,17 +79,17 @@ fn dir_epsilon(params: &SearchParams) -> f32 {
 }
 
 /// UCB score for child selection.
-/// `node.value()` is from the parent's player's perspective, so it is added
-/// directly without sign adjustment. See docs/mcts_value_convention.md.
+/// `node.value(contempt)` is from the parent's player's perspective, so it is
+/// added directly without sign adjustment. See docs/mcts_value_convention.md.
 fn ucb_score<M: Copy>(node: &MctsNode<M>, parent_visits: u32, params: &SearchParams) -> f32 {
     let c_puct = calculate_cpuct(params, parent_visits);
     let eps = dir_epsilon(params);
-    calculate_ucb_score(node, c_puct, parent_visits, eps)
+    calculate_ucb_score(node, c_puct, parent_visits, eps, params.draw_contempt)
 }
 
 #[inline]
-fn calculate_ucb_score<M: Copy>(node: &MctsNode<M>, c_puct: f32, parent_visits: u32, eps: f32) -> f32 {
-    calculate_ucb_score_parts(node.value(), node.prior(eps), node.visit_count, c_puct, parent_visits)
+fn calculate_ucb_score<M: Copy>(node: &MctsNode<M>, c_puct: f32, parent_visits: u32, eps: f32, contempt: f32) -> f32 {
+    calculate_ucb_score_parts(node.value(contempt), node.prior(eps), node.visit_count, c_puct, parent_visits)
 }
 
 #[inline]
@@ -124,13 +124,14 @@ fn best_child<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params: &SearchPar
     let node = arena.get(node_id);
     let parent_visits = node.visit_count;
     let c_puct = calculate_cpuct(params, parent_visits);
+    let contempt = params.draw_contempt;
     let mut best_id = node.first_child.expect("no children");
-    let mut best_score = calculate_ucb_score(arena.get(best_id), c_puct, parent_visits, eps);
+    let mut best_score = calculate_ucb_score(arena.get(best_id), c_puct, parent_visits, eps, contempt);
 
     let mut current = arena.get(best_id).next_sibling;
     while let Some(child_id) = current {
         let child = arena.get(child_id);
-        let score = calculate_ucb_score(child, c_puct, parent_visits, eps);
+        let score = calculate_ucb_score(child, c_puct, parent_visits, eps, contempt);
         if score > best_score {
             best_score = score;
             best_id = child_id;
@@ -207,13 +208,17 @@ fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_visits: u32, n_t
     score
 }
 
-/// Backpropagate a value up the tree.
-/// `value` is from the perspective of the player to move at `node_id`.
-/// Each node stores value from its parent's player's perspective.
-/// Sign flips only when crossing a player boundary (parent.turn_player != node.turn_player),
-/// which correctly handles same-player consecutive turns (e.g. Zertz mid-captures).
-fn backpropagate<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, value: f32) {
-    // Invariant: `value` is from the current node's player's perspective.
+/// Backpropagate a (W−L, D) pair up the tree.
+/// `value` is the zero-sum W−L component from the perspective of the player to
+/// move at `node_id`; sign-flips on every player boundary, exactly like a
+/// regular zero-sum scalar. `draw` is the symmetric draw-probability component
+/// and is added unflipped at every ancestor — both players see a draw with the
+/// same magnitude, so contempt only enters at `value(contempt)` evaluation time.
+/// Splitting the two components is what makes draw contempt mathematically
+/// correct under the zero-sum sign-flip convention. See
+/// docs/mcts_value_convention.md.
+fn backpropagate<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, value: f32, draw: f32) {
+    // Invariant: `value` is the W−L component from the current node's player's perspective.
     // Transform to parent's perspective before storing, carry that value up.
     let mut node_id = node_id;
     let mut value = value;
@@ -231,6 +236,7 @@ fn backpropagate<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, value: f32)
         let node = arena.get_mut(node_id);
         node.visit_count += 1;
         node.value_sum += store_value;
+        node.draw_sum += draw;
         match parent {
             None => break,
             Some(pid) => { value = store_value; node_id = pid; }
@@ -254,11 +260,13 @@ fn apply_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, mut node_id: NodeId) {
     }
 }
 
-/// Correct virtual loss by replacing the -1.0 placeholder with the real backed-up value.
-/// Does NOT increment visit_count (already done by apply_virtual_loss).
-/// `real_value` is from the perspective of the player to move at `node_id`.
-/// Uses the same player-aware sign logic as backpropagate.
-fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real_value: f32) {
+/// Correct virtual loss by replacing the -1.0 placeholder with the real backed-up
+/// (W−L, D) pair. Does NOT increment visit_count (already done by apply_virtual_loss).
+/// `real_value` is the W−L component from the perspective of the player to move at
+/// `node_id`; `real_draw` is the symmetric draw component (added unflipped at every
+/// ancestor, mirroring `backpropagate`). Uses the same player-aware sign logic as
+/// backpropagate for the W−L component.
+fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real_value: f32, real_draw: f32) {
     let mut node_id = node_id;
     let mut value = real_value;
     loop {
@@ -273,8 +281,10 @@ fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real
             (node.parent, sv)
         };
         let node = arena.get_mut(node_id);
-        // +1.0 undoes the apply_virtual_loss placeholder; store_value adds the real backed-up value.
+        // +1.0 undoes the apply_virtual_loss placeholder; store_value adds the real backed-up W−L.
         node.value_sum += 1.0 + store_value;
+        // apply_virtual_loss did not touch draw_sum, so just add the real draw.
+        node.draw_sum += real_draw;
         match parent {
             None => break,
             Some(pid) => { value = store_value; node_id = pid; }
@@ -282,15 +292,18 @@ fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real
     }
 }
 
-/// Terminal game value from a perspective.
-/// `contempt` is the draw contempt: draws return -contempt, matching the WDL
-/// formula `W - L - contempt * D` applied to terminal WDL (0,1,0) for a draw.
-pub fn terminal_value(outcome: Outcome, perspective: Player, contempt: f32) -> f32 {
+/// Terminal game (W−L, D) pair from a perspective, mirroring the per-leaf
+/// outputs of a WDL value head: a sure win gives (+1, 0), a sure loss gives
+/// (−1, 0), a sure draw gives (0, 1). The two components are propagated
+/// separately by `backpropagate` because the W−L component is zero-sum
+/// (sign-flips on player change) while the D component is symmetric.
+/// Contempt is applied at `node.value(contempt)` evaluation time, not here.
+pub fn terminal_value(outcome: Outcome, perspective: Player) -> (f32, f32) {
     match outcome {
-        Outcome::Ongoing => 0.0,
-        Outcome::Draw => -contempt,
+        Outcome::Ongoing => (0.0, 0.0),
+        Outcome::Draw => (0.0, 1.0),
         Outcome::WonBy(winner) => {
-            if winner == perspective { 1.0 } else { -1.0 }
+            if winner == perspective { (1.0, 0.0) } else { (-1.0, 0.0) }
         }
     }
 }
@@ -467,8 +480,8 @@ impl<G: GameEngine> MctsSearch<G> {
             let game = self.reconstruct_game(leaf);
 
             if game.is_game_over() {
-                let value = terminal_value(game.outcome(), game.next_player(), self.params.draw_contempt);
-                backpropagate(&mut self.arena, leaf, value);
+                let (value, draw) = terminal_value(game.outcome(), game.next_player());
+                backpropagate(&mut self.arena, leaf, value, draw);
             } else {
                 // Apply virtual loss so subsequent selections in this batch diverge.
                 apply_virtual_loss(&mut self.arena, leaf);
@@ -510,18 +523,24 @@ impl<G: GameEngine> MctsSearch<G> {
     }
 
     /// Expand all stashed leaves with NN outputs and backpropagate values.
-    /// Consumes the stash. policies and values must be aligned with stash order
-    /// (i.e. the order leaves were returned across all prior select_leaves calls).
+    /// Consumes the stash. `policies`, `values`, and `draws` must be aligned with
+    /// stash order (i.e. the order leaves were returned across all prior
+    /// `select_leaves` calls). `values[i]` is the W−L scalar for leaf i;
+    /// `draws[i]` is its D probability. Pass `&[]` for `draws` if the eval head
+    /// does not predict draw probabilities (treated as all-zeros — no contempt
+    /// contribution from these leaves).
     pub fn expand_and_backprop(
         &mut self,
         policies: &[Vec<f32>],
         values: &[f32],
+        draws: &[f32],
     ) {
         let stashed = std::mem::take(&mut self.stashed_leaves);
         for (i, (leaf, mut game)) in stashed.into_iter().enumerate() {
             expand_with_policy::<G>(&mut self.arena, leaf, &mut game, &policies[i], self.params.max_children);
             let value = values[i];
-            correct_virtual_loss(&mut self.arena, leaf, value);
+            let draw = if draws.is_empty() { 0.0 } else { draws[i] };
+            correct_virtual_loss(&mut self.arena, leaf, value, draw);
         }
     }
 
@@ -614,6 +633,7 @@ impl<G: GameEngine> MctsSearch<G> {
 
     /// Get the best move by visit count.
     pub fn best_move(&self) -> Option<G::Move> {
+        let contempt = self.params.draw_contempt;
         let root = self.arena.get(self.root);
         let mut best_visits = 0u32;
         let mut best_value = f32::NEG_INFINITY;
@@ -624,10 +644,10 @@ impl<G: GameEngine> MctsSearch<G> {
             let child = self.arena.get(cid);
             if child.visit_count > best_visits {
                 best_visits = child.visit_count;
-                best_value = child.value();
+                best_value = child.value(contempt);
                 best_move = Some(child.move_from_parent);
-            } else if child.visit_count == best_visits && best_move.is_some() && child.value() > best_value {
-                best_value = child.value();
+            } else if child.visit_count == best_visits && best_move.is_some() && child.value(contempt) > best_value {
+                best_value = child.value(contempt);
                 best_move = Some(child.move_from_parent);
             }
             child_id = child.next_sibling;
@@ -676,6 +696,7 @@ impl<G: GameEngine> MctsSearch<G> {
 
         // Collect children: (move, raw_visits, prior, value)
         let eps = dir_epsilon(&self.params);
+        let contempt = self.params.draw_contempt;
         struct ChildInfo<M: Copy> {
             mv: M,
             visits: u32,
@@ -690,7 +711,7 @@ impl<G: GameEngine> MctsSearch<G> {
                 mv: child.move_from_parent,
                 visits: child.visit_count,
                 prior: child.prior(eps),
-                value: child.value(),
+                value: child.value(contempt),
             });
             child_id = child.next_sibling;
         }
@@ -813,7 +834,7 @@ impl<G: GameEngine> MctsSearch<G> {
     /// Negated because the root has no parent and its value_sum accumulates
     /// from the "opposite" frame. See docs/mcts_value_convention.md.
     pub fn root_value(&self) -> f32 {
-        -self.arena.get(self.root).value()
+        -self.arena.get(self.root).value(self.params.draw_contempt)
     }
 
     /// Encode a game state for NN evaluation.

@@ -102,7 +102,7 @@ mod tests {
                 policies.push(uniform_policy(&leaf_game));
             }
 
-            search.expand_and_backprop(&policies, &values);
+            search.expand_and_backprop(&policies, &values, &[]);
         }
 
         search

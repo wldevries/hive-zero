@@ -126,7 +126,7 @@ mod tests {
                 policies.push(lookahead_policy(&mut leaf_game));
             }
 
-            search.expand_and_backprop(&policies, &values);
+            search.expand_and_backprop(&policies, &values, &[]);
         }
 
         search

@@ -4,11 +4,18 @@
 /// from ~4KB+ to ~60 bytes.
 ///
 /// # Value convention
-/// `value_sum` accumulates values from the *parent's player's* perspective:
-/// positive means the move that led here was good for whoever chose it.
-/// UCB selection uses `node.value() + exploration` directly (no negation).
-/// The root has no parent, so `root_value()` negates to recover the root
-/// player's own expected return. See docs/mcts_value_convention.md.
+/// `value_sum` accumulates the zero-sum (W − L) component from the *parent's
+/// player's* perspective: positive means the move that led here was good for
+/// whoever chose it. Sign-flips on every player boundary during backprop.
+///
+/// `draw_sum` accumulates the draw probability D *symmetrically* — never
+/// sign-flipped, because both players see a draw with the same magnitude.
+/// Combining them with `value(contempt) = (value_sum − contempt · draw_sum) / N`
+/// gives the standard `W − L − contempt · D` per-player Q value for UCB.
+///
+/// UCB selection uses `node.value(contempt) + exploration` directly (no
+/// negation). The root has no parent, so `root_value()` negates to recover
+/// the root player's own expected return. See docs/mcts_value_convention.md.
 ///
 /// # Prior convention
 /// `policy_prior` is the raw NN softmax output and is never mutated after
@@ -26,9 +33,14 @@ pub struct MctsNode<M: Copy> {
     pub next_sibling: Option<NodeId>,
     /// Number of times this node has been selected (includes virtual-loss visits).
     pub visit_count: u32,
-    /// Sum of backed-up values from the *parent's* player's perspective.
+    /// Sum of zero-sum W−L components, from the *parent's* player's perspective.
     /// Positive means the move that led here was good for whoever chose it.
+    /// Sign-flipped on every player boundary during backprop.
     pub value_sum: f32,
+    /// Sum of draw-probability components. Symmetric — added unflipped at
+    /// every ancestor regardless of player, because both players see a draw
+    /// with the same magnitude. Combined with `value_sum` via `value(contempt)`.
+    pub draw_sum: f32,
     /// Clean NN softmax probability — never mutated after node creation.
     pub policy_prior: f32,
     /// Dirichlet noise component; 0.0 for all non-root-child nodes.
@@ -51,6 +63,7 @@ impl<M: Copy> MctsNode<M> {
             next_sibling: None,
             visit_count: 0,
             value_sum: 0.0,
+            draw_sum: 0.0,
             policy_prior,
             dirichlet_noise: 0.0,
             is_expanded: false,
@@ -71,16 +84,17 @@ impl<M: Copy> MctsNode<M> {
         }
     }
 
-    /// Mean backed-up value from the *parent's* player's perspective.
-    /// Positive means this was a good move for whoever chose it.
-    /// Returns 0 for unvisited nodes.
-    /// For the root's own perspective, use `MctsSearch::root_value()` instead.
+    /// Mean backed-up Q value from the *parent's* player's perspective, with
+    /// draw contempt applied: `(value_sum − contempt · draw_sum) / visit_count`.
+    /// Positive means this was a good move for whoever chose it. Returns 0 for
+    /// unvisited nodes. For the root's own perspective, use
+    /// `MctsSearch::root_value()` instead.
     #[inline]
-    pub fn value(&self) -> f32 {
+    pub fn value(&self, contempt: f32) -> f32 {
         if self.visit_count == 0 {
             0.0
         } else {
-            self.value_sum / self.visit_count as f32
+            (self.value_sum - contempt * self.draw_sum) / self.visit_count as f32
         }
     }
 }

@@ -85,7 +85,7 @@ fn run_simulations_single(
         let policies: Vec<Vec<f32>> = (0..nl)
             .map(|i| policy_flat[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].to_vec())
             .collect();
-        search.expand_and_backprop(&policies, &values);
+        search.expand_and_backprop(&policies, &values, &[]);
         done += nl;
     }
     Ok(())
@@ -390,7 +390,7 @@ pub fn play_selfplay_core(
                 if per_game_policies[i].is_empty() {
                     continue;
                 }
-                searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i]);
+                searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i], &[]);
             }
 
             if game_sims.iter().zip(sim_caps.iter()).all(|(s, c)| *s >= *c) {

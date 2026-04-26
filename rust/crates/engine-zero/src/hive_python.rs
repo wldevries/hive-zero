@@ -20,8 +20,7 @@ fn call_python_eval(
     reserves: &[f32],
     batch_size: usize,
     grid_size: usize,
-    contempt: f32,
-) -> Result<(Vec<f32>, Vec<f32>), String> {
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
     let board_size = NUM_CHANNELS * grid_size * grid_size;
     let board_arr = numpy::ndarray::Array2::from_shape_vec(
         (batch_size, board_size),
@@ -55,12 +54,20 @@ fn call_python_eval(
         .map_err(|e| e.to_string())?
         .readonly();
     let wdl = wdl_arr.as_slice().map_err(|e| e.to_string())?;
-    let values: Vec<f32> = (0..batch_size)
-        .map(|i| wdl[i * 3] - wdl[i * 3 + 2] - contempt * wdl[i * 3 + 1])
-        .collect();
+    // Split WDL into the zero-sum W−L scalar and the symmetric D probability so
+    // MCTS can backprop them separately and apply contempt only at evaluation
+    // time. Baking contempt into a scalar here would corrupt the draw component
+    // under the zero-sum sign-flip convention used in backprop.
+    let mut values = Vec::with_capacity(batch_size);
+    let mut draws = Vec::with_capacity(batch_size);
+    for i in 0..batch_size {
+        values.push(wdl[i * 3] - wdl[i * 3 + 2]);
+        draws.push(wdl[i * 3 + 1]);
+    }
     Ok((
         policy.as_slice().map_err(|e| e.to_string())?.to_vec(),
         values,
+        draws,
     ))
 }
 
@@ -372,7 +379,7 @@ impl PyGame {
 
         let gs = self.game.nn_grid_size;
         let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
-            call_python_eval(eval_fn, boards, reserves, batch_size, gs, draw_contempt)
+            call_python_eval(eval_fn, boards, reserves, batch_size, gs)
         });
         let mut search_params = SearchParams::new(
             CpuctStrategy::Constant { c_puct },
@@ -412,10 +419,15 @@ impl PyGame {
             engine
                 .infer_batch(boards, reserves, batch_size, NUM_CHANNELS, gs, RESERVE_SIZE)
                 .map(|r: crate::inference::HiveInferenceResult| {
-                    let values: Vec<f32> = (0..batch_size)
-                        .map(|i| r.wdl[i * 3] - r.wdl[i * 3 + 2] - draw_contempt * r.wdl[i * 3 + 1])
-                        .collect();
-                    (r.policy, values)
+                    // Split WDL into W−L (zero-sum) and D (symmetric); contempt
+                    // is applied at value() time inside MCTS, not baked here.
+                    let mut values = Vec::with_capacity(batch_size);
+                    let mut draws = Vec::with_capacity(batch_size);
+                    for i in 0..batch_size {
+                        values.push(r.wdl[i * 3] - r.wdl[i * 3 + 2]);
+                        draws.push(r.wdl[i * 3 + 1]);
+                    }
+                    (r.policy, values, draws)
                 })
                 .map_err(|e| e.to_string())
         });

@@ -80,7 +80,7 @@ pub fn best_move_core(
             .map(|k| flat_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE].to_vec())
             .collect();
 
-        search.expand_and_backprop(&policies, &leaf_values);
+        search.expand_and_backprop(&policies, &leaf_values, &[]);
         done += nl;
     }
 
@@ -225,7 +225,7 @@ pub fn play_battle_core(
             }
             for (i, &gi) in mcts_games.iter().enumerate() {
                 if per_game_policies[i].is_empty() { continue; }
-                searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i]);
+                searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i], &[]);
             }
             if game_sims.iter().all(|&s| s >= simulations) { break; }
         }
@@ -454,7 +454,7 @@ pub fn play_selfplay_core(
             }
             for (i, &gi) in mcts_games.iter().enumerate() {
                 if per_game_policies[i].is_empty() { continue; }
-                searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i]);
+                searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i], &[]);
             }
 
             if game_sims.iter().zip(sim_caps.iter()).all(|(s, c)| *s >= *c) { break; }

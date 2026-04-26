@@ -278,7 +278,7 @@ fn run_mcts(simulations: u32, batch_size: usize) {
         if leaf_ids.is_empty() { break; }
         let policies: Vec<Vec<f32>> = leaf_ids.iter().map(|_| uniform_policy.clone()).collect();
         let values: Vec<f32> = vec![0.0; leaf_ids.len()];
-        search.expand_and_backprop(&policies, &values);
+        search.expand_and_backprop(&policies, &values, &[]);
     }
 
     let elapsed = start.elapsed();

@@ -28,7 +28,7 @@ fn run_mcts_demo(simulations: u32) {
         let nl = leaves.len();
         let policies: Vec<Vec<f32>> = (0..nl).map(|_| uniform_policy.clone()).collect();
         let values: Vec<f32> = vec![0.0; nl];
-        search.expand_and_backprop(&policies, &values);
+        search.expand_and_backprop(&policies, &values, &[]);
     }
     let elapsed = start.elapsed();
 

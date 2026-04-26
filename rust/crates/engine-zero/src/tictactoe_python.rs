@@ -272,6 +272,7 @@ impl PyTTTSelfPlaySession {
                     searches[gi].expand_and_backprop(
                         &per_game_policies[i],
                         &per_game_values[i],
+                        &[],
                     );
                 }
 
@@ -539,7 +540,7 @@ impl PyTTTGame {
             let policies: Vec<Vec<f32>> = (0..count)
                 .map(|i| policies_flat[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].to_vec())
                 .collect();
-            search.expand_and_backprop(&policies, &values);
+            search.expand_and_backprop(&policies, &values, &[]);
             sims_done += count;
         }
 
