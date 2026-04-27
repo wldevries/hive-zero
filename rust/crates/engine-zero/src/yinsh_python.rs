@@ -29,13 +29,14 @@ const SENTINEL: i64 = (GRID_SIZE * GRID_SIZE) as i64; // out-of-board grid index
 // Python eval callback adapter
 // ---------------------------------------------------------------------------
 
-/// Call `eval_fn(boards[N, C, H, W], reserves[N, R]) -> (policy[N, P], value[N])`.
+/// Call `eval_fn(boards[N, C, H, W], reserves[N, R]) -> (policy[N, P], wdl[N, 3])`.
+/// Returns `(policy, values, draws)` where `values[i] = W-L` and `draws[i] = D`.
 fn call_python_eval(
     eval_fn: &Py<PyAny>,
     boards: &[f32],
     reserves: &[f32],
     batch_size: usize,
-) -> Result<(Vec<f32>, Vec<f32>), String> {
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
     Python::attach(|py| {
         let board_arr = numpy::ndarray::Array2::from_shape_vec(
             (batch_size, BOARD_FLAT),
@@ -60,7 +61,7 @@ fn call_python_eval(
             .map_err(|e| e.to_string())?;
         let tuple = result
             .cast::<PyTuple>()
-            .map_err(|_| "eval_fn must return (policy, value) tuple".to_string())?;
+            .map_err(|_| "eval_fn must return (policy, wdl) tuple".to_string())?;
 
         let policy = tuple
             .get_item(0)
@@ -68,16 +69,25 @@ fn call_python_eval(
             .cast::<PyArray2<f32>>()
             .map_err(|e| e.to_string())?
             .readonly();
-        let value = tuple
+        let wdl = tuple
             .get_item(1)
             .map_err(|e| e.to_string())?
-            .cast::<PyArray1<f32>>()
+            .cast::<PyArray2<f32>>()
             .map_err(|e| e.to_string())?
             .readonly();
+        let wdl_slice = wdl.as_slice().map_err(|e| e.to_string())?;
+
+        let mut values = Vec::with_capacity(batch_size);
+        let mut draws = Vec::with_capacity(batch_size);
+        for i in 0..batch_size {
+            values.push(wdl_slice[i * 3] - wdl_slice[i * 3 + 2]); // W - L
+            draws.push(wdl_slice[i * 3 + 1]);                       // D
+        }
 
         Ok((
             policy.as_slice().map_err(|e| e.to_string())?.to_vec(),
-            value.as_slice().map_err(|e| e.to_string())?.to_vec(),
+            values,
+            draws,
         ))
     })
 }

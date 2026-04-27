@@ -93,7 +93,7 @@ class SelfPlayTrainer:
         """Python NN eval callback for the Rust self-play loop.
 
         Rust passes `(board[N,9,11,11], reserve[N,6])`; we return
-        `(policy[N,7139], value[N])` as float32 numpy arrays.
+        `(policy[N,7139], wdl[N,3])` as float32 numpy arrays.
         """
         board = torch.from_numpy(np.array(board_tensor_np)).to(
             self.device, dtype=torch.float32
@@ -106,10 +106,11 @@ class SelfPlayTrainer:
                 device_type="cuda" if self.device != "cpu" else "cpu",
                 dtype=torch.bfloat16,
             ):
-                policy, value = self.model(board, reserve)
+                policy, wdl_logits = self.model(board, reserve)
+            wdl = torch.softmax(wdl_logits, dim=1)
         return (
             policy.float().cpu().numpy(),
-            value.float().cpu().numpy().squeeze(1),
+            wdl.float().cpu().numpy(),
         )
 
     def run(

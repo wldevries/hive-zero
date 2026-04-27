@@ -29,10 +29,10 @@ POLICY_SIZE = POLICY_CHANNELS * GRID_SIZE * GRID_SIZE  # 7139
 
 
 class YinshNet(nn.Module):
-    """Trunk → flat policy head + value head.
+    """Trunk → flat policy head + WDL value head.
 
     Input:  board (B, 9, 11, 11), reserve (B, 6)
-    Output: policy (B, 7139), value (B, 1) in [-1, 1]
+    Output: policy (B, 7139), wdl_logits (B, 3) raw — callers softmax as needed.
     """
 
     def __init__(self, num_blocks: int = 8, channels: int = 96):
@@ -50,11 +50,11 @@ class YinshNet(nn.Module):
         # then 54 ring-movement channels = 6 dirs × 9 distances).
         self.policy_conv = nn.Conv2d(channels, POLICY_CHANNELS, 1)
 
-        # Value head: conv1x1 → flatten → FC256 → tanh.
+        # WDL value head: conv1x1 → flatten → FC256 → 3 logits (Win, Draw, Loss).
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(1)
         self.value_fc1 = nn.Linear(GRID_SIZE * GRID_SIZE, 256)
-        self.value_fc2 = nn.Linear(256, 1)
+        self.value_fc2 = nn.Linear(256, 3)
 
     def forward(self, board: torch.Tensor, reserve: torch.Tensor):
         # Broadcast the 6-element reserve vector spatially so the trunk sees
@@ -65,14 +65,14 @@ class YinshNet(nn.Module):
         for block in self.res_blocks:
             x = block(x)
 
-        policy_logits = self.policy_conv(x).reshape(x.size(0), -1)  # (B, 847)
+        policy_logits = self.policy_conv(x).reshape(x.size(0), -1)  # (B, 7139)
 
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.view(v.size(0), -1)
         v = F.relu(self.value_fc1(v))
-        value = torch.tanh(self.value_fc2(v))
+        wdl_logits = self.value_fc2(v)  # (B, 3) raw logits
 
-        return policy_logits, value
+        return policy_logits, wdl_logits
 
 
 def create_model(num_blocks: int = 8, channels: int = 96) -> YinshNet:
@@ -115,6 +115,18 @@ def load_checkpoint(path: str) -> tuple[YinshNet, dict]:
     return model, ckpt
 
 
+class _OnnxExportWrapper(nn.Module):
+    """Wraps YinshNet for ONNX export, softmaxing WDL logits to probabilities."""
+    def __init__(self, model: "YinshNet"):
+        super().__init__()
+        self.model = model
+
+    def forward(self, board: torch.Tensor, reserve: torch.Tensor):
+        policy, wdl_logits = self.model(board, reserve)
+        wdl = F.softmax(wdl_logits, dim=1)
+        return policy, wdl
+
+
 def export_onnx(model: YinshNet, path: str):
     """Export to ONNX for Rust-native inference via the `ort` crate."""
     was_training = model.training
@@ -122,14 +134,15 @@ def export_onnx(model: YinshNet, path: str):
     device = next(model.parameters()).device
     dummy_board = torch.zeros(1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE, device=device)
     dummy_reserve = torch.zeros(1, RESERVE_SIZE, device=device)
+    wrapper = _OnnxExportWrapper(model)
     torch.onnx.export(
-        model,
+        wrapper,
         (dummy_board, dummy_reserve),
         path,
         input_names=["board", "reserve"],
-        output_names=["policy", "value"],
+        output_names=["policy", "wdl"],
         dynamic_axes={"board": {0: "batch"}, "reserve": {0: "batch"},
-                      "policy": {0: "batch"}, "value": {0: "batch"}},
+                      "policy": {0: "batch"}, "wdl": {0: "batch"}},
         opset_version=17,
         dynamo=False,
     )

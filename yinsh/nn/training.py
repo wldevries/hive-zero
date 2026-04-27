@@ -283,6 +283,14 @@ def _policy_ce(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return -(t_norm * torch.log_softmax(logits, dim=1)).sum(dim=1)
 
 
+def _scalar_to_wdl(v: torch.Tensor) -> torch.Tensor:
+    """Convert scalar value targets in [-1, 1] to (W, D, L) soft targets summing to 1."""
+    w = v.clamp(min=0)
+    l = (-v).clamp(min=0)
+    d = 1.0 - w - l
+    return torch.stack([w, d, l], dim=1)
+
+
 class Trainer:
     """SGD+momentum trainer for YinshNet."""
 
@@ -334,7 +342,7 @@ class Trainer:
             value_only_mask = value_only_mask.to(self.device)
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                policy_logits, value = self._compiled(board, reserve)
+                policy_logits, wdl_logits = self._compiled(board, reserve)
 
             # Policy loss: skip value-only (fast-cap) turns.
             policy_active = ~value_only_mask
@@ -346,7 +354,11 @@ class Trainer:
             else:
                 policy_loss = torch.tensor(0.0, device=self.device)
 
-            value_loss = ((value.squeeze(1) - value_target.squeeze(1)) ** 2).mean()
+            # Value loss: cross-entropy on WDL soft targets.
+            wdl_target = _scalar_to_wdl(value_target.squeeze(1))  # (B, 3)
+            log_wdl = torch.log_softmax(wdl_logits.float(), dim=1)
+            per_sample_value = -(wdl_target * log_wdl).sum(dim=1)
+            value_loss = per_sample_value.mean()
 
             loss = policy_loss + value_loss_scale * value_loss
 

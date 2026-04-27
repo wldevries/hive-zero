@@ -186,7 +186,7 @@ impl HiveOrtEngine {
 }
 
 /// ONNX Runtime inference engine for Yinsh.
-/// Single flat policy output `policy[B, POLICY_SIZE]` and `value[B, 1]`.
+/// Single flat policy output `policy[B, POLICY_SIZE]` and `wdl[B, 3]`.
 pub struct YinshOrtEngine {
     session: Session,
     num_channels: usize,
@@ -228,13 +228,14 @@ impl YinshOrtEngine {
         })
     }
 
-    /// Returns `(policy_flat[B*POLICY_SIZE], value_flat[B])`.
+    /// Returns `(policy_flat[B*POLICY_SIZE], values[B], draws[B])`.
+    /// `values[i] = W-L`, `draws[i] = D` extracted from the WDL softmax output.
     pub fn infer_batch(
         &mut self,
         boards: &[f32],
         reserves: &[f32],
         batch_size: usize,
-    ) -> Result<(Vec<f32>, Vec<f32>), String> {
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
         let board_tensor = Tensor::from_array((
             [batch_size, self.num_channels, self.grid_size, self.grid_size],
             boards.to_vec(),
@@ -257,14 +258,21 @@ impl YinshOrtEngine {
         let (_, policy_data) = outputs["policy"]
             .try_extract_tensor::<f32>()
             .map_err(|e| e.to_string())?;
-        let (_, value_data) = outputs["value"]
+        let (_, wdl_data) = outputs["wdl"]
             .try_extract_tensor::<f32>()
             .map_err(|e| e.to_string())?;
 
         debug_assert_eq!(policy_data.len(), batch_size * self.policy_size);
-        debug_assert_eq!(value_data.len(), batch_size);
+        debug_assert_eq!(wdl_data.len(), batch_size * 3);
 
-        Ok((policy_data.to_vec(), value_data.to_vec()))
+        let mut values = Vec::with_capacity(batch_size);
+        let mut draws = Vec::with_capacity(batch_size);
+        for i in 0..batch_size {
+            values.push(wdl_data[i * 3] - wdl_data[i * 3 + 2]); // W - L
+            draws.push(wdl_data[i * 3 + 1]);                      // D
+        }
+
+        Ok((policy_data.to_vec(), values, draws))
     }
 }
 

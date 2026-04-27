@@ -106,11 +106,13 @@ def test_dataset_augmentation_preserves_sums(engine_zero):
     model = create_model(num_blocks=2, channels=8).eval()
 
     def eval_fn(b_np, r_np):
+        import torch.nn.functional as F
         b = torch.from_numpy(np.asarray(b_np)).to(dtype=torch.float32)
         r = torch.from_numpy(np.asarray(r_np)).to(dtype=torch.float32)
         with torch.no_grad():
-            policy, value = model(b, r)
-        return policy.cpu().numpy(), value.cpu().numpy().squeeze(1)
+            policy, wdl_logits = model(b, r)
+        wdl = F.softmax(wdl_logits, dim=1)
+        return policy.cpu().numpy(), wdl.cpu().numpy()
 
     session = engine_zero.YinshSelfPlaySession(
         num_games=1, simulations=4, max_moves=20, c_puct=1.5, play_batch_size=1,
@@ -169,11 +171,13 @@ def test_smoke_selfplay_then_train(engine_zero):
     model.eval()
 
     def eval_fn(board_np, reserve_np):
+        import torch.nn.functional as F
         b = torch.from_numpy(np.asarray(board_np)).to(dtype=torch.float32)
         r = torch.from_numpy(np.asarray(reserve_np)).to(dtype=torch.float32)
         with torch.no_grad():
-            policy, value = model(b, r)
-        return policy.cpu().numpy(), value.cpu().numpy().squeeze(1)
+            policy, wdl_logits = model(b, r)
+        wdl = F.softmax(wdl_logits, dim=1)
+        return policy.cpu().numpy(), wdl.cpu().numpy()
 
     session = engine_zero.YinshSelfPlaySession(
         num_games=2,
@@ -222,11 +226,13 @@ def test_smoke_battle(engine_zero):
 
     def make_eval(model):
         def fn(board_np, reserve_np):
+            import torch.nn.functional as F
             b = torch.from_numpy(np.asarray(board_np)).to(dtype=torch.float32)
             r = torch.from_numpy(np.asarray(reserve_np)).to(dtype=torch.float32)
             with torch.no_grad():
-                policy, value = model(b, r)
-            return policy.cpu().numpy(), value.cpu().numpy().squeeze(1)
+                policy, wdl_logits = model(b, r)
+            wdl = F.softmax(wdl_logits, dim=1)
+            return policy.cpu().numpy(), wdl.cpu().numpy()
 
         return fn
 

@@ -23,9 +23,10 @@ use crate::move_encoding::POLICY_SIZE;
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 
 /// Eval callback: `(boards_flat[N*BOARD_FLAT], reserves_flat[N*RESERVE_SIZE], n) ->
-/// (policy[N*POLICY_SIZE], value[N])`.
+/// (policy[N*POLICY_SIZE], values[N], draws[N])`.
+/// `values[i]` = W−L (zero-sum); `draws[i]` = D probability (symmetric).
 pub type EvalFn = Box<
-    dyn Fn(&[f32], &[f32], usize) -> Result<(Vec<f32>, Vec<f32>), String> + Send + Sync,
+    dyn Fn(&[f32], &[f32], usize) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> + Send + Sync,
 >;
 
 /// Progress callback: `(finished, total, active, total_moves)`.
@@ -77,7 +78,7 @@ fn run_simulations_single(
             flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&b);
             flat_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&r);
         }
-        let (policy_flat, values) = eval_fn(
+        let (policy_flat, values, draws) = eval_fn(
             &flat_boards[..nl * BOARD_FLAT],
             &flat_reserves[..nl * RESERVE_SIZE],
             nl,
@@ -85,7 +86,7 @@ fn run_simulations_single(
         let policies: Vec<Vec<f32>> = (0..nl)
             .map(|i| policy_flat[i * POLICY_SIZE..(i + 1) * POLICY_SIZE].to_vec())
             .collect();
-        search.expand_and_backprop(&policies, &values, &[]);
+        search.expand_and_backprop(&policies, &values, &draws);
         done += nl;
     }
     Ok(())
@@ -108,7 +109,7 @@ pub fn best_move_core(
     let mut root_board = vec![0f32; BOARD_FLAT];
     let mut root_reserve = vec![0f32; RESERVE_SIZE];
     board.encode_board(&mut root_board, &mut root_reserve);
-    let (root_policy, _root_value) = eval_fn(&root_board, &root_reserve, 1)?;
+    let (root_policy, _, _) = eval_fn(&root_board, &root_reserve, 1)?;
     search.init(board, &root_policy);
 
     run_simulations_single(&mut search, simulations, 8, &eval_fn)?;
@@ -176,7 +177,7 @@ pub fn play_battle_core(
             let mut root_board = vec![0f32; BOARD_FLAT];
             let mut root_reserve = vec![0f32; RESERVE_SIZE];
             boards[gi].encode_board(&mut root_board, &mut root_reserve);
-            let (root_policy, _) = eval_ref(&root_board, &root_reserve, 1)?;
+            let (root_policy, _, _) = eval_ref(&root_board, &root_reserve, 1)?;
             search.init(&boards[gi], &root_policy);
 
             run_simulations_single(&mut search, simulations, play_batch_size.max(1), eval_ref)?;
@@ -325,7 +326,7 @@ pub fn play_selfplay_core(
                 &mut root_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
             );
         }
-        let (init_policy, _) = eval_fn(&root_boards, &root_reserves, n)?;
+        let (init_policy, _, _) = eval_fn(&root_boards, &root_reserves, n)?;
         for (i, &gi) in active_games.iter().enumerate() {
             let policy_slice = &init_policy[i * POLICY_SIZE..(i + 1) * POLICY_SIZE];
             searches[gi].init(&boards[gi], policy_slice);
@@ -375,22 +376,24 @@ pub fn play_selfplay_core(
                 leaf_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&b);
                 leaf_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&r);
             }
-            let (leaf_policy, leaf_values) = eval_fn(&leaf_boards, &leaf_reserves, nl)?;
+            let (leaf_policy, leaf_values, leaf_draws) = eval_fn(&leaf_boards, &leaf_reserves, nl)?;
 
             // Group results back per game and call expand_and_backprop in stash order.
             let mut per_game_policies: Vec<Vec<Vec<f32>>> = (0..n).map(|_| Vec::new()).collect();
             let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
+            let mut per_game_draws: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
             for (k, &i) in leaf_game_idx.iter().enumerate() {
                 per_game_policies[i].push(
                     leaf_policy[k * POLICY_SIZE..(k + 1) * POLICY_SIZE].to_vec(),
                 );
                 per_game_values[i].push(leaf_values[k]);
+                per_game_draws[i].push(leaf_draws[k]);
             }
             for (i, &gi) in active_games.iter().enumerate() {
                 if per_game_policies[i].is_empty() {
                     continue;
                 }
-                searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i], &[]);
+                searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i], &per_game_draws[i]);
             }
 
             if game_sims.iter().zip(sim_caps.iter()).all(|(s, c)| *s >= *c) {
