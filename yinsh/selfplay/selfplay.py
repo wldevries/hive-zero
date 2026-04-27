@@ -139,6 +139,7 @@ class SelfPlayTrainer:
         use_ort: bool = False,
         value_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
+        draw_contempt: float = 0.0,
     ):
         from engine_zero import YinshSelfPlaySession
 
@@ -167,6 +168,7 @@ class SelfPlayTrainer:
             "dir_epsilon": dir_epsilon,
             "play_batch_size": play_batch_size,
             "augment_symmetry": augment_symmetry,
+            "draw_contempt": draw_contempt,
         }
 
         start_time = time.time()
@@ -222,6 +224,7 @@ class SelfPlayTrainer:
                 playout_cap_p=playout_cap_p,
                 fast_cap=fast_cap,
                 play_batch_size=play_batch_size,
+                draw_contempt=draw_contempt,
             )
 
             pbar = tqdm(total=91, unit="turn", desc="  Self-play", leave=False)

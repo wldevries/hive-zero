@@ -214,6 +214,7 @@ pub struct PyYinshSelfPlaySession {
     play_batch_size: usize,
     playout_cap_p: f32,
     fast_cap: usize,
+    draw_contempt: f32,
 }
 
 #[pymethods]
@@ -230,6 +231,7 @@ impl PyYinshSelfPlaySession {
         play_batch_size = 8,
         playout_cap_p = 0.0,
         fast_cap = 30,
+        draw_contempt = 0.0,
     ))]
     fn new(
         num_games: usize,
@@ -242,6 +244,7 @@ impl PyYinshSelfPlaySession {
         play_batch_size: usize,
         playout_cap_p: f32,
         fast_cap: usize,
+        draw_contempt: f32,
     ) -> Self {
         Self {
             num_games,
@@ -254,6 +257,7 @@ impl PyYinshSelfPlaySession {
             play_batch_size,
             playout_cap_p,
             fast_cap,
+            draw_contempt,
         }
     }
 
@@ -305,6 +309,7 @@ impl PyYinshSelfPlaySession {
             self.play_batch_size,
             self.playout_cap_p,
             self.fast_cap,
+            self.draw_contempt,
             core_eval,
             progress_core,
         )

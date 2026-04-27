@@ -70,6 +70,9 @@ def main():
     t.add_argument("--value-loss-scale", type=float, default=1.0)
     t.add_argument("--buf-dir", type=str, default=None,
                    help="Override replay buffer directory (default: models/{name}/)")
+    t.add_argument("--draw-contempt", type=float, default=0.0,
+                   help="Draw contempt: MCTS value = W - L - contempt * D. "
+                        "Positive = avoid draws (default: 0.0)")
 
     # battle
     b = sub.add_parser("battle", help="Pit two models against each other")
@@ -125,6 +128,7 @@ def main():
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
             buf_dir=args.buf_dir,
+            draw_contempt=args.draw_contempt,
         )
     elif args.command == "battle":
         from yinsh.selfplay.battle import run_battle
