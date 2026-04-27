@@ -309,19 +309,28 @@ fn run_mcts(simulations: u32, batch_size: usize) {
 // Random play
 // ---------------------------------------------------------------------------
 
-fn run_random(n: u32) {
+fn run_random(n: u32, simulations: u32) {
     use rand::RngExt;
     use hive_game::uhp::format_move_uhp;
 
     let verbose = n == 1;
+    let use_mcts = simulations > 0;
     if !verbose {
-        println!("Playing {n} random games...");
+        if use_mcts {
+            println!("Playing {n} MCTS games (uniform policy, {simulations} sims/move)...");
+        } else {
+            println!("Playing {n} random games...");
+        }
     }
 
     let mut total_moves = 0u64;
     let mut results = HashMap::new();
-
-    let mut valid_moves = vec![];
+    let mut valid_moves_all: Vec<usize> = vec![];
+    let mut game_lengths: Vec<u32> = Vec::with_capacity(n as usize);
+    // Accumulated MCTS depth stats across all moves in all games
+    let mut depth_sum = 0.0f64;
+    let mut depth_sum_sq = 0.0f64;
+    let mut depth_count = 0u64;
 
     for game_idx in 0..n {
         let mut game = Game::new();
@@ -330,7 +339,7 @@ fn run_random(n: u32) {
 
         while !game.is_game_over() {
             let moves = game.valid_moves();
-            valid_moves.push(moves.len());
+            valid_moves_all.push(moves.len());
             if verbose {
                 println!("\n--- Move {} | {} to play ---", move_num + 1, game.turn_color.as_char());
                 if move_num > 0 {
@@ -341,6 +350,47 @@ fn run_random(n: u32) {
             if moves.is_empty() {
                 if verbose { println!("  (pass)"); }
                 game.play_pass();
+            } else if use_mcts {
+                use core_game::mcts::search::MctsSearch;
+                use core_game::game::NNGame;
+                let ps = game.policy_size();
+                let uniform = vec![1.0f32 / ps as f32; ps];
+                let batch = 8usize;
+                let rounds = (simulations as usize + batch - 1) / batch;
+                let mut search = MctsSearch::<Game>::new(simulations as usize + 64);
+                search.init(&game, &uniform);
+                for _ in 0..rounds {
+                    let leaves = search.select_leaves(batch);
+                    if leaves.is_empty() { break; }
+                    let policies: Vec<Vec<f32>> = leaves.iter().map(|_| uniform.clone()).collect();
+                    let values = vec![0.0f32; leaves.len()];
+                    search.expand_and_backprop(&policies, &values, &[]);
+                }
+                let (ds, dss, dc) = search.take_depth_stats();
+                depth_sum += ds;
+                depth_sum_sq += dss;
+                depth_count += dc;
+                let dist = search.get_visit_distribution();
+                let mv = if dist.is_empty() {
+                    moves[rng.random_range(0..moves.len())]
+                } else {
+                    let r: f32 = rng.random();
+                    let mut cumulative = 0.0f32;
+                    let mut chosen = dist[0].0;
+                    for (m, p) in &dist {
+                        cumulative += p;
+                        if r <= cumulative {
+                            chosen = *m;
+                            break;
+                        }
+                    }
+                    chosen
+                };
+                if verbose {
+                    let uhp = format_move_uhp(&game, &mv);
+                    println!("  -> {uhp}");
+                }
+                game.play_move(&mv).unwrap();
             } else {
                 let idx = rng.random_range(0..moves.len());
                 let mv = moves[idx];
@@ -364,13 +414,34 @@ fn run_random(n: u32) {
         }
 
         *results.entry(game.state.as_str().to_string()).or_insert(0u32) += 1;
+        game_lengths.push(move_num);
     }
 
     if !verbose {
+        let n_f = n as f64;
+        let avg_len = total_moves as f64 / n_f;
+        let std_len = (game_lengths.iter()
+            .map(|&l| { let d = l as f64 - avg_len; d * d })
+            .sum::<f64>() / n_f).sqrt();
+
+        let nv = valid_moves_all.len() as f64;
+        let avg_valid = valid_moves_all.iter().sum::<usize>() as f64 / nv;
+        let std_valid = (valid_moves_all.iter()
+            .map(|&v| { let d = v as f64 - avg_valid; d * d })
+            .sum::<f64>() / nv).sqrt();
+
         println!();
-        println!("Total moves: {total_moves}");
-        println!("Avg moves/game: {:.1}", total_moves as f64 / n as f64);
-        println!("Avg valid moves: {:.1}", valid_moves.iter().sum::<usize>() as f64 / valid_moves.len() as f64);
+        if use_mcts {
+            println!("Simulations/move: {simulations}");
+        }
+        println!("Total moves:      {total_moves}");
+        println!("Avg moves/game:   {avg_len:.1}  (std {std_len:.1})");
+        println!("Avg valid moves:  {avg_valid:.1}  (std {std_valid:.1})");
+        if use_mcts && depth_count > 0 {
+            let avg_depth = depth_sum / depth_count as f64;
+            let std_depth = ((depth_sum_sq / depth_count as f64) - avg_depth * avg_depth).max(0.0).sqrt();
+            println!("Search depth:     avg {avg_depth:.1}  (std {std_depth:.1})  over {depth_count} sims");
+        }
         println!("Results:");
         let mut sorted: Vec<_> = results.iter().collect();
         sorted.sort_by(|a, b| b.1.cmp(a.1));
@@ -1121,6 +1192,9 @@ enum Command {
         /// Number of games to play (1 = turn-by-turn display)
         #[arg(default_value_t = 1)]
         n: u32,
+        /// MCTS simulations per move (0 = pure random)
+        #[arg(long, default_value_t = 0)]
+        simulations: u32,
     },
     /// Replay boardspace games from a path
     Replay {
@@ -1169,7 +1243,7 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Random { n } => run_random(n),
+        Command::Random { n, simulations } => run_random(n, simulations),
         Command::Replay { path } => replay::run_replay(&path),
         Command::Debug { path, sgf_name } => {
             let mut args = vec![path];
