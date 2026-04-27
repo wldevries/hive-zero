@@ -1,8 +1,32 @@
 """CLI entry point for the Yinsh AI engine."""
 
 import argparse
+import json
+import os
 
 from shared.lr_scheduler import lr_scheduler_from_string
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_HERE)
+_DEFAULT_MODEL_CONFIG_PATH = os.path.join(_REPO_ROOT, "configs", "yinsh", "medium.json")
+
+_FALLBACK_MODEL_CONFIG = {
+    "channels": 96,
+    "num_blocks": 8,
+}
+
+
+def _load_model_config(path: str | None) -> dict:
+    """Load model config from a JSON file, falling back to the repo default."""
+    if path is None:
+        path = _DEFAULT_MODEL_CONFIG_PATH
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        if path != _DEFAULT_MODEL_CONFIG_PATH:
+            raise
+        return _FALLBACK_MODEL_CONFIG
 
 
 def main():
@@ -14,6 +38,9 @@ def main():
     t.add_argument("--name", type=str, default="yinsh",
                    help="Model name; all paths derived as models/{name}/")
     t.add_argument("--device", type=str, default="cuda")
+    t.add_argument("--model-config", type=str, default=None,
+                   help="Path to JSON model config (default: configs/yinsh/medium.json)."
+                        " Ignored when resuming from an existing checkpoint.")
     t.add_argument("--generations", type=int, default=None)
     t.add_argument("--time-limit", type=float, default=None,
                    help="Training time limit in minutes")
@@ -21,8 +48,6 @@ def main():
     t.add_argument("--simulations", type=int, default=200)
     t.add_argument("--epochs-per-gen", type=int, default=1)
     t.add_argument("--training-batch-size", type=int, default=256)
-    t.add_argument("--blocks", type=int, default=8)
-    t.add_argument("--channels", type=int, default=96)
     t.add_argument("--lr", type=float, default=0.02)
     t.add_argument("--lr-schedule", type=str, default=None,
                    help="Stepped LR schedule, e.g. '0:0.1,20:0.02'. Overrides --lr.")
@@ -76,8 +101,7 @@ def main():
         trainer = SelfPlayTrainer(
             name=args.name,
             device=args.device,
-            num_blocks=args.blocks,
-            channels=args.channels,
+            model_config=_load_model_config(args.model_config),
             lr=args.lr,
             lr_scheduler=scheduler,
         )
@@ -131,6 +155,7 @@ def _run_play(args):
     if args.model:
         import numpy as np
         import torch
+        import torch.nn.functional as F
 
         from yinsh.nn.model import load_checkpoint
 
@@ -141,8 +166,9 @@ def _run_play(args):
             board = torch.from_numpy(np.array(board_np)).to(args.device, dtype=torch.float32)
             reserve = torch.from_numpy(np.array(reserve_np)).to(args.device, dtype=torch.float32)
             with torch.no_grad():
-                policy, value = model(board, reserve)
-            return policy.float().cpu().numpy(), value.float().cpu().numpy().squeeze(1)
+                policy, wdl_logits = model(board, reserve)
+            wdl = F.softmax(wdl_logits, dim=1)
+            return policy.float().cpu().numpy(), wdl.float().cpu().numpy()
     else:
         eval_fn = None
 

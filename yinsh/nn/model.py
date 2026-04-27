@@ -75,8 +75,12 @@ class YinshNet(nn.Module):
         return policy_logits, wdl_logits
 
 
-def create_model(num_blocks: int = 8, channels: int = 96) -> YinshNet:
-    return YinshNet(num_blocks=num_blocks, channels=channels)
+def create_model(model_config: dict | None = None) -> YinshNet:
+    cfg = model_config or {}
+    return YinshNet(
+        num_blocks=cfg.get("num_blocks", 8),
+        channels=cfg.get("channels", 96),
+    )
 
 
 def save_checkpoint(

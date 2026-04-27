@@ -52,8 +52,7 @@ class SelfPlayTrainer:
         self,
         name: str = "yinsh",
         device: str = "cuda",
-        num_blocks: int = 8,
-        channels: int = 96,
+        model_config: Optional[dict] = None,
         lr: float = 0.02,
         lr_scheduler: Optional[LRScheduler] = None,
     ):
@@ -78,10 +77,12 @@ class SelfPlayTrainer:
             )
         else:
             os.makedirs(self.model_dir, exist_ok=True)
-            self.model = create_model(num_blocks=num_blocks, channels=channels)
+            self.model = create_model(model_config)
+            blocks = len(self.model.res_blocks)
+            ch = self.model.input_conv.out_channels
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"New model '{name}': {num_blocks} blocks, {channels} channels, "
+                f"New model '{name}': {blocks} blocks, {ch} channels, "
                 f"{params / 1e6:.2f}M params"
             )
 

@@ -103,7 +103,7 @@ def test_dataset_augmentation_preserves_sums(engine_zero):
 
     from yinsh.nn.model import create_model
 
-    model = create_model(num_blocks=2, channels=8).eval()
+    model = create_model({"num_blocks": 2, "channels": 8}).eval()
 
     def eval_fn(b_np, r_np):
         import torch.nn.functional as F
@@ -167,7 +167,7 @@ def test_smoke_selfplay_then_train(engine_zero):
     from yinsh.nn.training import Trainer, YinshDataset
 
     device = "cpu"
-    model = create_model(num_blocks=2, channels=16).to(device)
+    model = create_model({"num_blocks": 2, "channels": 16}).to(device)
     model.eval()
 
     def eval_fn(board_np, reserve_np):
@@ -221,8 +221,8 @@ def test_smoke_battle(engine_zero):
     from yinsh.nn.model import create_model
 
     device = "cpu"
-    m1 = create_model(num_blocks=2, channels=16).to(device).eval()
-    m2 = create_model(num_blocks=2, channels=16).to(device).eval()
+    m1 = create_model({"num_blocks": 2, "channels": 16}).to(device).eval()
+    m2 = create_model({"num_blocks": 2, "channels": 16}).to(device).eval()
 
     def make_eval(model):
         def fn(board_np, reserve_np):
