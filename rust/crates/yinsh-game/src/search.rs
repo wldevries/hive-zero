@@ -140,7 +140,6 @@ pub struct BattleResult {
 pub fn play_battle_core(
     num_games: usize,
     simulations: usize,
-    max_moves: u32,
     c_puct: f32,
     play_batch_size: usize,
     eval_fn1: EvalFn,
@@ -189,7 +188,7 @@ pub fn play_battle_core(
             move_counts[gi] += 1;
             total_moves += 1;
 
-            if boards[gi].is_game_over() || move_counts[gi] >= max_moves {
+            if boards[gi].is_game_over() {
                 active[gi] = false;
                 finished += 1;
                 result.game_lengths.push(move_counts[gi]);
@@ -272,7 +271,6 @@ struct TurnRecord {
 pub fn play_selfplay_core(
     num_games: usize,
     simulations: usize,
-    max_moves: u32,
     temperature: f32,
     temp_threshold: u32,
     c_puct: f32,
@@ -455,7 +453,7 @@ pub fn play_selfplay_core(
             move_counts[gi] += 1;
             result.total_moves += 1;
 
-            if boards[gi].is_game_over() || move_counts[gi] >= max_moves {
+            if boards[gi].is_game_over() {
                 active[gi] = false;
                 finished_count += 1;
                 let len = move_counts[gi];
@@ -480,7 +478,7 @@ pub fn play_selfplay_core(
                         }
                     }
                     Outcome::Draw => result.draws += 1,
-                    Outcome::Ongoing => result.timeouts += 1,
+                    Outcome::Ongoing => {} // cannot happen: game is naturally bounded
                 }
             }
         }

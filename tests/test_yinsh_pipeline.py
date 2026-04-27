@@ -115,7 +115,7 @@ def test_dataset_augmentation_preserves_sums(engine_zero):
         return policy.cpu().numpy(), wdl.cpu().numpy()
 
     session = engine_zero.YinshSelfPlaySession(
-        num_games=1, simulations=4, max_moves=20, c_puct=1.5, play_batch_size=1,
+        num_games=1, simulations=4, c_puct=1.5, play_batch_size=1,
     )
     result = session.play_games(eval_fn)
     boards, _, policies, _, _, _ = result.training_data()
@@ -182,7 +182,6 @@ def test_smoke_selfplay_then_train(engine_zero):
     session = engine_zero.YinshSelfPlaySession(
         num_games=2,
         simulations=8,
-        max_moves=80,
         temperature=1.0,
         temp_threshold=4,
         c_puct=1.5,
@@ -239,7 +238,6 @@ def test_smoke_battle(engine_zero):
     session = engine_zero.YinshSelfPlaySession(
         num_games=2,
         simulations=4,
-        max_moves=60,
         c_puct=1.5,
         play_batch_size=1,
     )

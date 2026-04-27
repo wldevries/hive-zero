@@ -184,7 +184,6 @@ impl PyYinshBattleResult {
 pub struct PyYinshSelfPlaySession {
     num_games: usize,
     simulations: usize,
-    max_moves: u32,
     temperature: f32,
     temp_threshold: u32,
     c_puct: f32,
@@ -201,7 +200,6 @@ impl PyYinshSelfPlaySession {
     #[pyo3(signature = (
         num_games,
         simulations = 200,
-        max_moves = 400,
         temperature = 1.0,
         temp_threshold = 20,
         c_puct = 1.5,
@@ -214,7 +212,6 @@ impl PyYinshSelfPlaySession {
     fn new(
         num_games: usize,
         simulations: usize,
-        max_moves: u32,
         temperature: f32,
         temp_threshold: u32,
         c_puct: f32,
@@ -227,7 +224,6 @@ impl PyYinshSelfPlaySession {
         Self {
             num_games,
             simulations,
-            max_moves,
             temperature,
             temp_threshold,
             c_puct,
@@ -279,7 +275,6 @@ impl PyYinshSelfPlaySession {
         let result = play_selfplay_core(
             self.num_games,
             self.simulations,
-            self.max_moves,
             self.temperature,
             self.temp_threshold,
             self.c_puct,
@@ -324,7 +319,6 @@ impl PyYinshSelfPlaySession {
         let result = play_battle_core(
             self.num_games,
             self.simulations,
-            self.max_moves,
             self.c_puct,
             self.play_batch_size,
             core_eval1,

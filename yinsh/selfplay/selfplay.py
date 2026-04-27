@@ -121,7 +121,6 @@ class SelfPlayTrainer:
         simulations: int = 200,
         epochs_per_gen: int = 1,
         batch_size: int = 256,
-        max_moves: int = 400,
         replay_window: int = 8,
         checkpoint_every: int = 10,
         playout_cap_p: float = 0.0,
@@ -146,7 +145,7 @@ class SelfPlayTrainer:
                 f.write(LOG_HEADER)
 
         resolved_buf_dir = buf_dir if buf_dir is not None else self.model_dir
-        max_buffer = games_per_gen * max_moves * replay_window
+        max_buffer = games_per_gen * 91 * replay_window
         dataset = YinshDataset(max_size=max_buffer, buf_dir=resolved_buf_dir)
         dataset.augment_symmetry = augment_symmetry
         os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -156,7 +155,6 @@ class SelfPlayTrainer:
             "games_per_gen": games_per_gen,
             "epochs_per_gen": epochs_per_gen,
             "batch_size": batch_size,
-            "max_moves": max_moves,
             "replay_window": replay_window,
             "playout_cap_p": playout_cap_p,
             "fast_cap": fast_cap,
@@ -214,7 +212,6 @@ class SelfPlayTrainer:
             session = YinshSelfPlaySession(
                 num_games=games_per_gen,
                 simulations=simulations,
-                max_moves=max_moves,
                 temperature=temperature,
                 temp_threshold=temp_threshold,
                 c_puct=c_puct,
@@ -225,7 +222,7 @@ class SelfPlayTrainer:
                 play_batch_size=play_batch_size,
             )
 
-            pbar = tqdm(total=max_moves, unit="turn", desc="  Self-play", leave=False)
+            pbar = tqdm(total=91, unit="turn", desc="  Self-play", leave=False)
             turn = [0]
 
             def progress_fn(finished, total, active, total_moves):
@@ -247,12 +244,11 @@ class SelfPlayTrainer:
             p1 = result.wins_p1
             p2 = result.wins_p2
             d = result.draws
-            to = result.timeouts
             lengths = list(result.game_lengths)
 
             print(
                 f"  Results: white={_cg(f'{p1}')}  black={_cr(f'{p2}')}  "
-                f"draw={_cy(f'{d}')}  timeout={_cy(f'{to}')}"
+                f"draw={_cy(f'{d}')}"
             )
 
             if lengths:

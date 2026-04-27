@@ -46,7 +46,6 @@ def run_battle(
     num_games: int = 100,
     simulations: int | None = None,
     device: str = "cuda",
-    max_moves: int = 400,
     play_batch_size: int = 8,
 ):
     from engine_zero import YinshSelfPlaySession
@@ -69,7 +68,7 @@ def run_battle(
     print(f"\n{'=' * 60}")
     print(f"  Battle: {_cc(name1)}")
     print(f"      vs: {_cm(name2)}")
-    print(f"  Games: {num_games}  Simulations: {sims}  Max moves: {max_moves}")
+    print(f"  Games: {num_games}  Simulations: {sims}")
     print(f"{'=' * 60}")
 
     model1.to(device).eval()
@@ -81,7 +80,6 @@ def run_battle(
     session = YinshSelfPlaySession(
         num_games=num_games,
         simulations=sims,
-        max_moves=max_moves,
         temp_threshold=0,
         playout_cap_p=0.0,
         fast_cap=sims,

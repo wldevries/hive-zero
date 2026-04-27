@@ -51,7 +51,6 @@ def main():
     t.add_argument("--lr", type=float, default=0.02)
     t.add_argument("--lr-schedule", type=str, default=None,
                    help="Stepped LR schedule, e.g. '0:0.1,20:0.02'. Overrides --lr.")
-    t.add_argument("--max-moves", type=int, default=400)
     t.add_argument("--replay-window", type=int, default=8)
     t.add_argument("--checkpoint-every", type=int, default=10)
     t.add_argument("--playout-cap-p", type=float, default=0.0)
@@ -79,7 +78,6 @@ def main():
     b.add_argument("--games", type=int, default=20)
     b.add_argument("--simulations", type=int, default=None)
     b.add_argument("--device", type=str, default="cuda")
-    b.add_argument("--max-moves", type=int, default=400)
     b.add_argument("--play-batch-size", type=int, default=8)
 
     # play
@@ -111,7 +109,6 @@ def main():
             simulations=args.simulations,
             epochs_per_gen=args.epochs_per_gen,
             batch_size=args.training_batch_size,
-            max_moves=args.max_moves,
             replay_window=args.replay_window,
             checkpoint_every=args.checkpoint_every,
             playout_cap_p=args.playout_cap_p,
@@ -137,7 +134,6 @@ def main():
             num_games=args.games,
             simulations=args.simulations,
             device=args.device,
-            max_moves=args.max_moves,
             play_batch_size=args.play_batch_size,
         )
     elif args.command == "play":
