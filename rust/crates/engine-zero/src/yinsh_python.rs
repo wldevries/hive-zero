@@ -96,6 +96,17 @@ fn call_python_eval(
 // Self-play result
 // ---------------------------------------------------------------------------
 
+#[pyclass(name = "YinshSearchStats")]
+#[derive(Clone)]
+pub struct PyYinshSearchStats {
+    #[pyo3(get)] pub top1_mean: f32,
+    #[pyo3(get)] pub top1_std: f32,
+    #[pyo3(get)] pub depth_mean: f32,
+    #[pyo3(get)] pub depth_std: f32,
+    #[pyo3(get)] pub valid_moves_mean: f32,
+    #[pyo3(get)] pub valid_moves_std: f32,
+}
+
 #[pyclass(name = "YinshSelfPlayResult")]
 pub struct PyYinshSelfPlayResult {
     inner: SelfPlayResult,
@@ -155,6 +166,17 @@ impl PyYinshSelfPlayResult {
     #[getter] fn total_turns(&self) -> u32 { self.inner.total_turns }
     /// Returns list of (label, board_string) for up to 2 decisive games.
     fn sample_boards(&self) -> Vec<(String, String)> { self.inner.sample_board_data.clone() }
+    #[getter]
+    fn search_stats(&self) -> PyYinshSearchStats {
+        PyYinshSearchStats {
+            top1_mean: self.inner.top1_visit_fraction_mean,
+            top1_std: self.inner.top1_visit_fraction_std,
+            depth_mean: self.inner.search_depth_mean,
+            depth_std: self.inner.search_depth_std,
+            valid_moves_mean: self.inner.valid_moves_mean,
+            valid_moves_std: self.inner.valid_moves_std,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +619,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyYinshGame>()?;
     m.add_class::<PyYinshSelfPlaySession>()?;
     m.add_class::<PyYinshSelfPlayResult>()?;
+    m.add_class::<PyYinshSearchStats>()?;
     m.add_class::<PyYinshBattleResult>()?;
     m.add("YINSH_BOARD_SIZE", BOARD_SIZE)?;
     m.add("YINSH_GRID_SIZE", GRID_SIZE)?;
