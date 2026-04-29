@@ -33,6 +33,8 @@ struct SelfPlayConfig {
     grid_size: usize,
     fixed_batch_size: Option<usize>,
     draw_contempt: f32,
+    bot_frac: f32,
+    bot_depth: u32,
 }
 
 fn call_python_eval_bf16(
@@ -455,6 +457,8 @@ impl PySelfPlaySession {
         grid_size = 23,
         fixed_batch_size = None,
         draw_contempt = 0.0,
+        bot_frac = 0.0,
+        bot_depth = 2,
     ))]
     fn new(
         num_games: usize,
@@ -480,6 +484,8 @@ impl PySelfPlaySession {
         grid_size: usize,
         fixed_batch_size: Option<usize>,
         draw_contempt: f32,
+        bot_frac: f32,
+        bot_depth: u32,
     ) -> Self {
         PySelfPlaySession {
             config: SelfPlayConfig {
@@ -506,6 +512,8 @@ impl PySelfPlaySession {
                 grid_size,
                 fixed_batch_size,
                 draw_contempt,
+                bot_frac,
+                bot_depth,
             },
         }
     }
@@ -581,6 +589,8 @@ impl PySelfPlaySession {
                 cfg.use_heuristic,
                 cfg.grid_size,
                 cfg.draw_contempt,
+                cfg.bot_frac,
+                cfg.bot_depth,
                 core_eval,
                 progress_core,
                 opening_sequences,
@@ -632,6 +642,8 @@ impl PySelfPlaySession {
                 cfg.use_heuristic,
                 cfg.grid_size,
                 cfg.draw_contempt,
+                cfg.bot_frac,
+                cfg.bot_depth,
                 core_eval,
                 progress_core,
                 opening_sequences,

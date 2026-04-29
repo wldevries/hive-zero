@@ -1,10 +1,15 @@
 //! Hive-specific glue for the generic alphabeta driver in `core_game::alphabeta`.
 
-use core_game::alphabeta::{self, AlphaBetaParams, SearchContext};
+use core_game::alphabeta::{self, AlphaBetaParams, SearchContext, WIN_SCORE};
 use core_game::game::Undoable;
 
-use crate::game::{Game, Move};
+use crate::game::{Game, GameState, Move};
 use crate::piece::PieceColor;
+
+/// Penalty returned for `DrawByRepetition` so the bot avoids stalling. Strong
+/// enough to dominate any positional consideration but well below the win/loss
+/// magnitude so a real loss still trumps a repetition draw.
+const REPETITION_PENALTY: f32 = -WIN_SCORE / 4.0;
 
 impl Undoable for Game {
     fn undo(&mut self) {
@@ -15,10 +20,13 @@ impl Undoable for Game {
 /// Heuristic evaluation wrapped for the negamax driver: returns a value from
 /// the perspective of the player about to move (current-player-relative).
 ///
-/// `Game::heuristic_value()` returns `(white_score, black_score)`. Hive is
-/// zero-sum so `black_score == -white_score`, but we read the side-correct
-/// component explicitly to keep this robust if the eval ever changes.
+/// Distinguishes `DrawByRepetition` from a "real" draw (mutual queen surround)
+/// because the bot's role in self-play is to drive games to a decisive result
+/// — accepting repetition defeats that goal.
 pub fn heuristic_eval(game: &Game) -> f32 {
+    if game.state == GameState::DrawByRepetition {
+        return REPETITION_PENALTY;
+    }
     let (white, black) = game.heuristic_value();
     match game.turn_color {
         PieceColor::White => white,

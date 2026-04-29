@@ -192,6 +192,8 @@ pub fn play_selfplay_core(
     use_heuristic: bool,
     grid_size: usize,
     draw_contempt: f32,
+    bot_frac: f32,
+    bot_depth: u32,
     mut eval_fn: EvalFn<'_>,
     mut progress_fn: Option<SelfPlayProgressFn<'_>>,
     opening_sequences: Vec<Vec<String>>,
@@ -247,6 +249,26 @@ pub fn play_selfplay_core(
 
     let mut resign_counters = vec![0u32; num_games];
     let mut resigned_as: Vec<Option<PieceColor>> = vec![None; num_games];
+
+    // Per-game bot color: Some(color) if the bot plays that color this game,
+    // None if pure MCTS-vs-MCTS. Decided once at session start so a single
+    // game never switches mid-play.
+    let bot_colors: Vec<Option<PieceColor>> = {
+        let mut rng = rand::rng();
+        (0..num_games)
+            .map(|_| {
+                if bot_frac > 0.0 && rng.random::<f32>() < bot_frac {
+                    if rng.random::<bool>() {
+                        Some(PieceColor::White)
+                    } else {
+                        Some(PieceColor::Black)
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
 
     let mut calibration = vec![false; num_games];
     let mut calibration_would_resign: Vec<Option<PieceColor>> = vec![None; num_games];
@@ -322,6 +344,70 @@ pub fn play_selfplay_core(
                 if games[game_index].is_game_over() || move_counts[game_index] >= max_moves {
                     active[game_index] = false;
                     finished_count += 1;
+                }
+                continue;
+            }
+
+            // Bot turn: alphabeta plays this side. Emits a value-only training
+            // row using the same TurnRecord pipeline as fast-cap turns, then
+            // commits the move on canonical and reroots the MCTS tree so the
+            // opponent's MCTS keeps a warm root across bot replies.
+            if bot_colors[game_index] == Some(games[game_index].turn_color) {
+                let valid = games[game_index].valid_moves();
+                let mv = if valid.is_empty() {
+                    Move::pass()
+                } else {
+                    crate::alphabeta::alphabeta_best_move(&games[game_index], bot_depth)
+                };
+
+                // Stash the pre-move encoding for training data emission.
+                let board_offset = board_buf.len();
+                let reserve_offset = reserve_buf.len();
+                board_buf.resize(board_offset + board_size, 0.0);
+                reserve_buf.resize(reserve_offset + RESERVE_SIZE, 0.0);
+                board_encoding::encode_board(
+                    &games[game_index],
+                    &mut board_buf[board_offset..board_offset + board_size],
+                    &mut reserve_buf[reserve_offset..reserve_offset + RESERVE_SIZE],
+                    grid_size,
+                );
+
+                let turn_color = games[game_index].turn_color;
+                let opp = opposite_color(turn_color);
+                histories[game_index].push(TurnRecord {
+                    board_offset,
+                    reserve_offset,
+                    turn_color,
+                    is_value_only: true,
+                    place_idx: Vec::new(),
+                    place_prob: Vec::new(),
+                    movement_src: Vec::new(),
+                    movement_dst: Vec::new(),
+                    movement_prob: Vec::new(),
+                    my_queen_danger: games[game_index].queen_danger(turn_color),
+                    opp_queen_danger: games[game_index].queen_danger(opp),
+                    my_queen_escape: games[game_index].queen_escape(turn_color),
+                    opp_queen_escape: games[game_index].queen_escape(opp),
+                    my_mobility: games[game_index].piece_mobility(turn_color),
+                    opp_mobility: games[game_index].piece_mobility(opp),
+                    position_hash: games[game_index].position_hash(),
+                });
+                total_turns += 1;
+
+                if mv.is_pass() {
+                    games[game_index].play_pass();
+                    search_warm[game_index] = false;
+                } else {
+                    games[game_index]
+                        .play_move(&mv)
+                        .map_err(|e| e.to_string())?;
+                    search_warm[game_index] = searches[game_index].reroot(mv);
+                }
+                move_counts[game_index] += 1;
+                if games[game_index].is_game_over() || move_counts[game_index] >= max_moves {
+                    active[game_index] = false;
+                    finished_count += 1;
+                    search_warm[game_index] = false;
                 }
                 continue;
             }

@@ -191,6 +191,8 @@ class RustParallelSelfPlay:
         skip_timeout_games: bool = False,
         use_heuristic: bool = False,
         draw_contempt: float = 0.0,
+        bot_frac: float = 0.0,
+        bot_depth: int = 2,
         **kwargs,
     ):
         self.model = model
@@ -214,6 +216,8 @@ class RustParallelSelfPlay:
         self.skip_timeout_games = skip_timeout_games
         self.use_heuristic = use_heuristic
         self.draw_contempt = draw_contempt
+        self.bot_frac = bot_frac
+        self.bot_depth = bot_depth
 
     def _eval_fn(self):
         """Return a callable for Rust's GPU inference callback."""
@@ -291,6 +295,8 @@ class RustParallelSelfPlay:
             use_heuristic=self.use_heuristic,
             grid_size=grid_size,
             draw_contempt=self.draw_contempt,
+            bot_frac=self.bot_frac,
+            bot_depth=self.bot_depth,
         )
 
         pbar = tqdm(total=self.max_moves, unit="turn", desc="  Self-play", leave=False)
@@ -411,6 +417,8 @@ class SelfPlayTrainer:
         buf_dir: Optional[str] = None,
         export_sgf: bool = True,
         draw_contempt: float = 0.0,
+        bot_frac: float = 0.0,
+        bot_depth: int = 2,
     ):
         """Run the full training loop.
 
@@ -607,6 +615,8 @@ class SelfPlayTrainer:
                 skip_timeout_games=skip_timeout_games,
                 use_heuristic=use_heuristic,
                 draw_contempt=draw_contempt,
+                bot_frac=bot_frac,
+                bot_depth=bot_depth,
             )
 
             ort_path = None

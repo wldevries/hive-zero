@@ -54,6 +54,41 @@ def _play_game_alphabeta_vs_random(ab_is_white: bool, depth: int, seed: int, max
     return g.state
 
 
+def test_selfplay_with_bot_produces_decisive_games():
+    """End-to-end: bot_frac=1.0 self-play produces decisive games (or repetition
+    draws) instead of timeouts. Verifies value_only flag is set for bot turns
+    and the value-target signal is non-trivial.
+    """
+    import numpy as np
+    from engine_zero import RustSelfPlaySession
+
+    POLICY_SIZE = 69 * 23 * 23  # NUM_POLICY_CHANNELS * grid_size^2
+
+    session = RustSelfPlaySession(
+        num_games=4,
+        simulations=20,
+        max_moves=120,
+        grid_size=23,
+        bot_frac=1.0,
+        bot_depth=2,
+    )
+
+    def eval_fn(boards_bf16, reserves_bf16):
+        n = boards_bf16.shape[0]
+        policy = np.ones((n, POLICY_SIZE), dtype=np.float32) / POLICY_SIZE
+        wdl = np.full((n, 3), 1.0 / 3.0, dtype=np.float32)
+        return policy, wdl
+
+    result = session.play_games(eval_fn=eval_fn)
+    assert result.draws_timeout == 0, "bot opponent should prevent timeout draws"
+    assert result.num_samples > 0, "no training samples emitted"
+
+    _, _, _, values, vo, _, _, _ = result.training_data()
+    assert sum(vo) > 0, "no bot turns in emitted samples (expected ~half)"
+    assert sum(vo) < len(vo), "every emitted turn was bot-only — MCTS turns missing"
+    assert float(values.std()) > 0.0, "value targets have zero variance — head won't learn"
+
+
 @pytest.mark.parametrize("n_games", [10])
 def test_beats_random_overwhelmingly(n_games):
     """Depth-2 alphabeta should crush a random-move opponent (>90% win rate).

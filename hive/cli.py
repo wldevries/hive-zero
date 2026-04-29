@@ -337,6 +337,29 @@ def main():
         help="Disable per-generation SGF zip export (default: enabled)",
     )
     train_parser.set_defaults(export_sgf=True)
+    train_parser.add_argument(
+        "--opponent-bot",
+        choices=["none", "alphabeta"],
+        default="none",
+        help="Opponent type for self-play. 'alphabeta' makes one randomly-chosen "
+             "side play heuristic alphabeta moves (no NN), so the value head sees "
+             "decisive games. (default: none = pure MCTS-vs-MCTS)",
+    )
+    train_parser.add_argument(
+        "--bot-depth",
+        type=int,
+        default=2,
+        help="Alphabeta search depth for the bot opponent. 2 is ~15ms/move, 3 is ~460ms/move "
+             "on heavy positions; depth 4+ is too slow for self-play (default: 2)",
+    )
+    train_parser.add_argument(
+        "--bot-frac",
+        type=float,
+        default=0.5,
+        help="Fraction of self-play games where one side is the bot. The other (1-frac) "
+             "are pure MCTS-vs-MCTS so policy training still sees the self-play distribution "
+             "(default: 0.5)",
+    )
 
     # Supervised pre-training
     pretrain_parser = subparsers.add_parser(
@@ -665,6 +688,8 @@ def main():
             buf_dir=args.buf_dir,
             export_sgf=args.export_sgf,
             draw_contempt=args.draw_contempt,
+            bot_frac=args.bot_frac if args.opponent_bot == "alphabeta" else 0.0,
+            bot_depth=args.bot_depth,
         )
     else:
         # Default: UHP engine

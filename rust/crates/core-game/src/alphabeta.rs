@@ -47,19 +47,16 @@ impl SearchContext {
     }
 }
 
-/// Map an `Outcome` to a value from the current player's perspective.
-/// Returns `None` if the game is still ongoing.
-fn terminal_score<G: Game>(game: &G) -> Option<f32> {
-    match game.outcome() {
-        Outcome::Ongoing => None,
-        Outcome::Draw => Some(0.0),
-        Outcome::WonBy(winner) => {
-            if winner == game.next_player() {
-                Some(WIN_SCORE)
-            } else {
-                Some(-WIN_SCORE)
-            }
-        }
+/// Score a position for the current player from a terminal `WonBy` outcome.
+/// `Draw` and `Ongoing` outcomes are deliberately handled elsewhere — `Draw`
+/// delegates to `eval` so a game-specific evaluator can distinguish "real"
+/// draws (e.g. mutual queen surround) from undesirable ones (repetition,
+/// stalling) by returning a penalty.
+fn won_score<G: Game>(game: &G, winner: crate::game::Player) -> f32 {
+    if winner == game.next_player() {
+        WIN_SCORE
+    } else {
+        -WIN_SCORE
     }
 }
 
@@ -79,8 +76,13 @@ where
 {
     ctx.nodes_visited += 1;
 
-    if let Some(score) = terminal_score(game) {
-        return score;
+    match game.outcome() {
+        Outcome::WonBy(winner) => return won_score(game, winner),
+        // Draw: let the eval function decide. A neutral eval returns 0 (the
+        // standard alphabeta convention); a Hive-style eval can return a
+        // penalty for repetition draws so the bot avoids stalling.
+        Outcome::Draw => return eval(game),
+        Outcome::Ongoing => {}
     }
     if depth == 0 {
         return eval(game);
@@ -131,8 +133,10 @@ where
     G: Game + Undoable,
     F: FnMut(&G) -> f32,
 {
-    if game.is_game_over() {
-        return (None, terminal_score(game).unwrap_or(0.0));
+    match game.outcome() {
+        Outcome::WonBy(winner) => return (None, won_score(game, winner)),
+        Outcome::Draw => return (None, eval(game)),
+        Outcome::Ongoing => {}
     }
 
     let moves = game.valid_moves();
