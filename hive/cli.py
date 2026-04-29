@@ -149,30 +149,6 @@ def main():
         help="Run model-vs-best eval at each checkpoint",
     )
     train_parser.add_argument(
-        "--eval-every",
-        type=int,
-        default=0,
-        help="Run evaluation vs Mzinga every N generations (0=disabled)",
-    )
-    train_parser.add_argument(
-        "--eval-games",
-        type=int,
-        default=6,
-        help="Number of evaluation games per eval round",
-    )
-    train_parser.add_argument(
-        "--eval-simulations",
-        type=int,
-        default=200,
-        help="MCTS simulations per move during eval",
-    )
-    train_parser.add_argument(
-        "--mzinga-path",
-        type=str,
-        default="mzinga/MzingaEngine.exe",
-        help="Path to MzingaEngine for evaluation",
-    )
-    train_parser.add_argument(
         "--play-batch-sims",
         type=int,
         default=1,
@@ -258,12 +234,6 @@ def main():
         type=str,
         default="",
         help="Comment to append to every row in the training log",
-    )
-    train_parser.add_argument(
-        "--mzinga-time",
-        type=int,
-        default=2,
-        help="Mzinga search time in seconds per move during eval",
     )
 
     def _opening_moves(s):
@@ -442,12 +412,41 @@ def main():
         help="Players to exclude from training data (default: Dumbot)",
     )
 
-    # Battle: two models vs each other
+    # Battle: model vs model (parallel) or model vs Mzinga (sequential)
     battle_parser = subparsers.add_parser(
-        "battle", help="Pit two models against each other"
+        "battle", help="Pit a model against another model or Mzinga"
     )
-    battle_parser.add_argument("model1", type=str, help="Path to first model checkpoint")
-    battle_parser.add_argument("model2", type=str, help="Path to second model checkpoint")
+    battle_parser.add_argument("model1", type=str, help="Path to model checkpoint")
+    battle_parser.add_argument(
+        "model2",
+        type=str,
+        nargs="?",
+        default=None,
+        help="Path to second model checkpoint (omit when using --mzinga)",
+    )
+    battle_parser.add_argument(
+        "--mzinga",
+        action="store_true",
+        help="Battle against MzingaEngine instead of a second model",
+    )
+    battle_parser.add_argument(
+        "--mzinga-path",
+        type=str,
+        default="mzinga/MzingaEngine.exe",
+        help="Path to MzingaEngine executable (default: mzinga/MzingaEngine.exe)",
+    )
+    battle_parser.add_argument(
+        "--mzinga-time",
+        type=int,
+        default=2,
+        help="Mzinga search time in seconds per move (default: 2)",
+    )
+    battle_parser.add_argument(
+        "--mzinga-depth",
+        type=int,
+        default=None,
+        help="Mzinga search depth (overrides --mzinga-time)",
+    )
     battle_parser.add_argument(
         "--games", type=int, default=100, help="Number of games to play (default: 100)"
     )
@@ -478,46 +477,6 @@ def main():
         default=1,
         help="Leaf batch size for MCTS inference (default: 1)",
     )
-
-    # Evaluation
-    eval_parser = subparsers.add_parser("eval", help="Evaluate model against Mzinga")
-    eval_parser.add_argument(
-        "--model", type=str, default="model.pt", help="Model file path"
-    )
-    eval_parser.add_argument(
-        "--device", type=str, default="cuda", help="Device: cuda or cpu"
-    )
-    eval_parser.add_argument(
-        "--games", type=int, default=10, help="Number of games to play"
-    )
-    eval_parser.add_argument(
-        "--simulations",
-        type=int,
-        default=800,
-        help="MCTS simulations per move for our engine",
-    )
-    eval_parser.add_argument(
-        "--mzinga-path",
-        type=str,
-        default="mzinga/MzingaEngine.exe",
-        help="Path to MzingaEngine executable",
-    )
-    eval_parser.add_argument(
-        "--mzinga-time",
-        type=int,
-        default=5,
-        help="Mzinga search time in seconds per move",
-    )
-    eval_parser.add_argument(
-        "--mzinga-depth",
-        type=int,
-        default=None,
-        help="Mzinga search depth (overrides --mzinga-time)",
-    )
-    eval_parser.add_argument(
-        "--max-moves", type=int, default=200, help="Max moves per game"
-    )
-    eval_parser.add_argument("--verbose", action="store_true", help="Print each move")
 
     args = parser.parse_args()
 
@@ -561,66 +520,37 @@ def main():
         )
 
     elif args.command == "battle":
-        from hive.selfplay.battle import run_battle
+        if args.mzinga:
+            if args.model2 is not None:
+                parser.error("--mzinga cannot be combined with a model2 argument")
+            from hive.selfplay.battle import run_battle_mzinga
 
-        run_battle(
-            model1_path=args.model1,
-            model2_path=args.model2,
-            num_games=args.games,
-            simulations=args.simulations,
-            device=_resolve_device(args.device),
-            max_moves=args.max_moves,
-            c_puct=args.c_puct,
-            leaf_batch_size=args.leaf_batch_size,
-        )
-
-    elif args.command == "eval":
-        from hive.eval.engine_match import (
-            EngineConfig,
-            ModelEngine,
-            UHPProcess,
-            run_match,
-        )
-        from hive.nn.model import load_checkpoint
-
-        model, _ = load_checkpoint(args.model)
-        device = _resolve_device(args.device)
-        model.to(device)
-        model.eval()
-
-        our_engine = ModelEngine(
-            model=model,
-            device=device,
-            simulations=args.simulations,
-            name="HiveZero",
-        )
-
-        if args.mzinga_depth is not None:
-            bestmove_args = f"depth {args.mzinga_depth}"
+            run_battle_mzinga(
+                model_path=args.model1,
+                mzinga_path=args.mzinga_path,
+                mzinga_time=args.mzinga_time,
+                mzinga_depth=args.mzinga_depth,
+                num_games=args.games,
+                simulations=args.simulations,
+                device=_resolve_device(args.device),
+                max_moves=args.max_moves,
+                c_puct=args.c_puct,
+            )
         else:
-            h = args.mzinga_time // 3600
-            m = (args.mzinga_time % 3600) // 60
-            s = args.mzinga_time % 60
-            bestmove_args = f"time {h:02d}:{m:02d}:{s:02d}"
+            if args.model2 is None:
+                parser.error("battle requires either model2 or --mzinga")
+            from hive.selfplay.battle import run_battle
 
-        import os
-
-        mzinga_path = args.mzinga_path
-        if not os.path.isabs(mzinga_path):
-            mzinga_path = os.path.join(os.path.dirname(__file__) or ".", mzinga_path)
-        mzinga_config = EngineConfig(
-            path=mzinga_path,
-            bestmove_args=bestmove_args,
-        )
-        mzinga = UHPProcess(mzinga_config)
-
-        run_match(
-            our_engine,
-            mzinga,
-            num_games=args.games,
-            max_moves=args.max_moves,
-            verbose=args.verbose,
-        )
+            run_battle(
+                model1_path=args.model1,
+                model2_path=args.model2,
+                num_games=args.games,
+                simulations=args.simulations,
+                device=_resolve_device(args.device),
+                max_moves=args.max_moves,
+                c_puct=args.c_puct,
+                leaf_batch_size=args.leaf_batch_size,
+            )
 
     elif args.command == "train":
         from hive.selfplay.selfplay import SelfPlayTrainer
@@ -641,15 +571,6 @@ def main():
             lr=args.lr,
             lr_scheduler=lr_scheduler,
         )
-        eval_config = None
-        if args.eval_every > 0:
-            eval_config = {
-                "every": args.eval_every,
-                "games": args.eval_games,
-                "simulations": args.eval_simulations,
-                "mzinga_path": args.mzinga_path,
-                "mzinga_time": args.mzinga_time,
-            }
         trainer.run(
             num_generations=args.generations,
             games_per_gen=args.games,
@@ -658,7 +579,6 @@ def main():
             batch_size=args.training_batch_size,
             max_moves=args.max_moves,
             time_limit_minutes=args.time_limit,
-            eval_config=eval_config,
             checkpoint_every=args.checkpoint_every,
             checkpoint_eval=args.checkpoint_eval,
             playout_cap_p=args.playout_cap_p,

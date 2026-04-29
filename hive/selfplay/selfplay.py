@@ -382,7 +382,6 @@ class SelfPlayTrainer:
         batch_size: int = 64,
         max_moves: int = 200,
         time_limit_minutes: float | None = None,
-        eval_config: dict | None = None,
         checkpoint_eval_games: int | None = None,
         checkpoint_eval_simulations: int | None = None,
         checkpoint_every: int = 10,
@@ -423,8 +422,6 @@ class SelfPlayTrainer:
         """Run the full training loop.
 
         Args:
-            eval_config: If set, run evaluation vs Mzinga periodically.
-                Keys: every, games, simulations, mzinga_path, mzinga_time.
             checkpoint_eval_games: Games per checkpoint self-eval (default 2x games_per_gen).
             checkpoint_eval_simulations: Simulations for checkpoint eval.
                 Defaults to same as `simulations`.
@@ -914,10 +911,6 @@ class SelfPlayTrainer:
 
             print(f"  Model saved to {self.model_path} (generation {generation})")
 
-            # Periodic evaluation vs Mzinga
-            if eval_config and generation % eval_config["every"] == 0:
-                self._run_eval(eval_config, generation, replay_buffer)
-
     def _load_opening_book(
         self,
         games_csv: str,
@@ -985,7 +978,7 @@ class SelfPlayTrainer:
         """Pit current model against best_model.pt. Winner becomes new best and model.pt."""
         import shutil
 
-        from ..eval.engine_match import ModelEngine, run_parallel_match
+        from .battle import ModelEngine, run_parallel_match
 
         WIN_THRESHOLD = 0.5
         best_model_path = os.path.join(
@@ -1101,61 +1094,6 @@ class SelfPlayTrainer:
                 f"{generation},pit,{simulations},{w},{l},{d},0,0,0,"
                 f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n"
             )
-
-    def _run_eval(self, eval_config: dict, generation: int, replay_buffer=None):
-        """Run evaluation games against Mzinga and feed samples back."""
-        from ..eval.engine_match import EngineConfig, ModelEngine, UHPProcess, run_match
-
-        print(f"\n--- Eval vs Mzinga (gen {generation}) ---")
-        self.model.eval()
-
-        our_engine = ModelEngine(
-            model=self.model,
-            device=self.device,
-            simulations=eval_config["simulations"],
-            name=f"HiveZero-g{generation}",
-        )
-
-        t = eval_config["mzinga_time"]
-        h, m, s = t // 3600, (t % 3600) // 60, t % 60
-        mzinga_config = EngineConfig(
-            path=eval_config["mzinga_path"],
-            bestmove_args=f"time {h:02d}:{m:02d}:{s:02d}",
-        )
-        mzinga = UHPProcess(mzinga_config)
-
-        try:
-            summary = run_match(
-                our_engine,
-                mzinga,
-                num_games=eval_config["games"],
-                max_moves=200,
-                verbose=False,
-            )
-            score = summary["engine1_score"]
-            w = summary["engine1_wins"]
-            d = summary["draws"]
-            l = summary["engine2_wins"]
-
-            # Mzinga-match engines never produce policy vectors, so no replay
-            # samples flow back into the buffer — ModelEngine.get_samples is a
-            # documented no-op.  Surface the match result only.
-            print(
-                f"  vs {summary['engine2']}: {_cg(w)}W/{_cy(d)}D/{_cr(l)}L "
-                f"(score: {_cc(f'{score:.0%}')})"
-            )
-
-            # Log to CSV
-            with open(self._log_path, "a") as f:
-                f.write(
-                    f"{generation},eval,{eval_config['simulations']},{w},{l},{d},0,0,"
-                    f"{replay_buffer.raw_size if replay_buffer else 0},"
-                    f"{score:.6f},0,0,0,0,0,{csv_comment(self._comment)},0,0\n"
-                )
-        except Exception as e:
-            print(f"  Eval failed: {e}")
-        finally:
-            self.model.train()
 
 
 from ..uhp import normalize_move as _normalize_uhp_move

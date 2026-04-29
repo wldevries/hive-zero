@@ -83,12 +83,6 @@ On first run (no `best_model.pt`), the two most recent checkpoints play each oth
 
 Eval games use opening temperature sampling (first 8 moves) for game diversity, then switch to argmax.
 
-### Evaluate Against Mzinga
-
-```bash
-uv run python main.py eval --games 10 --simulations 200 --mzinga-path path/to/MzingaEngine.exe
-```
-
 ### Run Tests
 
 ```bash
@@ -126,8 +120,7 @@ hive/
   encoding/    Neural network I/O (board tensors, move encoding)
   nn/          PyTorch model (AlphaZero-style conv net, policy + value heads)
   uhp/         UHP protocol engine (stdin/stdout)
-  selfplay/    Self-play training loop (Rust-accelerated)
-  eval/        Engine-vs-engine match runner and model evaluation
+  selfplay/    Self-play training loop, battle/eval matches (Rust-accelerated)
 rust/
   src/         Rust game engine exposed via PyO3 as `engine_zero`
                (board, game, rules, MCTS, move/board encoding, rayon parallelism)
