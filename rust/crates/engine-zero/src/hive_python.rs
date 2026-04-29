@@ -396,6 +396,25 @@ impl PyGame {
         })
     }
 
+    /// Run alphabeta search to the given depth using the built-in heuristic
+    /// evaluation, returning the best move as a UHP string. No NN involved —
+    /// useful for fast best-move queries and as a self-play opponent.
+    #[pyo3(signature = (depth=3))]
+    fn best_move_alphabeta(&mut self, depth: u32) -> PyResult<String> {
+        if self.game.is_game_over() {
+            return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
+        }
+        if self.game.valid_moves().is_empty() {
+            return Ok("pass".to_string());
+        }
+        let best = hive_game::alphabeta::alphabeta_best_move(&self.game, depth);
+        Ok(if best.piece.is_none() {
+            "pass".to_string()
+        } else {
+            hive_game::uhp::format_move_uhp(&self.game, &best)
+        })
+    }
+
     /// Run MCTS using a pre-loaded ORT/QNN session (no Python eval callback).
     /// Use `HiveOrtSession` to load the session once; reuse it across calls.
     #[pyo3(signature = (ort_session, simulations=800, c_puct=1.5, draw_contempt=0.0))]

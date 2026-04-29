@@ -112,3 +112,10 @@ pub trait NNGame: Game {
 // Keep the old name as an alias during migration.
 pub trait GameEngine: NNGame {}
 impl<T: NNGame> GameEngine for T {}
+
+/// Reverse the most recent `play_move` (including pass), restoring the state to
+/// what it was before that call. Required for alphabeta search to traverse the
+/// move tree without cloning the game per node.
+pub trait Undoable: Game {
+    fn undo(&mut self);
+}

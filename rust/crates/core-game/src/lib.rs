@@ -1,3 +1,4 @@
+pub mod alphabeta;
 pub mod game;
 pub mod hex;
 pub mod mcts;
