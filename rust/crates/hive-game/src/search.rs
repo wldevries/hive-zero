@@ -1,6 +1,7 @@
 use rand::RngExt;
 use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
+use rayon::prelude::*;
 
 use core_game::game::{Game as GameTrait, Outcome, Player, PolicyIndex};
 use core_game::mcts::arena::NodeId;
@@ -308,6 +309,11 @@ pub fn play_selfplay_core(
     while active.iter().any(|&is_active| is_active) {
         let mut rng = rand::rng();
         let mut mcts_games: Vec<usize> = Vec::new();
+        // Bot games are collected here in pass 1, alphabeta runs in parallel
+        // in pass 2, then the chosen moves are applied sequentially in pass 3
+        // so the existing per-game state mutation (training emission, reroot,
+        // etc.) is unchanged.
+        let mut bot_indices: Vec<usize> = Vec::new();
 
         for game_index in 0..num_games {
             if !active[game_index] {
@@ -355,67 +361,10 @@ pub fn play_selfplay_core(
                 continue;
             }
 
-            // Bot turn: alphabeta plays this side. Emits a value-only training
-            // row using the same TurnRecord pipeline as fast-cap turns, then
-            // commits the move on canonical and reroots the MCTS tree so the
-            // opponent's MCTS keeps a warm root across bot replies.
+            // Bot turn: defer alphabeta to the parallel pass below; the
+            // chosen move is applied sequentially after collect.
             if bot_colors[game_index] == Some(games[game_index].turn_color) {
-                let valid = games[game_index].valid_moves();
-                let mv = if valid.is_empty() {
-                    Move::pass()
-                } else {
-                    crate::alphabeta::alphabeta_best_move(&games[game_index], bot_depth)
-                };
-
-                // Stash the pre-move encoding for training data emission.
-                let board_offset = board_buf.len();
-                let reserve_offset = reserve_buf.len();
-                board_buf.resize(board_offset + board_size, 0.0);
-                reserve_buf.resize(reserve_offset + RESERVE_SIZE, 0.0);
-                board_encoding::encode_board(
-                    &games[game_index],
-                    &mut board_buf[board_offset..board_offset + board_size],
-                    &mut reserve_buf[reserve_offset..reserve_offset + RESERVE_SIZE],
-                    grid_size,
-                );
-
-                let turn_color = games[game_index].turn_color;
-                let opp = opposite_color(turn_color);
-                histories[game_index].push(TurnRecord {
-                    board_offset,
-                    reserve_offset,
-                    turn_color,
-                    is_value_only: true,
-                    place_idx: Vec::new(),
-                    place_prob: Vec::new(),
-                    movement_src: Vec::new(),
-                    movement_dst: Vec::new(),
-                    movement_prob: Vec::new(),
-                    my_queen_danger: games[game_index].queen_danger(turn_color),
-                    opp_queen_danger: games[game_index].queen_danger(opp),
-                    my_queen_escape: games[game_index].queen_escape(turn_color),
-                    opp_queen_escape: games[game_index].queen_escape(opp),
-                    my_mobility: games[game_index].piece_mobility(turn_color),
-                    opp_mobility: games[game_index].piece_mobility(opp),
-                    position_hash: games[game_index].position_hash(),
-                });
-                total_turns += 1;
-
-                if mv.is_pass() {
-                    games[game_index].play_pass();
-                    search_warm[game_index] = false;
-                } else {
-                    games[game_index]
-                        .play_move(&mv)
-                        .map_err(|e| e.to_string())?;
-                    search_warm[game_index] = searches[game_index].reroot(mv);
-                }
-                move_counts[game_index] += 1;
-                if games[game_index].is_game_over() || move_counts[game_index] >= max_moves {
-                    active[game_index] = false;
-                    finished_count += 1;
-                    search_warm[game_index] = false;
-                }
+                bot_indices.push(game_index);
                 continue;
             }
 
@@ -428,6 +377,78 @@ pub fn play_selfplay_core(
                 }
             } else {
                 mcts_games.push(game_index);
+            }
+        }
+
+        // Pass 2: parallel alphabeta over all bot games this iteration. The
+        // closure only borrows &Game and builds its own SearchContext, so
+        // the searches are fully independent; rayon spreads them across the
+        // available CPU cores. This is the speedup hot-spot at higher
+        // bot_depth — at depth 3 each search is ~30-200ms and a typical
+        // iteration with bot_frac=0.5 has ~25 of them.
+        let bot_moves: Vec<Move> = if bot_indices.is_empty() {
+            Vec::new()
+        } else {
+            bot_indices
+                .par_iter()
+                .map(|&i| crate::alphabeta::alphabeta_best_move(&games[i], bot_depth))
+                .collect()
+        };
+
+        // Pass 3: sequential bot move application. Mirrors the original
+        // inline block — emits a value-only training row, plays the move,
+        // and reroots the MCTS tree so the opponent's MCTS keeps a warm
+        // root across bot replies.
+        for (slot, &game_index) in bot_indices.iter().enumerate() {
+            let mv = bot_moves[slot];
+
+            let board_offset = board_buf.len();
+            let reserve_offset = reserve_buf.len();
+            board_buf.resize(board_offset + board_size, 0.0);
+            reserve_buf.resize(reserve_offset + RESERVE_SIZE, 0.0);
+            board_encoding::encode_board(
+                &games[game_index],
+                &mut board_buf[board_offset..board_offset + board_size],
+                &mut reserve_buf[reserve_offset..reserve_offset + RESERVE_SIZE],
+                grid_size,
+            );
+
+            let turn_color = games[game_index].turn_color;
+            let opp = opposite_color(turn_color);
+            histories[game_index].push(TurnRecord {
+                board_offset,
+                reserve_offset,
+                turn_color,
+                is_value_only: true,
+                place_idx: Vec::new(),
+                place_prob: Vec::new(),
+                movement_src: Vec::new(),
+                movement_dst: Vec::new(),
+                movement_prob: Vec::new(),
+                my_queen_danger: games[game_index].queen_danger(turn_color),
+                opp_queen_danger: games[game_index].queen_danger(opp),
+                my_queen_escape: games[game_index].queen_escape(turn_color),
+                opp_queen_escape: games[game_index].queen_escape(opp),
+                my_mobility: games[game_index].piece_mobility(turn_color),
+                opp_mobility: games[game_index].piece_mobility(opp),
+                position_hash: games[game_index].position_hash(),
+            });
+            total_turns += 1;
+
+            if mv.is_pass() {
+                games[game_index].play_pass();
+                search_warm[game_index] = false;
+            } else {
+                games[game_index]
+                    .play_move(&mv)
+                    .map_err(|e| e.to_string())?;
+                search_warm[game_index] = searches[game_index].reroot(mv);
+            }
+            move_counts[game_index] += 1;
+            if games[game_index].is_game_over() || move_counts[game_index] >= max_moves {
+                active[game_index] = false;
+                finished_count += 1;
+                search_warm[game_index] = false;
             }
         }
 

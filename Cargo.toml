@@ -17,6 +17,7 @@ members = [
 rand = "0.10"
 rand_distr = "0.6"
 clap = { version = "4", features = ["derive"] }
+rayon = "1.10"
 
 [profile.release]
 opt-level = 3
