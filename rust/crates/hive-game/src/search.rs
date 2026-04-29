@@ -459,7 +459,14 @@ pub fn play_selfplay_core(
         let num_search_games = mcts_games.len();
         let is_full: Vec<bool> = if use_playout_cap {
             (0..num_search_games)
-                .map(|_| rng.random::<f32>() < playout_cap_p)
+                .map(|index| {
+                    // Bot games always get full search. PCR against alphabeta
+                    // hands the bot tactical wins on fast turns and biases
+                    // value targets toward "I'm losing" from positions where
+                    // the model didn't actually play badly.
+                    bot_colors[mcts_games[index]].is_some()
+                        || rng.random::<f32>() < playout_cap_p
+                })
                 .collect()
         } else {
             vec![true; num_search_games]
