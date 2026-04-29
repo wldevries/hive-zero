@@ -22,6 +22,13 @@ pub type EvalFn<'a> = Box<dyn FnMut(&[f32], &[f32], usize) -> Result<(Vec<f32>, 
 pub type SelfPlayProgressFn<'a> = Box<dyn FnMut(u32, u32, u32, u32, u32, u32, u32) + 'a>;
 pub type BattleProgressFn<'a> = Box<dyn FnMut(u32, u32, u32, u32) + 'a>;
 
+/// Alphabeta depth used when computing value targets for unfinished games
+/// (timeouts, mutual surround, repetition draws). The static heuristic alone
+/// misses tactical patterns one or two plies away — a depth-3 search bakes
+/// those into the training signal at modest cost (only fires once per game,
+/// at end of self-play).
+const HEURISTIC_VALUE_DEPTH: u32 = 3;
+
 #[derive(Clone)]
 pub struct BattleResult {
     pub wins_model1: u32,
@@ -878,7 +885,10 @@ pub fn play_selfplay_core(
                 GameState::DrawByRepetition => {
                     draws_repetition += 1;
                     let (white_score, black_score) = if use_heuristic {
-                        games[game_index].heuristic_value()
+                        crate::alphabeta::heuristic_value_alphabeta(
+                            &games[game_index],
+                            HEURISTIC_VALUE_DEPTH,
+                        )
                     } else {
                         (0.0, 0.0)
                     };
@@ -887,7 +897,10 @@ pub fn play_selfplay_core(
                 GameState::Draw => {
                     draws += 1;
                     let (white_score, black_score) = if use_heuristic {
-                        games[game_index].heuristic_value()
+                        crate::alphabeta::heuristic_value_alphabeta(
+                            &games[game_index],
+                            HEURISTIC_VALUE_DEPTH,
+                        )
                     } else {
                         (0.0, 0.0)
                     };
@@ -897,7 +910,10 @@ pub fn play_selfplay_core(
                     // InProgress: game hit move cap (timeout)
                     draws_timeout += 1;
                     let (white_score, black_score) = if use_heuristic {
-                        games[game_index].heuristic_value()
+                        crate::alphabeta::heuristic_value_alphabeta(
+                            &games[game_index],
+                            HEURISTIC_VALUE_DEPTH,
+                        )
                     } else {
                         (0.0, 0.0)
                     };

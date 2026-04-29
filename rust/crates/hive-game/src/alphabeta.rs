@@ -62,6 +62,38 @@ pub fn alphabeta_best_move(game: &Game, depth: u32) -> Move {
     mv.unwrap_or_else(Move::pass)
 }
 
+/// Deepened static evaluation: run alphabeta to the given depth and return
+/// the best-line value as `(white_score, black_score)`, both in `[-1, 1]`.
+///
+/// At depth 0 this matches `Game::heuristic_value()`. At depth ≥ 1 the score
+/// reflects the minimax outcome `depth` plies ahead with the same static
+/// heuristic at the leaves, so tactical patterns inside the horizon (e.g.
+/// a queen-surround threat one or two moves away) are baked into the score
+/// instead of being invisible to the static eval.
+///
+/// Terminal positions (`Draw`, `DrawByRepetition`, `WhiteWins`, `BlackWins`)
+/// bypass the search and return the static heuristic unchanged — there is
+/// nothing to search and the previous training pipeline already used the
+/// static eval for these states.
+///
+/// Wins/losses found inside the search horizon collapse to `±1.0` after
+/// clamping, so the result stays in the same range as the static heuristic
+/// and remains a valid value-head training target.
+pub fn heuristic_value_alphabeta(game: &Game, depth: u32) -> (f32, f32) {
+    if game.state != GameState::InProgress {
+        return game.heuristic_value();
+    }
+    let mut work = game.clone();
+    let mut ctx = SearchContext::new(AlphaBetaParams::new(depth));
+    let mut eval = heuristic_eval;
+    let (_mv, score) = alphabeta::alphabeta_best_move(&mut work, &mut eval, &mut ctx);
+    let cur = score.clamp(-1.0, 1.0);
+    match game.turn_color {
+        PieceColor::White => (cur, -cur),
+        PieceColor::Black => (-cur, cur),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +124,51 @@ mod tests {
         let mv = alphabeta_best_move(&game, 2);
         let legal: Vec<_> = game.valid_moves();
         assert!(legal.iter().any(|m| *m == mv), "alphabeta returned non-legal move {:?}", mv);
+    }
+
+    #[test]
+    fn heuristic_value_alphabeta_depth0_matches_static() {
+        // Depth 0: alphabeta short-circuits to eval(game) for InProgress
+        // positions, so the deepened heuristic must match the static one.
+        let mut game = Game::new();
+        for _ in 0..3 {
+            let mv = game.valid_moves()[0];
+            game.play_move(&mv).unwrap();
+        }
+        let (sw, sb) = game.heuristic_value();
+        let (dw, db) = heuristic_value_alphabeta(&game, 0);
+        assert!((sw - dw).abs() < 1e-6, "white score diverged: static={sw}, deep={dw}");
+        assert!((sb - db).abs() < 1e-6, "black score diverged: static={sb}, deep={db}");
+    }
+
+    #[test]
+    fn heuristic_value_alphabeta_stays_in_range() {
+        // Depth 3 should keep the result in [-1, 1] even when the search
+        // discovers terminal lines (which would otherwise score ±WIN_SCORE).
+        let mut game = Game::new();
+        for _ in 0..6 {
+            let mv = game.valid_moves()[0];
+            game.play_move(&mv).unwrap();
+        }
+        let (w, b) = heuristic_value_alphabeta(&game, 3);
+        assert!((-1.0..=1.0).contains(&w), "white score out of range: {w}");
+        assert!((-1.0..=1.0).contains(&b), "black score out of range: {b}");
+        // Zero-sum invariant: the two sides' scores must be exact negatives.
+        assert!((w + b).abs() < 1e-6, "scores not zero-sum: w={w}, b={b}");
+    }
+
+    #[test]
+    fn heuristic_value_alphabeta_does_not_mutate_caller() {
+        let mut canonical = Game::new();
+        let opening = canonical.valid_moves()[0];
+        canonical.play_move(&opening).unwrap();
+        let before_hash = canonical.position_hash();
+        let before_count = canonical.move_count;
+
+        let _ = heuristic_value_alphabeta(&canonical, 2);
+
+        assert_eq!(canonical.position_hash(), before_hash, "canonical hash changed");
+        assert_eq!(canonical.move_count, before_count, "canonical move_count changed");
     }
 
     #[test]
