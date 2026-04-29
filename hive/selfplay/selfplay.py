@@ -727,6 +727,11 @@ class SelfPlayTrainer:
                 parts.append(f"D={_cy(draws_total)}")
             if resignations:
                 parts.append(f"resigned={resignations}")
+            bot_games = result.bot_wins + result.bot_losses + result.bot_draws
+            if bot_games:
+                parts.append(
+                    f"Bot[{bot_games}]: W={_cg(result.bot_wins)} L={_cr(result.bot_losses)} D={_cy(result.bot_draws)}"
+                )
             print(f"  Results: {' '.join(parts)}")
 
             # Game length stats

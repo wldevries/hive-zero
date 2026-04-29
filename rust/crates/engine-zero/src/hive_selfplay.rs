@@ -194,6 +194,9 @@ fn into_py_selfplay_result(result: search::SelfPlayResult) -> PySelfPlayResult {
         draws_timeout: result.draws_timeout,
         draws_repetition: result.draws_repetition,
         resignations: result.resignations,
+        bot_wins: result.bot_wins,
+        bot_losses: result.bot_losses,
+        bot_draws: result.bot_draws,
         total_moves: result.total_moves,
         full_search_turns: result.full_search_turns,
         total_turns: result.total_turns,
@@ -267,6 +270,9 @@ pub struct PySelfPlayResult {
     draws_timeout: u32,
     draws_repetition: u32,
     resignations: u32,
+    bot_wins: u32,
+    bot_losses: u32,
+    bot_draws: u32,
     total_moves: u32,
     full_search_turns: u32,
     total_turns: u32,
@@ -398,6 +404,12 @@ impl PySelfPlayResult {
     fn draws_repetition(&self) -> u32 { self.draws_repetition }
     #[getter]
     fn resignations(&self) -> u32 { self.resignations }
+    #[getter]
+    fn bot_wins(&self) -> u32 { self.bot_wins }
+    #[getter]
+    fn bot_losses(&self) -> u32 { self.bot_losses }
+    #[getter]
+    fn bot_draws(&self) -> u32 { self.bot_draws }
     #[getter]
     fn total_moves(&self) -> u32 { self.total_moves }
     #[getter]

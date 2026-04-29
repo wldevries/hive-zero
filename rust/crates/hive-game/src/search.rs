@@ -60,6 +60,13 @@ pub struct SelfPlayResult {
     pub draws_timeout: u32,
     pub draws_repetition: u32,
     pub resignations: u32,
+    /// Outcome counts for games where one side was the alphabeta bot,
+    /// scored from the bot's perspective. (`bot_wins + bot_losses + bot_draws`
+    /// is the number of games with a bot. Zero across all three when
+    /// `bot_frac == 0.0`.)
+    pub bot_wins: u32,
+    pub bot_losses: u32,
+    pub bot_draws: u32,
     pub total_moves: u32,
     pub full_search_turns: u32,
     pub total_turns: u32,
@@ -813,6 +820,9 @@ pub fn play_selfplay_core(
     let mut draws_timeout = 0u32;
     let mut draws_repetition = 0u32;
     let mut resignations = 0u32;
+    let mut bot_wins = 0u32;
+    let mut bot_losses = 0u32;
+    let mut bot_draws = 0u32;
 
     for game_index in 0..num_games {
         let (outcome_w, outcome_b, decisive) = if let Some(color) = resigned_as[game_index] {
@@ -867,6 +877,22 @@ pub fn play_selfplay_core(
                 }
             }
         };
+
+        if let Some(bot_color) = bot_colors[game_index] {
+            if decisive {
+                let bot_outcome = match bot_color {
+                    PieceColor::White => outcome_w,
+                    PieceColor::Black => outcome_b,
+                };
+                if bot_outcome > 0.0 {
+                    bot_wins += 1;
+                } else {
+                    bot_losses += 1;
+                }
+            } else {
+                bot_draws += 1;
+            }
+        }
 
         if !decisive && skip_timeout_games {
             continue;
@@ -971,6 +997,9 @@ pub fn play_selfplay_core(
         draws_timeout,
         draws_repetition,
         resignations,
+        bot_wins,
+        bot_losses,
+        bot_draws,
         total_moves: move_counts.iter().sum(),
         full_search_turns,
         total_turns,
