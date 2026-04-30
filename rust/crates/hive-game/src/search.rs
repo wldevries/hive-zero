@@ -83,6 +83,9 @@ pub struct SelfPlayResult {
     pub calibration_false_positives: u32,
     pub use_playout_cap: bool,
     pub final_games: Vec<Game>,
+    /// Per-game bot color: `Some(color)` if the alphabeta bot played that color
+    /// in this game, `None` for pure MCTS-vs-MCTS. Same length as `final_games`.
+    pub final_bot_colors: Vec<Option<PieceColor>>,
     pub top1_visit_fraction_mean: f32,
     pub top1_visit_fraction_std: f32,
     pub search_depth_mean: f32,
@@ -1052,6 +1055,7 @@ pub fn play_selfplay_core(
         calibration_false_positives,
         use_playout_cap,
         final_games: games,
+        final_bot_colors: bot_colors,
         top1_visit_fraction_mean,
         top1_visit_fraction_std,
         search_depth_mean,

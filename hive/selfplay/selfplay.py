@@ -16,7 +16,9 @@ from shared.training_log import csv_comment
 from ..encoding.move_encoder import policy_size as compute_policy_size
 
 LOG_HEADER = (
-    "iter,mode,simulations,wins_w,wins_b,draws,resignations,positions,buffer,"
+    "iter,mode,simulations,wins_w,wins_b,"
+    "draws,draws_repetition,draws_timeout,draws_real,"
+    "resignations,positions,buffer,"
     "loss,policy_loss,value_loss,qd_loss,lr,duration_s,comment,qe_loss,mob_loss,"
     "avg_game_len,med_game_len,avg_decisive_len,med_decisive_len,"
     "mcts_top1_mean,mcts_top1_std,mcts_depth_mean,mcts_depth_std,mcts_moves_mean,mcts_moves_std\n"
@@ -59,8 +61,18 @@ def _axial_to_boardspace(q: int, r: int) -> tuple[str, str]:
     return col_str, str(row)
 
 
-def _game_to_boardspace_sgf(game, game_idx: int, generation: int, model_name: str) -> str:
-    """Convert a PyGame to Boardspace-compatible SGF (GM[27], P0/P1 actions, grid coords)."""
+def _game_to_boardspace_sgf(
+    game,
+    game_idx: int,
+    generation: int,
+    model_name: str,
+    bot_color: Optional[str] = None,
+) -> str:
+    """Convert a PyGame to Boardspace-compatible SGF (GM[27], P0/P1 actions, grid coords).
+
+    `bot_color` is "White", "Black", or None (no bot). Used to label P0/P1 ids
+    so the replay shows which side was the alphabeta bot vs the model.
+    """
     import datetime
 
     from engine_zero import HiveGame
@@ -75,11 +87,14 @@ def _game_to_boardspace_sgf(game, game_idx: int, generation: int, model_name: st
         "BlackWins": "Game won by Black",
         "Draw": "The game is a draw",
         "DrawByRepetition": "The game is a draw",
+        "InProgress": "The game timed out",
     }
     re_str = re_map.get(state, "?")
 
     dt_str = datetime.datetime.now().strftime("%a %b %d %H:%M:%S UTC %Y")
-    gn = f"HV-White-Black-gen{generation:05d}-{game_idx:04d}"
+    white_id = "Bot" if bot_color == "White" else "Model"
+    black_id = "Bot" if bot_color == "Black" else "Model"
+    gn = f"HV-{white_id}-{black_id}-gen{generation:05d}-{game_idx:04d}"
 
     lines = [
         " (;",
@@ -90,8 +105,8 @@ def _game_to_boardspace_sgf(game, game_idx: int, generation: int, model_name: st
         f"DT[{dt_str}]",
         f"GN[{gn}]",
         f"RE[{re_str}]",
-        'P0[id "White"]',
-        'P1[id "Black"]',
+        f'P0[id "{white_id}"]',
+        f'P1[id "{black_id}"]',
         "; P0[0 Start P0]",
     ]
 
@@ -143,21 +158,42 @@ def _game_to_boardspace_sgf(game, game_idx: int, generation: int, model_name: st
     return "\n".join(lines)
 
 
-def _export_games_to_zip(games, zip_path: str, generation: int, model_name: str) -> int:
-    """Write all games as SGF files into a zip archive. Returns number of games written."""
+def _export_games_to_zip(
+    games,
+    zip_path: str,
+    generation: int,
+    model_name: str,
+    bot_colors: Optional[list[Optional[str]]] = None,
+) -> int:
+    """Write all games as SGF files into a zip archive. Returns number of games written.
+
+    `bot_colors[i]` is "White", "Black", or None for game i — controls the bot
+    suffix on the filename and the P0/P1 ids inside the SGF.
+    """
     _outcome_tag = {
         "WhiteWins": "white",
         "BlackWins": "black",
         "Draw": "draw",
         "DrawByRepetition": "draw_rep",
+        "InProgress": "timeout",
     }
+    if bot_colors is None:
+        bot_colors = [None] * len(games)
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for i, game in enumerate(games, 1):
-            sgf = _game_to_boardspace_sgf(game, i, generation, model_name)
+        for i, (game, bot_color) in enumerate(zip(games, bot_colors), 1):
+            sgf = _game_to_boardspace_sgf(game, i, generation, model_name, bot_color)
             state = game.state if isinstance(game.state, str) else game.state.value
             outcome = _outcome_tag.get(state, "unknown")
             moves = game.move_count
-            zf.writestr(f"gen{generation:05d}_game{i:04d}_{outcome}_{moves}t.sgf", sgf)
+            bot_tag = ""
+            if bot_color == "White":
+                bot_tag = "_botW"
+            elif bot_color == "Black":
+                bot_tag = "_botB"
+            zf.writestr(
+                f"gen{generation:05d}_game{i:04d}_{outcome}_{moves}t{bot_tag}.sgf",
+                sgf,
+            )
     return len(games)
 
 
@@ -706,8 +742,8 @@ class SelfPlayTrainer:
             wins_b = result.wins_b
             draws_repetition = result.draws_repetition
             draws_timeout = result.draws_timeout
-            draws_other = result.draws
-            draws_total = draws_repetition + draws_timeout + draws_other
+            draws_real = result.draws
+            draws_total = draws_repetition + draws_timeout + draws_real
             resignations = result.resignations
             total_games = wins_w + wins_b + draws_total + resignations
             parts = [f"W={_cg(wins_w)} B={_cg(wins_b)}"]
@@ -716,8 +752,8 @@ class SelfPlayTrainer:
                 draw_parts.append(f"rep={_cy(draws_repetition)}")
             if draws_timeout:
                 draw_parts.append(f"timeout={_cy(draws_timeout)}")
-            if draws_other:
-                draw_parts.append(f"other={_cy(draws_other)}")
+            if draws_real:
+                draw_parts.append(f"real={_cy(draws_real)}")
             if draw_parts:
                 parts.append(f"D={_cy(draws_total)} ({', '.join(draw_parts)})")
             elif draws_total:
@@ -733,6 +769,7 @@ class SelfPlayTrainer:
 
             # Game length stats
             finished_games_all = result.final_games()
+            finished_bot_colors = result.final_bot_colors()
             game_lengths = sorted([g.move_count for g in finished_games_all])
             decisive_lengths = sorted(
                 [
@@ -827,7 +864,13 @@ class SelfPlayTrainer:
                 sgf_dir = os.path.join(self.model_dir, "selfplay_sgf")
                 os.makedirs(sgf_dir, exist_ok=True)
                 zip_path = os.path.join(sgf_dir, f"gen{generation:05d}.zip")
-                n = _export_games_to_zip(finished_games_all, zip_path, generation, self.model_name)
+                n = _export_games_to_zip(
+                    finished_games_all,
+                    zip_path,
+                    generation,
+                    self.model_name,
+                    finished_bot_colors,
+                )
                 print(f"  SGF export: {n} games → {zip_path}")
 
             # Train on replay buffer
@@ -870,7 +913,9 @@ class SelfPlayTrainer:
             with open(log_path, "a") as f:
                 f.write(
                     f"{generation},MCTS,{simulations},"
-                    f"{wins_w},{wins_b},{draws_total},{resignations},{total_positions},"
+                    f"{wins_w},{wins_b},"
+                    f"{draws_total},{draws_repetition},{draws_timeout},{draws_real},"
+                    f"{resignations},{total_positions},"
                     f"{replay_buffer.raw_size},{losses['total_loss']:.6f},"
                     f"{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
                     f"{losses.get('qd_loss', 0):.6f},"

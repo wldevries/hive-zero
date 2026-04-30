@@ -248,7 +248,7 @@ impl Game {
         self.repetition_history.push(key);
         let count = self.repetition_counts.entry(key).or_insert(0);
         *count = count.saturating_add(1);
-        if *count >= 2 {
+        if *count >= 3 {
             self.state = GameState::DrawByRepetition;
         }
     }
@@ -1067,11 +1067,15 @@ mod tests {
     }
 
     #[test]
-    fn test_twofold_repetition_draw() {
+    fn test_threefold_repetition_draw() {
         let mut game = Game::new();
 
-        // One full pass cycle repeats the initial side-to-move position for White 2 times:
-        // initial + after move 2.
+        // Two full pass cycles repeat the initial side-to-move position for White 3 times:
+        // initial + after move 2 + after move 4.
+        game.play_pass();
+        assert_eq!(game.state, GameState::InProgress);
+        game.play_pass();
+        assert_eq!(game.state, GameState::InProgress);
         game.play_pass();
         assert_eq!(game.state, GameState::InProgress);
         game.play_pass();
@@ -1079,9 +1083,11 @@ mod tests {
     }
 
     #[test]
-    fn test_undo_clears_twofold_draw_state() {
+    fn test_undo_clears_threefold_draw_state() {
         let mut game = Game::new();
 
+        game.play_pass();
+        game.play_pass();
         game.play_pass();
         game.play_pass();
         assert_eq!(game.state, GameState::DrawByRepetition);

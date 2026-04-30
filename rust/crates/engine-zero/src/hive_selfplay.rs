@@ -5,6 +5,7 @@ use pyo3::types::PyTuple;
 use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE, f32_to_bf16};
 use hive_game::game::Game;
 use hive_game::move_encoding;
+use hive_game::piece::PieceColor;
 use hive_game::search::{self, play_battle_core, play_selfplay_core};
 
 use crate::inference::HiveInference;
@@ -205,6 +206,7 @@ fn into_py_selfplay_result(result: search::SelfPlayResult) -> PySelfPlayResult {
         calibration_false_positives: result.calibration_false_positives,
         use_playout_cap: result.use_playout_cap,
         final_games: result.final_games,
+        final_bot_colors: result.final_bot_colors,
         search_stats: PySearchStats {
             top1_mean: result.top1_visit_fraction_mean,
             top1_std: result.top1_visit_fraction_std,
@@ -281,6 +283,7 @@ pub struct PySelfPlayResult {
     calibration_false_positives: u32,
     use_playout_cap: bool,
     final_games: Vec<Game>,
+    final_bot_colors: Vec<Option<PieceColor>>,
     search_stats: PySearchStats,
 }
 
@@ -433,6 +436,19 @@ impl PySelfPlayResult {
         self.final_games
             .iter()
             .map(|game| crate::hive_python::PyGame { game: game.clone() })
+            .collect()
+    }
+
+    /// Per-game bot color: "White", "Black", or None (no bot in that game).
+    /// Same length as `final_games()`.
+    fn final_bot_colors(&self) -> Vec<Option<&'static str>> {
+        self.final_bot_colors
+            .iter()
+            .map(|c| match c {
+                Some(PieceColor::White) => Some("White"),
+                Some(PieceColor::Black) => Some("Black"),
+                None => None,
+            })
             .collect()
     }
 }
