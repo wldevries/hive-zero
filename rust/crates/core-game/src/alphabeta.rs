@@ -36,6 +36,22 @@ impl AlphaBetaParams {
     }
 }
 
+/// Trait for the move type to expose a stable history-table index. Used by
+/// the history heuristic in the search driver: every β-cutoff bumps
+/// `history[mv.history_index()]` by `depth²`, and subsequent move-ordering
+/// sorts by that value so empirically-good moves are tried earlier.
+///
+/// Implementations should return `None` for moves that should not be tracked
+/// (typically the pass move). `HISTORY_SIZE` must be strictly greater than
+/// the largest index any `history_index` call can return.
+pub trait MoveOrdering {
+    /// Stable index for this move into the per-search history table, or
+    /// `None` if the move should not influence ordering (e.g. pass).
+    fn history_index(&self) -> Option<usize>;
+    /// Total slots required for the history table.
+    const HISTORY_SIZE: usize;
+}
+
 /// Trait for games that support transposition table caching: provide a
 /// (Zobrist-style) key for the current position. The key must be deterministic
 /// and must encode side-to-move. Two states that are tactically equivalent
@@ -138,9 +154,8 @@ impl<M: Copy> TranspositionTable<M> {
     }
 }
 
-/// Mutable per-search state. Carries params, node counts, and the
-/// transposition table. Future phases will add killer-move slots, history
-/// heuristic tables, etc.
+/// Mutable per-search state. Carries params, node counts, the transposition
+/// table, and the killer/history move-ordering tables.
 pub struct SearchContext<M: Copy> {
     pub params: AlphaBetaParams,
     pub nodes_visited: u64,
@@ -158,9 +173,21 @@ pub struct SearchContext<M: Copy> {
     /// When false, all TT probe and store sites are skipped — useful for
     /// equality tests that compare with-TT and no-TT results.
     pub tt_enabled: bool,
+    /// Killer-move slots indexed by ply (depth from the root). Each ply
+    /// keeps the two most recent moves that caused a β-cutoff there, which
+    /// are tried first at sibling nodes at the same ply.
+    pub killers: Vec<[Option<M>; 2]>,
+    /// History heuristic: `history[mv.history_index()] += depth²` on every
+    /// β-cutoff. Used as a tie-breaker after the TT move and killers.
+    pub history: Vec<i32>,
+    /// Times a killer slot match was found and lifted in move ordering.
+    pub killer_hits: u64,
+    /// When false, killer + history ordering is bypassed (TT-only mode).
+    /// Useful for benchmarks that isolate the new heuristics' contribution.
+    pub ordering_enabled: bool,
 }
 
-impl<M: Copy> SearchContext<M> {
+impl<M: Copy + MoveOrdering> SearchContext<M> {
     pub fn new(params: AlphaBetaParams) -> Self {
         Self {
             params,
@@ -169,6 +196,10 @@ impl<M: Copy> SearchContext<M> {
             tt_hits: 0,
             tt_order_hits: 0,
             tt_enabled: true,
+            killers: Vec::new(),
+            history: vec![0i32; M::HISTORY_SIZE],
+            killer_hits: 0,
+            ordering_enabled: true,
         }
     }
 }
@@ -188,9 +219,13 @@ fn won_score<G: Game>(game: &G, winner: crate::game::Player) -> f32 {
 
 /// Negamax alphabeta on a mutable game state. Mutates `game` during recursion
 /// (via `play_move`/`undo`) but always restores it before returning.
+///
+/// `ply` is the depth from the root (root child = 1). Used to index killer
+/// slots so cutoffs at the same ply share their best move across the tree.
 fn negamax<G, F>(
     game: &mut G,
     depth: u32,
+    ply: u32,
     mut alpha: f32,
     beta: f32,
     eval: &mut F,
@@ -198,7 +233,7 @@ fn negamax<G, F>(
 ) -> f32
 where
     G: Game + Undoable + TranspositionKey,
-    G::Move: PartialEq,
+    G::Move: PartialEq + MoveOrdering,
     F: FnMut(&G) -> f32,
 {
     ctx.nodes_visited += 1;
@@ -249,19 +284,45 @@ where
         // Forced pass — recurse with one ply consumed and flipped sign.
         let pass = G::pass_move();
         game.play_move(&pass).expect("pass must be playable");
-        let score = -negamax(game, depth.saturating_sub(1), -beta, -alpha, eval, ctx);
+        let score = -negamax(game, depth.saturating_sub(1), ply + 1, -beta, -alpha, eval, ctx);
         game.undo();
         return score;
     }
 
     // Move ordering: lift the TT-suggested move (if any and still legal) to
     // the front of the list so it's tried first.
+    let mut sort_start = 0usize;
     if let Some(mv) = tt_move {
         if let Some(idx) = moves.iter().position(|m| *m == mv) {
             if idx != 0 {
                 moves.swap(0, idx);
             }
             ctx.tt_order_hits += 1;
+            sort_start = 1;
+        }
+    }
+
+    // Killers + history ordering for everything after the TT move. Killer
+    // slots fire when a sibling at this exact ply has caused a β-cutoff
+    // with the same move; otherwise we fall back to history (cumulative
+    // cutoff bonus across the whole tree). `sort_by_key` is ascending, so
+    // smaller keys are tried earlier — we map "good" moves to small keys.
+    if ctx.ordering_enabled && sort_start < moves.len() {
+        let killers = ctx.killers.get(ply as usize).copied().unwrap_or([None, None]);
+        moves[sort_start..].sort_by_key(|mv| {
+            if Some(*mv) == killers[0] {
+                i64::MIN
+            } else if Some(*mv) == killers[1] {
+                i64::MIN + 1
+            } else {
+                match mv.history_index() {
+                    Some(idx) => -(ctx.history[idx] as i64),
+                    None => 0,
+                }
+            }
+        });
+        if Some(moves[sort_start]) == killers[0] || Some(moves[sort_start]) == killers[1] {
+            ctx.killer_hits += 1;
         }
     }
 
@@ -273,9 +334,10 @@ where
     let mut best = f32::NEG_INFINITY;
     let mut best_move: Option<G::Move> = None;
     let mut cutoff = false;
+    let mut cutoff_move: Option<G::Move> = None;
     for mv in moves.iter() {
         game.play_move(mv).expect("valid_moves returned an unplayable move");
-        let score = -negamax(game, depth - 1, -beta, -alpha, eval, ctx);
+        let score = -negamax(game, depth - 1, ply + 1, -beta, -alpha, eval, ctx);
         game.undo();
 
         if score > best {
@@ -287,7 +349,30 @@ where
         }
         if alpha >= beta {
             cutoff = true;
+            cutoff_move = Some(*mv);
             break; // beta cutoff
+        }
+    }
+
+    // Killer + history bookkeeping on β-cutoff. The cutoff move is what
+    // refuted the parent's choice; remembering it tightens future siblings'
+    // ordering. Skip pass and any move whose `history_index` is None.
+    if cutoff {
+        if let Some(mv) = cutoff_move {
+            // Killer: shift down [0] -> [1] unless the new move is already [0].
+            while ctx.killers.len() <= ply as usize {
+                ctx.killers.push([None, None]);
+            }
+            let slots = &mut ctx.killers[ply as usize];
+            if slots[0] != Some(mv) {
+                slots[1] = slots[0];
+                slots[0] = Some(mv);
+            }
+            // History: depth² bonus.
+            if let Some(idx) = mv.history_index() {
+                let bonus = (depth as i32) * (depth as i32);
+                ctx.history[idx] = ctx.history[idx].saturating_add(bonus);
+            }
         }
     }
 
@@ -332,7 +417,7 @@ pub fn alphabeta_best_move<G, F>(
 ) -> (Option<G::Move>, f32)
 where
     G: Game + Undoable + TranspositionKey,
-    G::Move: PartialEq,
+    G::Move: PartialEq + MoveOrdering,
     F: FnMut(&G) -> f32,
 {
     match game.outcome() {
@@ -358,11 +443,19 @@ where
     // root-level `best_move` is lifted to position 0 of the move list so the
     // next deeper iteration tries it first — usually triggering immediate
     // alpha tightening that prunes the rest of the root moves much faster.
+    // The remaining root moves are sorted by descending history so the
+    // strongest-looking alternatives narrow alpha next, before the long tail.
     for depth in 1..=max_depth {
         if let Some(idx) = moves.iter().position(|m| *m == best_move) {
             if idx != 0 {
                 moves.swap(0, idx);
             }
+        }
+        if ctx.ordering_enabled && moves.len() > 1 {
+            moves[1..].sort_by_key(|mv| match mv.history_index() {
+                Some(idx) => -(ctx.history[idx] as i64),
+                None => 0,
+            });
         }
 
         let mut alpha = f32::NEG_INFINITY;
@@ -372,7 +465,7 @@ where
 
         for mv in moves.iter() {
             game.play_move(mv).expect("valid_moves returned an unplayable move");
-            let score = -negamax(game, depth - 1, -beta, -alpha, eval, ctx);
+            let score = -negamax(game, depth - 1, 1, -beta, -alpha, eval, ctx);
             game.undo();
 
             if score > iter_best_score {
@@ -451,6 +544,13 @@ mod tests {
         fn tt_key(&self) -> u64 {
             let player_bit = matches!(self.player, Player::Player2) as u64;
             (self.counter as u64) | (player_bit << 32)
+        }
+    }
+
+    impl MoveOrdering for u8 {
+        const HISTORY_SIZE: usize = 4; // moves are 1..=3, with 0 == pass
+        fn history_index(&self) -> Option<usize> {
+            if *self == 0 { None } else { Some(*self as usize) }
         }
     }
 

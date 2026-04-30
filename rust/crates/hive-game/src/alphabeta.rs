@@ -1,10 +1,13 @@
 //! Hive-specific glue for the generic alphabeta driver in `core_game::alphabeta`.
 
-use core_game::alphabeta::{self, AlphaBetaParams, SearchContext, TranspositionKey, WIN_SCORE};
+use core_game::alphabeta::{
+    self, AlphaBetaParams, MoveOrdering, SearchContext, TranspositionKey, WIN_SCORE,
+};
 use core_game::game::Undoable;
 
+use crate::board::{GRID_SIZE, hex_to_grid};
 use crate::game::{Game, GameState, Move};
-use crate::piece::PieceColor;
+use crate::piece::{PIECES_PER_PLAYER, PieceColor};
 
 /// Penalty returned for `DrawByRepetition` so the bot avoids stalling. Strong
 /// enough to dominate any positional consideration but well below the win/loss
@@ -14,6 +17,20 @@ const REPETITION_PENALTY: f32 = -WIN_SCORE / 4.0;
 impl Undoable for Game {
     fn undo(&mut self) {
         Game::undo(self);
+    }
+}
+
+impl MoveOrdering for Move {
+    // 22 distinct piece linear indices (white 0..10, black 11..21) times the
+    // grid area give every (piece, destination) pair its own slot. Pass moves
+    // and any out-of-range destination map to None and are not tracked.
+    const HISTORY_SIZE: usize = 2 * PIECES_PER_PLAYER * GRID_SIZE * GRID_SIZE;
+
+    fn history_index(&self) -> Option<usize> {
+        let piece = self.piece?;
+        let to = self.to?;
+        let (row, col) = hex_to_grid(to)?;
+        Some(piece.linear_index() * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col)
     }
 }
 
@@ -279,7 +296,8 @@ mod tests {
     }
 
     /// Wall-clock timing benchmark: how long does a single bot move take
-    /// at each depth with all four phases of TT enabled? Run in release:
+    /// at each depth, comparing TT-only ordering (killers + history off)
+    /// to the full TT + killers + history ordering. Run in release:
     /// `cargo test -p hive-game --release alphabeta_timing -- --ignored --nocapture`
     #[test]
     #[ignore]
@@ -292,17 +310,63 @@ mod tests {
         let mut eval = heuristic_eval;
 
         for depth in [2u32, 3, 4, 5] {
-            let mut work = start.clone();
-            let mut ctx = SearchContext::new(AlphaBetaParams::new(depth));
+            let mut tt_only = start.clone();
+            let mut ctx_tt_only = SearchContext::new(AlphaBetaParams::new(depth));
+            ctx_tt_only.ordering_enabled = false;
             let t0 = std::time::Instant::now();
-            let _ = alphabeta::alphabeta_best_move(&mut work, &mut eval, &mut ctx);
-            let elapsed = t0.elapsed();
+            let _ = alphabeta::alphabeta_best_move(&mut tt_only, &mut eval, &mut ctx_tt_only);
+            let t_tt_only = t0.elapsed();
+
+            let mut full = start.clone();
+            let mut ctx_full = SearchContext::new(AlphaBetaParams::new(depth));
+            let t0 = std::time::Instant::now();
+            let _ = alphabeta::alphabeta_best_move(&mut full, &mut eval, &mut ctx_full);
+            let t_full = t0.elapsed();
+
+            let saved_nodes = ctx_tt_only.nodes_visited.saturating_sub(ctx_full.nodes_visited);
+            let saved_pct = 100.0 * saved_nodes as f64 / ctx_tt_only.nodes_visited as f64;
             eprintln!(
-                "depth {}: {:>8.2} ms  ({:>7} nodes, {:>5} order_hits, tt_size={})",
-                depth, elapsed.as_secs_f64() * 1000.0,
-                ctx.nodes_visited, ctx.tt_order_hits, ctx.tt.len(),
+                "depth {}: TT-only {:>8.2} ms ({:>7} nodes) -> +k+h {:>8.2} ms ({:>7} nodes)  \
+                 saved {:>5.1}%, killer_hits={}, order_hits={}",
+                depth,
+                t_tt_only.as_secs_f64() * 1000.0, ctx_tt_only.nodes_visited,
+                t_full.as_secs_f64() * 1000.0, ctx_full.nodes_visited,
+                saved_pct, ctx_full.killer_hits, ctx_full.tt_order_hits,
             );
         }
+    }
+
+    #[test]
+    fn ordering_does_not_change_search_result() {
+        // With killers + history disabled, the search must reach the same
+        // (best_move, score) as with the full ordering stack. Different node
+        // counts are expected (and fewer with ordering on), but the minimax
+        // value cannot move.
+        let mut start = Game::new();
+        for _ in 0..3 {
+            let mv = start.valid_moves()[0];
+            start.play_move(&mv).unwrap();
+        }
+        let mut eval = heuristic_eval;
+
+        let mut work_off = start.clone();
+        let mut ctx_off = SearchContext::new(AlphaBetaParams::new(3));
+        ctx_off.ordering_enabled = false;
+        let (mv_off, score_off) =
+            alphabeta::alphabeta_best_move(&mut work_off, &mut eval, &mut ctx_off);
+
+        let mut work_on = start.clone();
+        let mut ctx_on = SearchContext::new(AlphaBetaParams::new(3));
+        let (mv_on, score_on) =
+            alphabeta::alphabeta_best_move(&mut work_on, &mut eval, &mut ctx_on);
+
+        assert_eq!(score_off, score_on, "ordering changed best score");
+        assert_eq!(mv_off, mv_on, "ordering changed best move");
+        assert!(
+            ctx_on.nodes_visited <= ctx_off.nodes_visited,
+            "ordering visited more nodes than no-ordering: {} vs {}",
+            ctx_on.nodes_visited, ctx_off.nodes_visited,
+        );
     }
 
     #[test]
