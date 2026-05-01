@@ -484,6 +484,114 @@ where
     (Some(best_move), best_score)
 }
 
+/// Like `alphabeta_best_move`, but returns the exact minimax score for *every*
+/// root move at `params.max_depth` — the data needed to derive a full policy
+/// distribution rather than just the argmax.
+///
+/// Iterative deepening 1..max_depth-1 runs the standard pruned search to seed
+/// the TT and history heuristic. The final iteration searches each root move
+/// with a full `(−∞, +∞)` window so the returned scores are true minimax
+/// values rather than fail-low upper bounds (which they would be for any move
+/// that doesn't beat the running alpha under a normal root loop). Each
+/// subtree still benefits from TT and move ordering, so the cost increase
+/// over `alphabeta_best_move` is moderate, not multiplicative-in-N.
+///
+/// Scores are from the perspective of the player to move at the root
+/// (positive = good for that player). Returns an empty Vec if the game is
+/// already terminal, and `vec![(pass, 0.0)]` if the only option is a pass.
+pub fn alphabeta_root_scores<G, F>(
+    game: &mut G,
+    eval: &mut F,
+    ctx: &mut SearchContext<G::Move>,
+) -> Vec<(G::Move, f32)>
+where
+    G: Game + Undoable + TranspositionKey,
+    G::Move: PartialEq + MoveOrdering,
+    F: FnMut(&G) -> f32,
+{
+    match game.outcome() {
+        Outcome::WonBy(_) | Outcome::Draw => return Vec::new(),
+        Outcome::Ongoing => {}
+    }
+
+    let mut moves = game.valid_moves();
+    if moves.is_empty() {
+        return vec![(G::pass_move(), 0.0)];
+    }
+
+    let max_depth = ctx.params.max_depth;
+    if max_depth == 0 {
+        let score = eval(game);
+        return moves.iter().map(|&mv| (mv, score)).collect();
+    }
+
+    let mut best_move = moves[0];
+
+    // ID iterations 1..max_depth-1: standard pruned search to seed TT/ordering.
+    // Skipped when max_depth == 1.
+    for depth in 1..max_depth {
+        if let Some(idx) = moves.iter().position(|m| *m == best_move) {
+            if idx != 0 {
+                moves.swap(0, idx);
+            }
+        }
+        if ctx.ordering_enabled && moves.len() > 1 {
+            moves[1..].sort_by_key(|mv| match mv.history_index() {
+                Some(idx) => -(ctx.history[idx] as i64),
+                None => 0,
+            });
+        }
+
+        let mut alpha = f32::NEG_INFINITY;
+        let beta = f32::INFINITY;
+        let mut iter_best = moves[0];
+        let mut iter_best_score = f32::NEG_INFINITY;
+        for mv in moves.iter() {
+            game.play_move(mv).expect("valid_moves returned an unplayable move");
+            let score = -negamax(game, depth - 1, 1, -beta, -alpha, eval, ctx);
+            game.undo();
+            if score > iter_best_score {
+                iter_best_score = score;
+                iter_best = *mv;
+            }
+            if score > alpha {
+                alpha = score;
+            }
+        }
+        best_move = iter_best;
+    }
+
+    // Final iteration: full window per root move so every score is exact.
+    if let Some(idx) = moves.iter().position(|m| *m == best_move) {
+        if idx != 0 {
+            moves.swap(0, idx);
+        }
+    }
+    if ctx.ordering_enabled && moves.len() > 1 {
+        moves[1..].sort_by_key(|mv| match mv.history_index() {
+            Some(idx) => -(ctx.history[idx] as i64),
+            None => 0,
+        });
+    }
+
+    let mut scores: Vec<(G::Move, f32)> = Vec::with_capacity(moves.len());
+    for mv in moves.iter() {
+        game.play_move(mv).expect("valid_moves returned an unplayable move");
+        let score = -negamax(
+            game,
+            max_depth - 1,
+            1,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            eval,
+            ctx,
+        );
+        game.undo();
+        scores.push((*mv, score));
+    }
+    scores
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,6 +682,74 @@ mod tests {
         let snapshot_counter = game.counter;
         let snapshot_player = game.player;
         let _ = alphabeta_best_move(&mut game, &mut eval, &mut ctx);
+        assert_eq!(game.counter, snapshot_counter);
+        assert_eq!(game.player, snapshot_player);
+        assert!(game.history.is_empty());
+    }
+
+    #[test]
+    fn root_scores_one_per_legal_move() {
+        let mut game = CountdownGame::new(4);
+        let mut ctx = SearchContext::new(AlphaBetaParams::new(4));
+        let mut eval = |_: &CountdownGame| 0.0;
+        let scores = alphabeta_root_scores(&mut game, &mut eval, &mut ctx);
+        // counter=4 → legal moves are 1, 2, 3.
+        assert_eq!(scores.len(), 3);
+        for &mv in &[1u8, 2, 3] {
+            assert!(scores.iter().any(|(m, _)| *m == mv), "missing score for move {mv}");
+        }
+    }
+
+    #[test]
+    fn root_scores_best_matches_alphabeta_best_move() {
+        // Score-level invariant: the score `alphabeta_best_move` reports for
+        // its chosen best move must equal that move's entry in
+        // `alphabeta_root_scores`, and must equal the maximum score in the
+        // full root-scores list. (Move-level equality doesn't hold under
+        // ties — `>` vs `Iterator::max_by` break ties differently.)
+        for start in [3u8, 4, 5, 6, 7] {
+            for depth in [1u32, 2, 3, 4] {
+                let mut g1 = CountdownGame::new(start);
+                let mut ctx1 = SearchContext::new(AlphaBetaParams::new(depth));
+                let mut eval = |_: &CountdownGame| 0.0;
+                let (best_mv, best_score) = alphabeta_best_move(&mut g1, &mut eval, &mut ctx1);
+
+                let mut g2 = CountdownGame::new(start);
+                let mut ctx2 = SearchContext::new(AlphaBetaParams::new(depth));
+                let scores = alphabeta_root_scores(&mut g2, &mut eval, &mut ctx2);
+
+                let max_root_score = scores
+                    .iter()
+                    .map(|(_, s)| *s)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    (best_score - max_root_score).abs() < 1e-3,
+                    "best_move score {best_score} != max root_scores score {max_root_score} \
+                     at start={start} depth={depth}",
+                );
+
+                let chosen = scores
+                    .iter()
+                    .find(|(m, _)| *m == best_mv.unwrap())
+                    .expect("alphabeta best move must appear in root_scores");
+                assert!(
+                    (chosen.1 - best_score).abs() < 1e-3,
+                    "score for chosen move {:?} diverged: root_scores={}, best_move={best_score} \
+                     at start={start} depth={depth}",
+                    chosen.0, chosen.1,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn root_scores_undo_restores_state() {
+        let mut game = CountdownGame::new(6);
+        let snapshot_counter = game.counter;
+        let snapshot_player = game.player;
+        let mut ctx = SearchContext::new(AlphaBetaParams::new(4));
+        let mut eval = |_: &CountdownGame| 0.0;
+        let _ = alphabeta_root_scores(&mut game, &mut eval, &mut ctx);
         assert_eq!(game.counter, snapshot_counter);
         assert_eq!(game.player, snapshot_player);
         assert!(game.history.is_empty());

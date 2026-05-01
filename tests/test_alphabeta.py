@@ -56,8 +56,8 @@ def _play_game_alphabeta_vs_random(ab_is_white: bool, depth: int, seed: int, max
 
 def test_selfplay_with_bot_produces_decisive_games():
     """End-to-end: bot_frac=1.0 self-play produces decisive games (or repetition
-    draws) instead of timeouts. Verifies value_only flag is set for bot turns
-    and the value-target signal is non-trivial.
+    draws) instead of timeouts, and bot turns emit policy targets derived from
+    the alphabeta root-score softmax (no longer value-only).
     """
     import numpy as np
     from engine_zero import RustSelfPlaySession
@@ -83,10 +83,27 @@ def test_selfplay_with_bot_produces_decisive_games():
     assert result.draws_timeout == 0, "bot opponent should prevent timeout draws"
     assert result.num_samples > 0, "no training samples emitted"
 
-    _, _, _, values, vo, _, _, _ = result.training_data()
-    assert sum(vo) > 0, "no bot turns in emitted samples (expected ~half)"
-    assert sum(vo) < len(vo), "every emitted turn was bot-only — MCTS turns missing"
+    # bot_frac=1.0 means every turn is a bot turn. Bot turns now emit
+    # alphabeta-derived policy targets, so they must NOT be value_only.
+    (
+        _boards, _reserves,
+        (_place_idx, place_probs, num_placements),
+        values, vo, _po, _aux,
+        (_movement_src, _movement_dst, movement_probs, num_movements),
+    ) = result.training_data()
+    assert sum(vo) == 0, (
+        "bot turns must not be value_only — they should carry alphabeta policy targets"
+    )
     assert float(values.std()) > 0.0, "value targets have zero variance — head won't learn"
+
+    # The policy targets must actually be populated: every emitted bot turn
+    # should have at least one (placement or movement) policy entry with mass.
+    legal_per_sample = np.asarray(num_placements) + np.asarray(num_movements)
+    assert int(legal_per_sample.min()) > 0, (
+        "some bot turn emitted zero policy entries (no placements and no movements)"
+    )
+    total_mass = float(place_probs.sum()) + float(movement_probs.sum())
+    assert total_mass > 0.0, "policy probs are all zero — softmax produced no mass"
 
 
 @pytest.mark.parametrize("n_games", [10])

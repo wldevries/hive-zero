@@ -79,6 +79,17 @@ pub fn alphabeta_best_move(game: &Game, depth: u32) -> Move {
     mv.unwrap_or_else(Move::pass)
 }
 
+/// Like `alphabeta_best_move`, but returns exact minimax scores for *every*
+/// root move at the given depth — the data needed to derive a softmax policy
+/// distribution for training the policy head on bot turns. Operates on a
+/// clone — the caller's `game` is never mutated.
+pub fn alphabeta_root_scores(game: &Game, depth: u32) -> Vec<(Move, f32)> {
+    let mut work = game.clone();
+    let mut ctx = SearchContext::new(AlphaBetaParams::new(depth));
+    let mut eval = heuristic_eval;
+    alphabeta::alphabeta_root_scores(&mut work, &mut eval, &mut ctx)
+}
+
 /// Deepened static evaluation: run alphabeta to the given depth and return
 /// the best-line value as `(white_score, black_score)`, both in `[-1, 1]`.
 ///
@@ -141,6 +152,42 @@ mod tests {
         let mv = alphabeta_best_move(&game, 2);
         let legal: Vec<_> = game.valid_moves();
         assert!(legal.iter().any(|m| *m == mv), "alphabeta returned non-legal move {:?}", mv);
+    }
+
+    #[test]
+    fn root_scores_cover_all_legal_moves() {
+        let mut game = Game::new();
+        for _ in 0..3 {
+            let mv = game.valid_moves()[0];
+            game.play_move(&mv).unwrap();
+        }
+        let scores = alphabeta_root_scores(&game, 2);
+        let legal = game.valid_moves();
+        assert_eq!(scores.len(), legal.len(), "one score per legal move expected");
+        for (mv, _) in &scores {
+            assert!(legal.iter().any(|m| m == mv), "scored non-legal move {:?}", mv);
+        }
+    }
+
+    #[test]
+    fn root_scores_best_is_legal_and_does_not_mutate_caller() {
+        let mut canonical = Game::new();
+        let opening = canonical.valid_moves()[0];
+        canonical.play_move(&opening).unwrap();
+        let before_hash = canonical.position_hash();
+        let before_count = canonical.move_count;
+
+        let scores = alphabeta_root_scores(&canonical, 2);
+        let (best_mv, _) = scores
+            .iter()
+            .copied()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .expect("non-empty");
+        let legal = canonical.valid_moves();
+        assert!(legal.iter().any(|m| *m == best_mv), "best is not legal: {best_mv:?}");
+
+        assert_eq!(canonical.position_hash(), before_hash);
+        assert_eq!(canonical.move_count, before_count);
     }
 
     #[test]

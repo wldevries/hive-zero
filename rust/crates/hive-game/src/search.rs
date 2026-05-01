@@ -29,6 +29,24 @@ pub type BattleProgressFn<'a> = Box<dyn FnMut(u32, u32, u32, u32) + 'a>;
 /// at end of self-play).
 const HEURISTIC_VALUE_DEPTH: u32 = 3;
 
+/// Softmax temperature applied to clamped alphabeta root scores when deriving
+/// policy targets on bot turns. Scores are first clamped to
+/// `[-BOT_POLICY_CLAMP, +BOT_POLICY_CLAMP]` so `WIN_SCORE` /
+/// `REPETITION_PENALTY` magnitudes don't blow up the softmax, then mapped to
+/// probabilities via `exp(score / T) / Z`. T=0.1 gives a sharp distribution
+/// (a 0.1 score gap → ~2.7× ratio, a 1.0 gap → ~22000× ratio) without
+/// collapsing to one-hot when several moves tie.
+const BOT_POLICY_TEMP: f32 = 0.1;
+
+/// Clamp bound for alphabeta scores before softmax. The static heuristic
+/// already returns values in `[-1, 1]`, so this only affects terminal wins
+/// (`+WIN_SCORE` ≈ +1e6) and repetition penalties (≈ -2.5e5). Set to 2.0 so
+/// a real tactical win sits a full 1.0 above even the strongest heuristic
+/// position — at T=0.1 that's a ~22000× separation, ensuring the win
+/// dominates the softmax instead of being diluted by near-winning heuristic
+/// moves.
+const BOT_POLICY_CLAMP: f32 = 2.0;
+
 #[derive(Clone)]
 pub struct BattleResult {
     pub wins_model1: u32,
@@ -396,21 +414,80 @@ pub fn play_selfplay_core(
         // available CPU cores. This is the speedup hot-spot at higher
         // bot_depth — at depth 3 each search is ~30-200ms and a typical
         // iteration with bot_frac=0.5 has ~25 of them.
-        let bot_moves: Vec<Move> = if bot_indices.is_empty() {
+        let bot_results: Vec<Vec<(Move, f32)>> = if bot_indices.is_empty() {
             Vec::new()
         } else {
             bot_indices
                 .par_iter()
-                .map(|&i| crate::alphabeta::alphabeta_best_move(&games[i], bot_depth))
+                .map(|&i| crate::alphabeta::alphabeta_root_scores(&games[i], bot_depth))
                 .collect()
         };
 
-        // Pass 3: sequential bot move application. Mirrors the original
-        // inline block — emits a value-only training row, plays the move,
-        // and reroots the MCTS tree so the opponent's MCTS keeps a warm
-        // root across bot replies.
+        // Pass 3: sequential bot move application. Picks the argmax move from
+        // the alphabeta root scores, derives a softmax policy distribution
+        // over all root moves (clamped to ±BOT_POLICY_CLAMP, temperature
+        // BOT_POLICY_TEMP), encodes the distribution into the per-policy
+        // arrays, emits a normal (non-value-only) TurnRecord so the policy
+        // head gets a strong, principled target on bot positions, then plays
+        // the move and reroots the MCTS tree.
+        let place_size = move_encoding::NUM_PLACE_CHANNELS * grid_size * grid_size;
         for (slot, &game_index) in bot_indices.iter().enumerate() {
-            let mv = bot_moves[slot];
+            let scores = &bot_results[slot];
+
+            // Argmax → actual bot move. Empty scores can only happen if the
+            // game was already terminal (excluded by the active check above)
+            // — fall back to pass for safety.
+            let (mv, _best_score) = scores
+                .iter()
+                .copied()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .unwrap_or((Move::pass(), 0.0));
+
+            // Softmax over clamped scores (numerically stable: subtract max).
+            let clamped: Vec<f32> = scores
+                .iter()
+                .map(|(_, s)| s.clamp(-BOT_POLICY_CLAMP, BOT_POLICY_CLAMP))
+                .collect();
+            let max_clamped = clamped.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = clamped
+                .iter()
+                .map(|&s| ((s - max_clamped) / BOT_POLICY_TEMP).exp())
+                .collect();
+            let z: f32 = exps.iter().sum();
+            let probs: Vec<f32> = if z > 0.0 {
+                exps.iter().map(|e| e / z).collect()
+            } else {
+                let n = scores.len() as f32;
+                vec![1.0 / n; scores.len()]
+            };
+
+            // Encode each scored move into per-policy-type arrays. Pass moves
+            // (piece=None) and out-of-grid placements are dropped, mirroring
+            // how the MCTS branch builds policy targets above.
+            let mut place_idx: Vec<u16> = Vec::new();
+            let mut place_prob: Vec<f32> = Vec::new();
+            let mut movement_src: Vec<u16> = Vec::new();
+            let mut movement_dst: Vec<u16> = Vec::new();
+            let mut movement_prob: Vec<f32> = Vec::new();
+            for ((scored_mv, _), &prob) in scores.iter().zip(probs.iter()) {
+                if scored_mv.piece.is_none() {
+                    continue;
+                }
+                match encode_game_move(scored_mv, grid_size) {
+                    Some(PolicyIndex::Single(index)) => {
+                        if index < place_size {
+                            place_idx.push(index as u16);
+                            place_prob.push(prob);
+                        }
+                    }
+                    Some(PolicyIndex::DotProduct { src_cell, dst_cell, .. }) => {
+                        movement_src.push(src_cell as u16);
+                        movement_dst.push(dst_cell as u16);
+                        movement_prob.push(prob);
+                    }
+                    _ => {}
+                }
+            }
 
             let board_offset = board_buf.len();
             let reserve_offset = reserve_buf.len();
@@ -429,12 +506,12 @@ pub fn play_selfplay_core(
                 board_offset,
                 reserve_offset,
                 turn_color,
-                is_value_only: true,
-                place_idx: Vec::new(),
-                place_prob: Vec::new(),
-                movement_src: Vec::new(),
-                movement_dst: Vec::new(),
-                movement_prob: Vec::new(),
+                is_value_only: false,
+                place_idx,
+                place_prob,
+                movement_src,
+                movement_dst,
+                movement_prob,
                 my_queen_danger: games[game_index].queen_danger(turn_color),
                 opp_queen_danger: games[game_index].queen_danger(opp),
                 my_queen_escape: games[game_index].queen_escape(turn_color),
