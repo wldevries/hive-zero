@@ -33,18 +33,19 @@ const HEURISTIC_VALUE_DEPTH: u32 = 3;
 /// policy targets on bot turns. Scores are first clamped to
 /// `[-BOT_POLICY_CLAMP, +BOT_POLICY_CLAMP]` so `WIN_SCORE` /
 /// `REPETITION_PENALTY` magnitudes don't blow up the softmax, then mapped to
-/// probabilities via `exp(score / T) / Z`. T=0.1 gives a sharp distribution
-/// (a 0.1 score gap → ~2.7× ratio, a 1.0 gap → ~22000× ratio) without
-/// collapsing to one-hot when several moves tie.
-const BOT_POLICY_TEMP: f32 = 0.1;
+/// probabilities via `exp(score / T) / Z`. T=0.3 gives a moderately sharp
+/// distribution (a 0.1 score gap → ~1.4× ratio, a 1.0 gap → ~28× ratio) —
+/// the alphabeta best move clearly dominates without forcing a near-one-hot
+/// target the policy head struggles to fit.
+const BOT_POLICY_TEMP: f32 = 0.3;
 
 /// Clamp bound for alphabeta scores before softmax. The static heuristic
 /// already returns values in `[-1, 1]`, so this only affects terminal wins
 /// (`+WIN_SCORE` ≈ +1e6) and repetition penalties (≈ -2.5e5). Set to 2.0 so
 /// a real tactical win sits a full 1.0 above even the strongest heuristic
-/// position — at T=0.1 that's a ~22000× separation, ensuring the win
-/// dominates the softmax instead of being diluted by near-winning heuristic
-/// moves.
+/// position — at T=0.3 that's a ~28× separation, and a clamped win vs a
+/// clamped loss is `exp(4 / 0.3)` ≈ 600 000×, so terminal lines still
+/// dominate the softmax.
 const BOT_POLICY_CLAMP: f32 = 2.0;
 
 #[derive(Clone)]
