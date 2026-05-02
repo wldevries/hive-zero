@@ -460,6 +460,9 @@ pub fn play_selfplay_core(
     let mut active = vec![true; num_games];
     let mut move_counts = vec![0u32; num_games];
     let mut histories: Vec<Vec<TurnRecord>> = (0..num_games).map(|_| Vec::new()).collect();
+    // True once a game's tree has been rerooted and its root is already expanded with
+    // priors from the previous search; such games skip the root NN eval + init().
+    let mut search_warm = vec![false; num_games];
 
     let mut result = SelfPlayResult::default();
     let mut finished_count: u32 = 0;
@@ -561,19 +564,33 @@ pub fn play_selfplay_core(
             .collect();
         result.full_search_turns += is_full.iter().filter(|&&f| f).count() as u32;
 
-        // Initial root NN eval — batched across all active games.
-        let mut root_boards = vec![0f32; n * BOARD_FLAT];
-        let mut root_reserves = vec![0f32; n * RESERVE_SIZE];
-        for (i, &gi) in active_games.iter().enumerate() {
-            boards[gi].encode_board(
-                &mut root_boards[i * BOARD_FLAT..(i + 1) * BOARD_FLAT],
-                &mut root_reserves[i * RESERVE_SIZE..(i + 1) * RESERVE_SIZE],
-            );
+        // Only cold games need a root NN eval + init(). Warm games already have
+        // an expanded root with priors from the previous ply's reroot().
+        let cold: Vec<usize> = (0..n)
+            .filter(|&i| !search_warm[active_games[i]])
+            .collect();
+
+        if !cold.is_empty() {
+            let nc = cold.len();
+            let mut cold_boards = vec![0f32; nc * BOARD_FLAT];
+            let mut cold_reserves = vec![0f32; nc * RESERVE_SIZE];
+            for (k, &i) in cold.iter().enumerate() {
+                let gi = active_games[i];
+                boards[gi].encode_board(
+                    &mut cold_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT],
+                    &mut cold_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE],
+                );
+            }
+            let (init_policy, _, _) = eval_fn(&cold_boards, &cold_reserves, nc)?;
+            for (k, &i) in cold.iter().enumerate() {
+                let gi = active_games[i];
+                let policy_slice = &init_policy[k * POLICY_SIZE..(k + 1) * POLICY_SIZE];
+                searches[gi].init(&boards[gi], policy_slice);
+            }
         }
-        let (init_policy, _, _) = eval_fn(&root_boards, &root_reserves, n)?;
+
+        // Apply fresh Dirichlet noise to every full-search root (warm and cold).
         for (i, &gi) in active_games.iter().enumerate() {
-            let policy_slice = &init_policy[i * POLICY_SIZE..(i + 1) * POLICY_SIZE];
-            searches[gi].init(&boards[gi], policy_slice);
             if is_full[i] {
                 searches[gi].apply_root_dirichlet(dir_alpha, dir_epsilon);
             }
@@ -686,6 +703,7 @@ pub fn play_selfplay_core(
             if boards[gi].is_game_over() {
                 active[gi] = false;
                 finished_count += 1;
+                search_warm[gi] = false;
                 let len = move_counts[gi];
                 result.game_lengths.push(len);
                 match boards[gi].outcome() {
@@ -710,6 +728,10 @@ pub fn play_selfplay_core(
                     Outcome::Draw => result.draws += 1,
                     Outcome::Ongoing => {} // cannot happen: game is naturally bounded
                 }
+            } else {
+                // Reroot to preserve the subtree for the chosen move.
+                // Falls back to a cold init next ply if the move wasn't expanded.
+                search_warm[gi] = searches[gi].reroot(mv);
             }
         }
 
