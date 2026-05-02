@@ -97,7 +97,7 @@ Scores are sums of head logits per move type, then softmax over legal moves:
 D6 symmetry requires permuting both spatial positions and direction channels for the cap_dir head. Direction channel `d` maps to `sym.transform_dir(d)` under each of the 12 D6 symmetries.
 
 ### Policy loss
-Independent soft cross-entropy per head (place, cap_dir). Mid-capture turns only train the cap_dir head.
+Independent soft cross-entropy per head. Place turns train the place head (cross-entropy on ch 0-2 for color/position, separate cross-entropy on ch 3 for remove). Capture turns (both first-hop and mid-capture, treated identically) train only the cap_dir head.
 
 ## Value Head
 
@@ -141,9 +141,13 @@ loss = policy_loss + 1.0 * value_loss
 For C=128, N=4 (larger training config): ~1.2M parameters.
 
 ## Training data storage
-The flat `POLICY_SIZE = 4440` format is used only for storing MCTS visit distributions, **not** as NN output:
-- `[0, 4107)`: Place — `color * 37² + place_at * 37 + remove`
-- `[4107, 4218)`: PlaceOnly — `4107 + color * 37 + place_at`
-- `[4218, 4440)`: Capture — `4218 + direction * 37 + from`
+MCTS visit distributions are stored in the same flat layout as the NN policy output: `NN_POLICY_SIZE = 490 = 10 × 49` floats per position, laid out as
+- `[0, 49)`: place White at cell
+- `[49, 98)`: place Grey at cell
+- `[98, 147)`: place Black at cell
+- `[147, 196)`: remove ring at cell
+- `[196, 490)`: 6 cap_dir channels × 49 cells (E, NE, NW, W, SW, SE), value at source cell
 
-Visit distributions in this flat format are marginalized at training time into per-head targets (`place` and `cap_dir`).
+For Place moves, MCTS visit probability is added to both the color/place cell and the remove-ring cell (marginal distributions). For PlaceOnly and Capture, one cell only. The Python training loop slices this into per-head targets and applies independent cross-entropy losses.
+
+A separate legacy flat `POLICY_SIZE = 4440` encoding (`color × 37² + place_at × 37 + remove` etc.) lives in `move_encoding::encode_move` and is **not** used for NN training — only for the dense move-to-index helper exposed by `get_legal_move_mask`.
