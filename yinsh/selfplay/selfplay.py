@@ -21,6 +21,7 @@ _cr = lambda v: f"{colorama.Fore.RED}{_BRIGHT}{v}{_RESET}"
 _cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
 
 from shared.lr_scheduler import LRScheduler
+from shared.selfplay_config import MctsConfig, OpeningRandomConfig, PlayoutCapConfig
 from shared.training_log import csv_comment
 
 from ..nn.model import (
@@ -119,31 +120,22 @@ class SelfPlayTrainer:
 
     def run(
         self,
+        mcts: MctsConfig,
+        playout_cap: PlayoutCapConfig = PlayoutCapConfig(),
+        opening: OpeningRandomConfig = OpeningRandomConfig(),
         num_generations: Optional[int] = None,
         games_per_gen: int = 16,
-        simulations: int = 200,
         epochs_per_gen: int = 1,
         batch_size: int = 256,
         replay_window: int = 8,
         checkpoint_every: int = 10,
-        playout_cap_p: float = 0.0,
-        fast_cap: int = 30,
-        play_batch_size: int = 8,
-        temperature: float = 1.0,
-        temp_threshold: int = 20,
-        c_puct: float = 1.5,
-        dir_alpha: float = 0.3,
-        dir_epsilon: float = 0.25,
         time_limit_minutes: Optional[float] = None,
         comment: str = "",
         augment_symmetry: bool = True,
         use_ort: bool = False,
         value_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
-        draw_contempt: float = 0.0,
-        random_opening_moves: int | tuple[int, int] = 0,
         show_timing: bool = False,
-        forced_playouts: bool = False,
     ):
         from engine_zero import YinshSelfPlaySession
 
@@ -157,29 +149,26 @@ class SelfPlayTrainer:
         dataset.augment_symmetry = augment_symmetry
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-        if isinstance(random_opening_moves, tuple):
-            opening_min, opening_max = random_opening_moves
-        else:
-            opening_min, opening_max = random_opening_moves, random_opening_moves
-
+        # Flat metadata stored in the checkpoint — keep keys stable for any
+        # downstream tooling that reads them.
         train_params = {
-            "simulations": simulations,
+            "simulations": mcts.simulations,
             "games_per_gen": games_per_gen,
             "epochs_per_gen": epochs_per_gen,
             "batch_size": batch_size,
             "replay_window": replay_window,
-            "playout_cap_p": playout_cap_p,
-            "fast_cap": fast_cap,
-            "temperature": temperature,
-            "temp_threshold": temp_threshold,
-            "c_puct": c_puct,
-            "dir_alpha": dir_alpha,
-            "dir_epsilon": dir_epsilon,
-            "play_batch_size": play_batch_size,
+            "playout_cap_p": playout_cap.p,
+            "fast_cap": playout_cap.fast_cap,
+            "temperature": mcts.temperature,
+            "temp_threshold": mcts.temp_threshold,
+            "c_puct": mcts.c_puct,
+            "dir_alpha": mcts.dir_alpha,
+            "dir_epsilon": mcts.dir_epsilon,
+            "play_batch_size": mcts.play_batch_size,
             "augment_symmetry": augment_symmetry,
-            "draw_contempt": draw_contempt,
-            "random_opening_moves": random_opening_moves,
-            "forced_playouts": forced_playouts,
+            "draw_contempt": mcts.draw_contempt,
+            "random_opening_moves": (opening.min, opening.max) if opening.max != opening.min else opening.min,
+            "forced_playouts": mcts.forced_playouts,
         }
 
         start_time = time.time()
@@ -205,13 +194,13 @@ class SelfPlayTrainer:
                         pg["lr"] = scheduled_lr
 
             cap_str = (
-                f", fast={fast_cap}, cap={int(playout_cap_p * 100)}%"
-                if playout_cap_p > 0
+                f", fast={playout_cap.fast_cap}, cap={int(playout_cap.p * 100)}%"
+                if playout_cap.p > 0
                 else ""
             )
             print(
                 f"\n=== {_cc(self.name)}  Gen {generation}  "
-                f"[sims={simulations}{cap_str}] ==="
+                f"[sims={mcts.simulations}{cap_str}] ==="
             )
 
             onnx_path = None
@@ -226,19 +215,9 @@ class SelfPlayTrainer:
 
             session = YinshSelfPlaySession(
                 num_games=games_per_gen,
-                simulations=simulations,
-                temperature=temperature,
-                temp_threshold=temp_threshold,
-                c_puct=c_puct,
-                dir_alpha=dir_alpha,
-                dir_epsilon=dir_epsilon,
-                playout_cap_p=playout_cap_p,
-                fast_cap=fast_cap,
-                play_batch_size=play_batch_size,
-                draw_contempt=draw_contempt,
-                random_opening_moves_min=opening_min,
-                random_opening_moves_max=opening_max,
-                forced_playouts=forced_playouts,
+                **mcts.session_kwargs(),
+                **playout_cap.session_kwargs(),
+                **opening.session_kwargs(),
             )
 
             # Empirical max with the joint ClaimRow encoding: previous max was 91
@@ -291,7 +270,7 @@ class SelfPlayTrainer:
                 f"moves {ss.valid_moves_mean:.1f}±{ss.valid_moves_std:.1f}"
             )
 
-            if playout_cap_p > 0:
+            if playout_cap.p > 0:
                 fs = result.full_search_turns
                 tt = result.total_turns
                 pct = 100 * fs / tt if tt > 0 else 0
@@ -377,7 +356,7 @@ class SelfPlayTrainer:
                 with open(self.log_path, "a") as f:
                     f.write(
                         f"{generation},{epoch + 1},"
-                        f"{simulations},{games_per_gen},{result.num_samples},{len(dataset)},"
+                        f"{mcts.simulations},{games_per_gen},{result.num_samples},{len(dataset)},"
                         f"{result.wins_p1},{result.wins_p2},{result.draws},{result.timeouts},"
                         f"{avg_gl},{med_gl},{min_gl},{max_gl},"
                         f"{losses['total_loss']:.6f},"

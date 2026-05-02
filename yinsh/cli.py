@@ -109,6 +109,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == "train":
+        from shared.selfplay_config import MctsConfig, OpeningRandomConfig, PlayoutCapConfig
         from yinsh.selfplay.selfplay import SelfPlayTrainer
 
         scheduler = None
@@ -122,32 +123,36 @@ def main():
             lr=args.lr,
             lr_scheduler=scheduler,
         )
+        mcts = MctsConfig(
+            simulations=args.simulations,
+            c_puct=args.c_puct,
+            dir_alpha=args.dir_alpha,
+            dir_epsilon=args.dir_epsilon,
+            forced_playouts=args.forced_playouts,
+            draw_contempt=args.draw_contempt,
+            play_batch_size=args.play_batch_size,
+            temperature=args.temperature,
+            temp_threshold=args.temp_threshold,
+        )
+        playout_cap = PlayoutCapConfig(p=args.playout_cap_p, fast_cap=args.fast_cap)
+        opening = OpeningRandomConfig.from_cli_arg(args.random_opening_moves)
         trainer.run(
+            mcts=mcts,
+            playout_cap=playout_cap,
+            opening=opening,
             num_generations=args.generations,
             games_per_gen=args.games,
-            simulations=args.simulations,
             epochs_per_gen=args.epochs_per_gen,
             batch_size=args.training_batch_size,
             replay_window=args.replay_window,
             checkpoint_every=args.checkpoint_every,
-            playout_cap_p=args.playout_cap_p,
-            fast_cap=args.fast_cap,
-            temperature=args.temperature,
-            temp_threshold=args.temp_threshold,
-            c_puct=args.c_puct,
-            dir_alpha=args.dir_alpha,
-            dir_epsilon=args.dir_epsilon,
-            play_batch_size=args.play_batch_size,
             time_limit_minutes=args.time_limit,
             comment=args.comment,
             augment_symmetry=args.augment_symmetry,
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
             buf_dir=args.buf_dir,
-            draw_contempt=args.draw_contempt,
-            random_opening_moves=args.random_opening_moves,
             show_timing=args.show_timing,
-            forced_playouts=args.forced_playouts,
         )
     elif args.command == "battle":
         from yinsh.selfplay.battle import run_battle
