@@ -143,6 +143,7 @@ class SelfPlayTrainer:
         draw_contempt: float = 0.0,
         random_opening_moves: int | tuple[int, int] = 0,
         show_timing: bool = False,
+        forced_playouts: bool = False,
     ):
         from engine_zero import YinshSelfPlaySession
 
@@ -178,6 +179,7 @@ class SelfPlayTrainer:
             "augment_symmetry": augment_symmetry,
             "draw_contempt": draw_contempt,
             "random_opening_moves": random_opening_moves,
+            "forced_playouts": forced_playouts,
         }
 
         start_time = time.time()
@@ -236,6 +238,7 @@ class SelfPlayTrainer:
                 draw_contempt=draw_contempt,
                 random_opening_moves_min=opening_min,
                 random_opening_moves_max=opening_max,
+                forced_playouts=forced_playouts,
             )
 
             # Empirical max with the joint ClaimRow encoding: previous max was 91

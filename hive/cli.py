@@ -135,7 +135,9 @@ def main():
     train_parser.add_argument(
         "--forced-playouts",
         action="store_true",
-        help="Use forced playouts Katago style (default: False)",
+        help="KataGo-style forced playouts at the root: every legal move gets a "
+             "visit floor proportional to sqrt(P*N), and forced visits are pruned "
+             "from the policy training target. Pairs well with low c_puct (default: off)",
     )
     train_parser.add_argument(
         "--checkpoint-every",

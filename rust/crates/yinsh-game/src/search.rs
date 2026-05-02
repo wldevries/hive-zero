@@ -45,11 +45,21 @@ fn phase_code(p: Phase) -> u8 {
 }
 
 #[inline]
-fn make_search(simulations: usize, c_puct: f32, draw_contempt: f32) -> MctsSearch<YinshBoard> {
+fn make_search(
+    simulations: usize,
+    c_puct: f32,
+    draw_contempt: f32,
+    forced_playouts: bool,
+) -> MctsSearch<YinshBoard> {
     let mut s = MctsSearch::<YinshBoard>::new(simulations + 64);
+    let forced = if forced_playouts {
+        ForcedExploration::Soft { selection_k: 0.5, pruning_k: 2.0 }
+    } else {
+        ForcedExploration::None
+    };
     s.params = SearchParams::new(
         CpuctStrategy::Constant { c_puct },
-        ForcedExploration::None,
+        forced,
         RootNoise::None,
     );
     s.params.draw_contempt = draw_contempt;
@@ -105,7 +115,7 @@ pub fn best_move_core(
         return Err("Game is already over".to_string());
     }
 
-    let mut search = make_search(simulations, c_puct, 0.0);
+    let mut search = make_search(simulations, c_puct, 0.0, false);
 
     // Initial root eval.
     let mut root_board = vec![0f32; BOARD_FLAT];
@@ -173,7 +183,7 @@ pub fn play_battle_core(
             let use_fn1 = pick_eval(gi, boards[gi].next_player());
             let eval_ref: &EvalFn = if use_fn1 { &eval_fn1 } else { &eval_fn2 };
 
-            let mut search = make_search(simulations, c_puct, 0.0);
+            let mut search = make_search(simulations, c_puct, 0.0, false);
 
             let mut root_board = vec![0f32; BOARD_FLAT];
             let mut root_reserve = vec![0f32; RESERVE_SIZE];
@@ -438,6 +448,7 @@ pub fn play_selfplay_core(
     draw_contempt: f32,
     random_opening_moves_min: u32,
     random_opening_moves_max: u32,
+    forced_playouts: bool,
     eval_fn: EvalFn,
     progress_fn: Option<ProgressFn>,
 ) -> Result<SelfPlayResult, String> {
@@ -445,7 +456,7 @@ pub fn play_selfplay_core(
 
     let mut boards: Vec<YinshBoard> = (0..num_games).map(|_| YinshBoard::new()).collect();
     let mut searches: Vec<MctsSearch<YinshBoard>> =
-        (0..num_games).map(|_| make_search(simulations, c_puct, draw_contempt)).collect();
+        (0..num_games).map(|_| make_search(simulations, c_puct, draw_contempt, forced_playouts)).collect();
     let mut active = vec![true; num_games];
     let mut move_counts = vec![0u32; num_games];
     let mut histories: Vec<Vec<TurnRecord>> = (0..num_games).map(|_| Vec::new()).collect();

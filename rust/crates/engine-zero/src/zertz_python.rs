@@ -204,6 +204,7 @@ pub struct PyZertzSelfPlaySession {
     play_batch_size: usize,
     playout_cap_p: f32,
     fast_cap: usize,
+    forced_playouts: bool,
 }
 
 #[pymethods]
@@ -220,6 +221,7 @@ impl PyZertzSelfPlaySession {
         play_batch_size = 2,
         playout_cap_p = 0.0,
         fast_cap = 20,
+        forced_playouts = false,
     ))]
     fn new(
         num_games: usize,
@@ -232,10 +234,12 @@ impl PyZertzSelfPlaySession {
         play_batch_size: usize,
         playout_cap_p: f32,
         fast_cap: usize,
+        forced_playouts: bool,
     ) -> Self {
         PyZertzSelfPlaySession {
             num_games, simulations, temperature, temp_threshold,
             c_puct, dir_alpha, dir_epsilon, play_batch_size, playout_cap_p, fast_cap,
+            forced_playouts,
         }
     }
 
@@ -292,6 +296,7 @@ impl PyZertzSelfPlaySession {
             self.play_batch_size,
             self.playout_cap_p,
             self.fast_cap,
+            self.forced_playouts,
             eval_core,
             progress_core,
         ).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;

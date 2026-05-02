@@ -250,6 +250,7 @@ pub struct PyYinshSelfPlaySession {
     draw_contempt: f32,
     random_opening_moves_min: u32,
     random_opening_moves_max: u32,
+    forced_playouts: bool,
 }
 
 #[pymethods]
@@ -269,6 +270,7 @@ impl PyYinshSelfPlaySession {
         draw_contempt = 0.0,
         random_opening_moves_min = 0,
         random_opening_moves_max = 0,
+        forced_playouts = false,
     ))]
     fn new(
         num_games: usize,
@@ -284,6 +286,7 @@ impl PyYinshSelfPlaySession {
         draw_contempt: f32,
         random_opening_moves_min: u32,
         random_opening_moves_max: u32,
+        forced_playouts: bool,
     ) -> Self {
         Self {
             num_games,
@@ -299,6 +302,7 @@ impl PyYinshSelfPlaySession {
             draw_contempt,
             random_opening_moves_min,
             random_opening_moves_max,
+            forced_playouts,
         }
     }
 
@@ -364,6 +368,7 @@ impl PyYinshSelfPlaySession {
             self.draw_contempt,
             self.random_opening_moves_min,
             self.random_opening_moves_max,
+            self.forced_playouts,
             core_eval,
             progress_core,
         )

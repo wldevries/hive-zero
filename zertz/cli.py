@@ -84,6 +84,10 @@ def main():
                               help="Scale factor for value loss in combined loss (default: 1.0)")
     train_parser.add_argument("--buf-dir", type=str, default=None,
                               help="Override replay buffer directory (default: models/{name}/)")
+    train_parser.add_argument("--forced-playouts", action="store_true",
+                              help="KataGo-style forced playouts at the root: every legal move "
+                                   "gets a visit floor proportional to sqrt(P*N). Pairs well with "
+                                   "low c_puct (default: off)")
 
     # Play mode
     play_parser = subparsers.add_parser("play", help="Play against the AI")
@@ -147,6 +151,7 @@ def main():
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
             buf_dir=args.buf_dir,
+            forced_playouts=args.forced_playouts,
         )
     elif args.command == "battle":
         from zertz.selfplay.battle import run_battle

@@ -7,7 +7,7 @@ use crate::zertz::{ZertzBoard, ZertzMove, classify_win, WinType};
 use crate::move_encoding::{encode_distribution_nn, NN_POLICY_SIZE};
 use core_game::game::{Game, Outcome, Player};
 use core_game::mcts::arena::NodeId;
-use core_game::mcts::search::{MctsSearch, CpuctStrategy};
+use core_game::mcts::search::{MctsSearch, CpuctStrategy, ForcedExploration};
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 
@@ -311,6 +311,7 @@ pub fn play_selfplay_core(
     play_batch_size: usize,
     playout_cap_p: f32,
     fast_cap: usize,
+    forced_playouts: bool,
     eval_fn: EvalFn,
     progress_fn: Option<ProgressFn>,
 ) -> Result<SelfPlayResult, String> {
@@ -322,6 +323,9 @@ pub fn play_selfplay_core(
         let mut s = MctsSearch::new(arena_capacity);
         s.params.cpuct_strategy = CpuctStrategy::Constant { c_puct };
         s.params.max_children = simulations;
+        if forced_playouts {
+            s.params.forced_exploration = ForcedExploration::Soft { selection_k: 0.5, pruning_k: 2.0 };
+        }
         s
     }).collect();
     let mut move_counts: Vec<u32> = vec![0; num_games];

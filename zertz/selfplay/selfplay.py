@@ -132,6 +132,7 @@ class SelfPlayTrainer:
         use_ort: bool = False,
         value_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
+        forced_playouts: bool = False,
     ):
         from engine_zero import ZertzSelfPlaySession
 
@@ -160,6 +161,7 @@ class SelfPlayTrainer:
             "dir_epsilon": dir_epsilon,
             "play_batch_size": play_batch_size,
             "augment_symmetry": augment_symmetry,
+            "forced_playouts": forced_playouts,
         }
 
         start_time = time.time()
@@ -217,6 +219,7 @@ class SelfPlayTrainer:
                 playout_cap_p=playout_cap_p,
                 fast_cap=fast_cap,
                 play_batch_size=play_batch_size,
+                forced_playouts=forced_playouts,
             )
 
             pbar = tqdm(total=65, unit="turn", desc="  Self-play", leave=False)

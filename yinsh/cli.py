@@ -76,6 +76,10 @@ def main():
     t.add_argument("--show-timing", action="store_true",
                    help="Print per-phase wall-clock breakdown (select / encode / "
                         "eval / expand) and ORT eval subphase times each gen.")
+    t.add_argument("--forced-playouts", action="store_true",
+                   help="Use KataGo-style forced playouts at the root: every legal "
+                        "move gets a visit floor proportional to sqrt(P*N). "
+                        "Pairs well with low c_puct (default: off)")
 
     def _opening_moves(s):
         if "-" in s:
@@ -143,6 +147,7 @@ def main():
             draw_contempt=args.draw_contempt,
             random_opening_moves=args.random_opening_moves,
             show_timing=args.show_timing,
+            forced_playouts=args.forced_playouts,
         )
     elif args.command == "battle":
         from yinsh.selfplay.battle import run_battle
