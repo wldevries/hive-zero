@@ -414,8 +414,7 @@ impl PyYinshGame {
         match self.board.phase {
             Phase::Setup => "setup",
             Phase::Normal => "normal",
-            Phase::RemoveRow => "remove_row",
-            Phase::RemoveRing => "remove_ring",
+            Phase::ClaimRow => "claim_row",
         }
     }
 
@@ -518,7 +517,7 @@ fn yinsh_d6_grid_permutations<'py>(py: Python<'py>) -> Vec<Bound<'py, PyArray1<i
 }
 
 /// 12 D6 row-direction permutation tables for Yinsh's 3 unsigned line directions
-/// (used by the `RemoveRow` policy channels 3..6).
+/// (used by the `ClaimRow` row-direction policy channels 1..=3).
 /// Returns a list of 12 numpy arrays of length 3, where `perm[new_dir] = old_dir`.
 #[pyfunction]
 fn yinsh_d6_dir_permutations<'py>(py: Python<'py>) -> Vec<Bound<'py, PyArray1<i64>>> {

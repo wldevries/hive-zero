@@ -3,7 +3,7 @@
 /// Grid: 11x11 embedding of the 85-cell board. Cell (col, row) maps to
 /// grid position `row * 11 + col`.
 ///
-/// Board channels (9 spatial), all current-player-relative:
+/// Board channels (8 spatial), all current-player-relative:
 ///   0: my rings
 ///   1: opponent rings
 ///   2: my markers
@@ -11,8 +11,7 @@
 ///   4: valid cell mask
 ///   5: phase flag — Setup (broadcast on valid cells)
 ///   6: phase flag — Normal
-///   7: phase flag — RemoveRow (row of 5 markers pending selection)
-///   8: phase flag — RemoveRing
+///   7: phase flag — ClaimRow (joint row+ring removal pending)
 ///
 /// Reserve vector (6 floats):
 ///   [0]: markers_in_pool / 51
@@ -27,7 +26,7 @@ use core_game::game::Player;
 use crate::board::{Cell, Phase, YinshBoard, INITIAL_MARKERS, RINGS_PER_PLAYER, WIN_SCORE};
 use crate::hex::{ALL_CELLS, BOARD_SIZE, GRID_SIZE};
 
-pub const NUM_CHANNELS: usize = 9;
+pub const NUM_CHANNELS: usize = 8;
 pub const RESERVE_SIZE: usize = 6;
 
 #[inline]
@@ -67,8 +66,7 @@ pub fn encode_board(board: &YinshBoard, board_out: &mut [f32], reserve_out: &mut
     let phase_ch = match board.phase {
         Phase::Setup => 5,
         Phase::Normal => 6,
-        Phase::RemoveRow => 7,
-        Phase::RemoveRing => 8,
+        Phase::ClaimRow => 7,
     };
     for i in 0..BOARD_SIZE {
         let g = cell_to_grid(i);

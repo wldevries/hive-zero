@@ -55,29 +55,34 @@ fn coord_to_idx(c: Coord) -> Result<usize, ReplayError> {
     Ok(cell_index(c.col, c.row))
 }
 
-fn turn_to_move(turn: &Turn) -> Result<YinshMove, ReplayError> {
-    Ok(match turn {
+/// SGF emits RemoveRow and RemoveRing as separate Done-bracketed turns
+/// (they followed each other in the game), but the engine now expects a single
+/// `ClaimRow` move. We resolve the row's `(start, dir)` here; the ring index is
+/// supplied by the immediately-following `Turn::RemoveRing`.
+fn row_to_start_dir(from: Coord, to: Coord) -> Result<(usize, usize), ReplayError> {
+    let dc = (to.col as i8 - from.col as i8).signum();
+    let dr = (to.row as i8 - from.row as i8).signum();
+    if let Some(dir) = ROW_DIRS.iter().position(|&d| d == (dc, dr)) {
+        Ok((coord_to_idx(from)?, dir))
+    } else if let Some(dir) = ROW_DIRS.iter().position(|&d| d == (-dc, -dr)) {
+        Ok((coord_to_idx(to)?, dir))
+    } else {
+        Err(ReplayError::BadRowDirection { from, to })
+    }
+}
+
+/// Convert a single SGF turn into a YinshMove. RemoveRow needs a peek at the
+/// next turn (the paired RemoveRing) — callers iterate via the index-aware
+/// loop below, so this helper only handles non-row-removal turns.
+fn simple_turn_to_move(turn: &Turn) -> Result<Option<YinshMove>, ReplayError> {
+    Ok(Some(match turn {
         Turn::PlaceRing { at, .. } => YinshMove::PlaceRing(coord_to_idx(*at)?),
         Turn::MoveRing { from, to, .. } => YinshMove::MoveRing {
             from: coord_to_idx(*from)?,
             to: coord_to_idx(*to)?,
         },
-        Turn::RemoveRow { from, to, .. } => {
-            // SGF gives the two endpoints in either order. Engine stores rows as
-            // (start, positive_row_dir_index), so swap endpoints when the SGF
-            // orientation runs backwards along the axis.
-            let dc = (to.col as i8 - from.col as i8).signum();
-            let dr = (to.row as i8 - from.row as i8).signum();
-            if let Some(dir) = ROW_DIRS.iter().position(|&d| d == (dc, dr)) {
-                YinshMove::RemoveRow { start: coord_to_idx(*from)?, dir }
-            } else if let Some(dir) = ROW_DIRS.iter().position(|&d| d == (-dc, -dr)) {
-                YinshMove::RemoveRow { start: coord_to_idx(*to)?, dir }
-            } else {
-                return Err(ReplayError::BadRowDirection { from: *from, to: *to });
-            }
-        }
-        Turn::RemoveRing { at, .. } => YinshMove::RemoveRing(coord_to_idx(*at)?),
-    })
+        Turn::RemoveRow { .. } | Turn::RemoveRing { .. } => return Ok(None),
+    }))
 }
 
 pub fn replay_game(record: &GameRecord) -> ReplayResult {
@@ -100,20 +105,70 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
 
     let mut board = YinshBoard::default();
     let total = record.turns.len();
-    for (i, (player, turn)) in record.turns.iter().enumerate() {
+    let mut i = 0;
+    while i < total {
+        let (player, turn) = &record.turns[i];
         if verbose {
             println!("--- Turn {i} (P{player}): {turn:?}");
         }
-        let mv = match turn_to_move(turn) {
-            Ok(m) => m,
-            Err(e) => {
+        // Pair RemoveRow with the next RemoveRing in the SGF stream; the engine
+        // applies them as a single ClaimRow move.
+        let (mv, consumed) = match turn {
+            Turn::RemoveRow { from, to, .. } => {
+                let (start, dir) = match row_to_start_dir(*from, *to) {
+                    Ok(sd) => sd,
+                    Err(e) => {
+                        return ReplayResult {
+                            turns_played: i, total_turns: total,
+                            final_board: board, error: Some(e),
+                        };
+                    }
+                };
+                let next = record.turns.get(i + 1).map(|(_, t)| t);
+                let ring = match next {
+                    Some(Turn::RemoveRing { at, .. }) => match coord_to_idx(*at) {
+                        Ok(idx) => idx,
+                        Err(e) => {
+                            return ReplayResult {
+                                turns_played: i, total_turns: total,
+                                final_board: board, error: Some(e),
+                            };
+                        }
+                    },
+                    _ => {
+                        return ReplayResult {
+                            turns_played: i, total_turns: total,
+                            final_board: board,
+                            error: Some(ReplayError::EngineError {
+                                turn: i,
+                                msg: "RemoveRow not followed by RemoveRing".to_string(),
+                            }),
+                        };
+                    }
+                };
+                (YinshMove::ClaimRow { start, dir, ring }, 2)
+            }
+            Turn::RemoveRing { .. } => {
+                // Should already be consumed by the preceding RemoveRow.
                 return ReplayResult {
-                    turns_played: i,
-                    total_turns: total,
+                    turns_played: i, total_turns: total,
                     final_board: board,
-                    error: Some(e),
+                    error: Some(ReplayError::EngineError {
+                        turn: i,
+                        msg: "stray RemoveRing without preceding RemoveRow".to_string(),
+                    }),
                 };
             }
+            _ => match simple_turn_to_move(turn) {
+                Ok(Some(m)) => (m, 1),
+                Ok(None) => unreachable!(),
+                Err(e) => {
+                    return ReplayResult {
+                        turns_played: i, total_turns: total,
+                        final_board: board, error: Some(e),
+                    };
+                }
+            },
         };
         if let Err(msg) = board.apply_move(mv) {
             return ReplayResult {
@@ -123,6 +178,7 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
                 error: Some(ReplayError::EngineError { turn: i, msg }),
             };
         }
+        i += consumed;
     }
 
     ReplayResult {
@@ -267,8 +323,7 @@ struct GameMoveData {
     final_board: YinshBoard,
     error: Option<ReplayError>,
     normal_valid: Vec<u32>,
-    remove_row_valid: Vec<u32>,
-    remove_ring_valid: Vec<u32>,
+    claim_row_valid: Vec<u32>,
 }
 
 fn replay_collecting_stats(record: &GameRecord) -> GameMoveData {
@@ -278,48 +333,85 @@ fn replay_collecting_stats(record: &GameRecord) -> GameMoveData {
             final_board: YinshBoard::default(),
             error: Some(ReplayError::UnsupportedStartColor),
             normal_valid: vec![],
-            remove_row_valid: vec![],
-            remove_ring_valid: vec![],
+            claim_row_valid: vec![],
         };
     }
 
     let mut board = YinshBoard::default();
     let mut normal_valid = Vec::new();
-    let mut remove_row_valid = Vec::new();
-    let mut remove_ring_valid = Vec::new();
+    let mut claim_row_valid = Vec::new();
     let total = record.turns.len();
 
-    for (i, (_, turn)) in record.turns.iter().enumerate() {
+    let mut i = 0;
+    while i < total {
+        let (_, turn) = &record.turns[i];
         let phase = board.phase;
         let count = board.legal_moves().len() as u32;
         match phase {
             Phase::Setup => {}
             Phase::Normal => normal_valid.push(count),
-            Phase::RemoveRow => remove_row_valid.push(count),
-            Phase::RemoveRing => remove_ring_valid.push(count),
+            Phase::ClaimRow => claim_row_valid.push(count),
         }
 
-        let mv = match turn_to_move(turn) {
-            Ok(m) => m,
-            Err(e) => return GameMoveData {
-                turns_total: total,
-                final_board: board,
-                error: Some(e),
-                normal_valid,
-                remove_row_valid,
-                remove_ring_valid,
+        let (mv, consumed) = match turn {
+            Turn::RemoveRow { from, to, .. } => {
+                let (start, dir) = match row_to_start_dir(*from, *to) {
+                    Ok(sd) => sd,
+                    Err(e) => return GameMoveData {
+                        turns_total: total, final_board: board, error: Some(e),
+                        normal_valid, claim_row_valid,
+                    },
+                };
+                let next = record.turns.get(i + 1).map(|(_, t)| t);
+                let ring = match next {
+                    Some(Turn::RemoveRing { at, .. }) => match coord_to_idx(*at) {
+                        Ok(idx) => idx,
+                        Err(e) => return GameMoveData {
+                            turns_total: total, final_board: board, error: Some(e),
+                            normal_valid, claim_row_valid,
+                        },
+                    },
+                    _ => return GameMoveData {
+                        turns_total: total, final_board: board,
+                        error: Some(ReplayError::EngineError {
+                            turn: i,
+                            msg: "RemoveRow not followed by RemoveRing".to_string(),
+                        }),
+                        normal_valid, claim_row_valid,
+                    },
+                };
+                (YinshMove::ClaimRow { start, dir, ring }, 2)
+            }
+            Turn::RemoveRing { .. } => {
+                return GameMoveData {
+                    turns_total: total, final_board: board,
+                    error: Some(ReplayError::EngineError {
+                        turn: i,
+                        msg: "stray RemoveRing without preceding RemoveRow".to_string(),
+                    }),
+                    normal_valid, claim_row_valid,
+                };
+            }
+            _ => match simple_turn_to_move(turn) {
+                Ok(Some(m)) => (m, 1),
+                Ok(None) => unreachable!(),
+                Err(e) => return GameMoveData {
+                    turns_total: total, final_board: board, error: Some(e),
+                    normal_valid, claim_row_valid,
+                },
             },
         };
+
         if let Err(msg) = board.apply_move(mv) {
             return GameMoveData {
                 turns_total: total,
                 final_board: board,
                 error: Some(ReplayError::EngineError { turn: i, msg }),
                 normal_valid,
-                remove_row_valid,
-                remove_ring_valid,
+                claim_row_valid,
             };
         }
+        i += consumed;
     }
 
     GameMoveData {
@@ -327,8 +419,7 @@ fn replay_collecting_stats(record: &GameRecord) -> GameMoveData {
         final_board: board,
         error: None,
         normal_valid,
-        remove_row_valid,
-        remove_ring_valid,
+        claim_row_valid,
     }
 }
 
@@ -360,8 +451,7 @@ pub fn run_stats(games_path: &str) {
     let mut game_lengths: Vec<u32> = Vec::new();
     let mut normal_turn_counts: Vec<u32> = Vec::new();
     let mut normal_valid_moves: Vec<u32> = Vec::new();
-    let mut remove_row_valid_moves: Vec<u32> = Vec::new();
-    let mut remove_ring_valid_moves: Vec<u32> = Vec::new();
+    let mut claim_row_valid_moves: Vec<u32> = Vec::new();
     let mut markers_used: Vec<u32> = Vec::new();
     let mut rings_removed: Vec<u32> = Vec::new();
     let mut first_ring_pos: HashMap<String, u64> = HashMap::new();
@@ -409,8 +499,7 @@ pub fn run_stats(games_path: &str) {
             game_lengths.push(gs.turns_total as u32);
             normal_turn_counts.push(gs.normal_valid.len() as u32);
             normal_valid_moves.extend_from_slice(&gs.normal_valid);
-            remove_row_valid_moves.extend_from_slice(&gs.remove_row_valid);
-            remove_ring_valid_moves.extend_from_slice(&gs.remove_ring_valid);
+            claim_row_valid_moves.extend_from_slice(&gs.claim_row_valid);
             markers_used.push((INITIAL_MARKERS - board.markers_in_pool) as u32);
             rings_removed.push((board.white_score + board.black_score) as u32);
 
@@ -480,28 +569,15 @@ pub fn run_stats(games_path: &str) {
     print_dist("Normal-Phase Turns per Game (ring moves only)", &mut normal_turn_counts);
     print_dist("Valid Moves per Turn — Normal Phase", &mut normal_valid_moves);
 
-    if !remove_row_valid_moves.is_empty() {
-        let n = remove_row_valid_moves.len();
+    if !claim_row_valid_moves.is_empty() {
+        let n = claim_row_valid_moves.len();
         let mut counts: HashMap<u32, u64> = HashMap::new();
-        for &v in &remove_row_valid_moves { *counts.entry(v).or_default() += 1; }
-        println!("--- Valid Moves per Turn — RemoveRow Phase (n={n}) ---");
+        for &v in &claim_row_valid_moves { *counts.entry(v).or_default() += 1; }
+        println!("--- Valid Moves per Turn — ClaimRow Phase (n={n}) ---");
         let mut kv: Vec<_> = counts.iter().collect();
         kv.sort_by_key(|(k, _)| *k);
         for (choices, freq) in &kv {
-            println!("  {:2} choice(s): {:6}  ({:.1}%)", choices, freq, pct(**freq, n as u64));
-        }
-        println!();
-    }
-
-    if !remove_ring_valid_moves.is_empty() {
-        let n = remove_ring_valid_moves.len();
-        let mut counts: HashMap<u32, u64> = HashMap::new();
-        for &v in &remove_ring_valid_moves { *counts.entry(v).or_default() += 1; }
-        println!("--- Valid Moves per Turn — RemoveRing Phase (n={n}) ---");
-        let mut kv: Vec<_> = counts.iter().collect();
-        kv.sort_by_key(|(k, _)| *k);
-        for (choices, freq) in &kv {
-            println!("  {:2} ring(s) to choose from: {:6}  ({:.1}%)", choices, freq, pct(**freq, n as u64));
+            println!("  {:2} (row,ring) choice(s): {:6}  ({:.1}%)", choices, freq, pct(**freq, n as u64));
         }
         println!();
     }

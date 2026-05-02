@@ -27,16 +27,19 @@ pub enum Cell {
 pub enum Phase {
     Setup,
     Normal,
-    RemoveRow,
-    RemoveRing,
+    /// A 5-marker row is pending: the player picks both which row to claim and
+    /// which of their rings to remove in a single joint decision.
+    ClaimRow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum YinshMove {
     PlaceRing(usize),
     MoveRing { from: usize, to: usize },
-    RemoveRow { start: usize, dir: usize },
-    RemoveRing(usize),
+    /// Joint row claim: remove the 5 markers in `(start, dir)` and remove the
+    /// ring at `ring`. Always paired — Yinsh requires one ring to come off per
+    /// completed row.
+    ClaimRow { start: usize, dir: usize, ring: usize },
     Pass,
 }
 
@@ -186,20 +189,25 @@ impl YinshBoard {
                 }
                 moves
             }
-            Phase::RemoveRow => {
-                let me = self.next_player;
-                self.pending_rows.iter().cloned()
-                    .filter(|&(s, d)| self.row_still_valid(s, d, me))
-                    .map(|(start, dir)| YinshMove::RemoveRow { start, dir })
-                    .collect()
-            }
-            Phase::RemoveRing => {
+            Phase::ClaimRow => {
                 let me = self.next_player;
                 let my_ring = self.my_ring(me);
-                let mut moves = Vec::new();
+                let valid_rows: Vec<(usize, usize)> = self
+                    .pending_rows
+                    .iter()
+                    .cloned()
+                    .filter(|&(s, d)| self.row_still_valid(s, d, me))
+                    .collect();
+                let mut my_rings: Vec<usize> = Vec::new();
                 for i in 0..BOARD_SIZE {
                     if self.cells[i] == my_ring {
-                        moves.push(YinshMove::RemoveRing(i));
+                        my_rings.push(i);
+                    }
+                }
+                let mut moves = Vec::with_capacity(valid_rows.len() * my_rings.len());
+                for &(start, dir) in &valid_rows {
+                    for &ring in &my_rings {
+                        moves.push(YinshMove::ClaimRow { start, dir, ring });
                     }
                 }
                 moves
@@ -214,8 +222,9 @@ impl YinshBoard {
         match (self.phase, mv) {
             (Phase::Setup, YinshMove::PlaceRing(idx)) => self.apply_place_ring(idx),
             (Phase::Normal, YinshMove::MoveRing { from, to }) => self.apply_move_ring(from, to),
-            (Phase::RemoveRow, YinshMove::RemoveRow { start, dir }) => self.apply_remove_row(start, dir),
-            (Phase::RemoveRing, YinshMove::RemoveRing(idx)) => self.apply_remove_ring(idx),
+            (Phase::ClaimRow, YinshMove::ClaimRow { start, dir, ring }) => {
+                self.apply_claim_row(start, dir, ring)
+            }
             (_, YinshMove::Pass) => {
                 self.next_player = self.next_player.opposite();
                 Ok(())
@@ -280,14 +289,14 @@ impl YinshBoard {
 
         if !cur_rows.is_empty() {
             self.original_mover = Some(me);
-            self.phase = Phase::RemoveRow;
+            self.phase = Phase::ClaimRow;
             self.pending_rows = cur_rows;
             self.deferred_rows = opp_rows.clone();
             self.deferred_player = if opp_rows.is_empty() { None } else { Some(opp) };
-            // next_player stays as me (cur player removes their own rows first)
+            // next_player stays as me (cur player claims their own rows first)
         } else if !opp_rows.is_empty() {
             self.original_mover = Some(me);
-            self.phase = Phase::RemoveRow;
+            self.phase = Phase::ClaimRow;
             self.pending_rows = opp_rows;
             self.deferred_rows = Vec::new();
             self.deferred_player = None;
@@ -303,20 +312,26 @@ impl YinshBoard {
         Ok(())
     }
 
-    fn apply_remove_row(&mut self, start: usize, dir: usize) -> Result<(), String> {
+    /// Apply a joint row claim: remove the 5 markers in `(start, dir)` and the
+    /// ring at `ring` in a single MCTS step. Yinsh rule G.3 pairs every row
+    /// claim with one ring removal, so we encode them as one move.
+    fn apply_claim_row(&mut self, start: usize, dir: usize, ring: usize) -> Result<(), String> {
         let me = self.next_player;
         if !self.row_still_valid(start, dir, me) {
             return Err("row no longer valid".into());
         }
+        if !self.is_my_ring(ring, me) {
+            return Err("not your ring".into());
+        }
 
-        // Remove the 5 markers
+        // Remove the 5 markers.
         let (sc, sr) = index_to_cell(start);
         let (dc, dr) = ROW_DIRS[dir];
         for k in 0i8..5 {
             let nc = sc as i8 + dc * k;
             let nr = sr as i8 + dr * k;
-            let idx = cell_index_i8(nc, nr);
-            self.cells[idx] = Cell::Empty;
+            let mc = cell_index_i8(nc, nr);
+            self.cells[mc] = Cell::Empty;
         }
         self.markers_in_pool += 5;
 
@@ -336,47 +351,37 @@ impl YinshBoard {
             })
         });
 
-        // Each row claim is paired with a ring removal (yinsh rule G.3).
-        self.phase = Phase::RemoveRing;
-        Ok(())
-    }
-
-    fn apply_remove_ring(&mut self, idx: usize) -> Result<(), String> {
-        let me = self.next_player;
-        if !self.is_my_ring(idx, me) {
-            return Err("not your ring".into());
-        }
-        self.cells[idx] = Cell::Empty;
+        // Remove the ring.
+        self.cells[ring] = Cell::Empty;
         match me {
             Player::Player1 => self.white_score += 1,
             Player::Player2 => self.black_score += 1,
         }
 
-        // Check win before transitioning
+        // Check win before transitioning. Per yinsh rule H.1, the game ends the
+        // instant a 3rd ring comes off, even if pending rows remain unclaimed.
         let score = match me {
             Player::Player1 => self.white_score,
             Player::Player2 => self.black_score,
         };
         if score >= WIN_SCORE {
-            // Per yinsh rule H.1, the game ends the instant a 3rd ring comes off,
-            // even if pending rows remain unclaimed.
             self.outcome = Outcome::WonBy(me);
             return Ok(());
         }
 
         if !self.pending_rows.is_empty() {
-            // More rows still pending for this player — claim the next one.
-            self.phase = Phase::RemoveRow;
+            // More rows still pending for this player — stay in ClaimRow phase.
+            self.phase = Phase::ClaimRow;
         } else if !self.deferred_rows.is_empty() {
             // Current player done; opponent now claims their own (deferred) rows.
             let opp = self.deferred_player.expect("deferred_rows without deferred_player");
             self.pending_rows = std::mem::take(&mut self.deferred_rows);
             self.deferred_player = None;
-            self.phase = Phase::RemoveRow;
+            self.phase = Phase::ClaimRow;
             self.next_player = opp;
         } else {
-            // All removals done: back to Normal, opponent of original mover's turn.
-            let mover = self.original_mover.expect("no original_mover during removal");
+            // All claims done: back to Normal, opponent of original mover's turn.
+            let mover = self.original_mover.expect("no original_mover during claim");
             self.phase = Phase::Normal;
             self.next_player = mover.opposite();
             self.original_mover = None;

@@ -38,8 +38,7 @@ fn phase_code(p: Phase) -> u8 {
     match p {
         Phase::Setup => 0,
         Phase::Normal => 1,
-        Phase::RemoveRow => 2,
-        Phase::RemoveRing => 3,
+        Phase::ClaimRow => 2,
     }
 }
 

@@ -2,12 +2,13 @@
 
 Policy layout (59 channels × 11×11 grid):
   ch 0:    PlaceRing destination
-  ch 1-3:  RemoveRow start, dir 0/1/2
-  ch 4:    RemoveRing target
+  ch 1-3:  ClaimRow row start, dir 0/1/2     (joint partner A)
+  ch 4:    ClaimRow ring target              (joint partner B)
   ch 5-58: MoveRing — channel = 5 + dir_idx*9 + (dist-1), value at source cell
 
-All moves use `PolicyIndex::Single`; Rust MCTS reads the logit at the source cell
-in the appropriate channel. No summing or bilinear arithmetic needed.
+ClaimRow uses `PolicyIndex::Sum(row_idx, ring_idx)` — a joint prior summing the
+row-channel logit and the ring-channel logit. PlaceRing and MoveRing use
+`PolicyIndex::Single`.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from shared.nn.gpba import GlobalPoolBias
 from shared.nn.resblock import ResBlock
 
 # Mirror Rust constants — must match yinsh_game::board_encoding / move_encoding.
-NUM_CHANNELS = 9
+NUM_CHANNELS = 8
 GRID_SIZE = 11
 RESERVE_SIZE = 6
 POLICY_CHANNELS = 59  # 5 single-move channels + 6 dirs × 9 distances

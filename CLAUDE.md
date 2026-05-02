@@ -115,15 +115,16 @@ making the game finite by construction. When win rates converge to ~50/50, value
 balanced outcomes are harder to predict — fix is higher simulation count.
 
 ### Yinsh architecture
-- **Board encoding**: 9 channels on 11×11 grid (85-cell YINSH board). Channels 0-1: my/opp rings. Channels 2-3: my/opp markers. Channel 4: valid cell mask. Channels 5-8: phase flags (Setup, Normal, RemoveRow, RemoveRing) broadcast over valid cells. Reserve vector of 6 floats: markers_in_pool/51, my_score/3, opp_score/3, my_rings_on_board/5, opp_rings_on_board/5, rings_placed_total/10. All current-player-relative.
-- **Policy encoding**: 59 channels × 11×11 = POLICY_SIZE 7139. All moves use `PolicyIndex::Single`.
-  - Channel 0: PlaceRing destination (Setup phase)
-  - Channels 1-3: RemoveRow start × direction 0/1/2 (RemoveRow phase)
-  - Channel 4: RemoveRing target (RemoveRing phase)
-  - Channels 5-58: MoveRing — channel = 5 + dir_idx × 9 + (dist−1), value at source cell (Normal phase)
-- **Game phases**: Setup (place 5 rings each) → Normal (move rings, flipping markers) → RemoveRow (choose row of 5 to remove) → RemoveRing (remove one of your rings). Phase transitions are sequential same-player turns, handled by MCTS backprop same as Zertz mid-captures.
+- **Board encoding**: 8 channels on 11×11 grid (85-cell YINSH board). Channels 0-1: my/opp rings. Channels 2-3: my/opp markers. Channel 4: valid cell mask. Channels 5-7: phase flags (Setup, Normal, ClaimRow) broadcast over valid cells. Reserve vector of 6 floats: markers_in_pool/51, my_score/3, opp_score/3, my_rings_on_board/5, opp_rings_on_board/5, rings_placed_total/10. All current-player-relative.
+- **Policy encoding**: 59 channels × 11×11 = POLICY_SIZE 7139.
+  - Channel 0: PlaceRing destination (Setup phase) — `PolicyIndex::Single`
+  - Channels 1-3: ClaimRow row start × direction 0/1/2 (ClaimRow phase, joint partner A)
+  - Channel 4: ClaimRow ring target (ClaimRow phase, joint partner B)
+  - Channels 5-58: MoveRing — channel = 5 + dir_idx × 9 + (dist−1), value at source cell (Normal phase) — `PolicyIndex::Single`
+  - `ClaimRow` uses `PolicyIndex::Sum(row_offset, ring_offset)` — joint prior = row-channel logit at the row's start cell + ring-channel logit at the chosen ring cell.
+- **Game phases**: Setup (place 5 rings each) → Normal (move rings, flipping markers) → ClaimRow (atomic 5-marker-removal + ring-removal, picked jointly per yinsh rule G.3). After a ring move, every pending row claim — including intersecting rows and the opponent's deferred rows — is its own ClaimRow MCTS decision; same-player consecutive turns within ClaimRow are handled by MCTS backprop the same way as Zertz mid-captures.
 - **Win condition**: first to remove 3 rings (complete 3 rows of 5 markers).
-- **Training data**: flat POLICY_SIZE visit distributions; single cross-entropy policy loss (no factorized heads).
+- **Training data**: flat POLICY_SIZE visit distributions; single cross-entropy policy loss (no factorized heads). For ClaimRow's `Sum(a, b)` prior, the visit probability is split 50/50 across the two factor cells when projecting to the per-cell training target — a marginal-CE approximation. The bias is uniform across all ClaimRow moves at a node (every claim has exactly two summed logits), so relative ranking is preserved.
 
 ## Package Manager
 Use `uv` for all dependency management. Do NOT use pip directly.

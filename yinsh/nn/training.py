@@ -1,10 +1,11 @@
-"""Training loop for YinshNet — single flat 59-channel policy head, MSE value.
+"""Training loop for YinshNet — single flat 59-channel policy head, WDL value.
 
 The dataset optionally augments samples with the subset of D6 hex symmetries
 that map every Yinsh valid cell to another valid cell (computed in Rust by
 `yinsh_valid_d6_indices`). Two channel groups need direction permutation:
-  - RemoveRow channels (1-3): 3 row directions, via `yinsh_d6_dir_permutations`
+  - ClaimRow row channels (1-3): 3 row directions, via `yinsh_d6_dir_permutations`
   - MoveRing channels (5-58): 6 movement directions, via `yinsh_d6_movement_dir_permutations`
+The ClaimRow ring channel (4) and PlaceRing channel (0) only need spatial gather.
 """
 
 from __future__ import annotations
@@ -33,9 +34,9 @@ _GS = GRID_SIZE * GRID_SIZE  # 121
 
 # Layout of the 59 policy channels (must match move_encoding.rs).
 _CH_PLACE_RING = 0
-_CH_REMOVE_ROW_BASE = 1   # channels 1, 2, 3
-_CH_REMOVE_RING = 4
-_CH_MOVE_BASE = 5          # channels 5..58: 6 dirs × 9 distances
+_CH_CLAIM_ROW_BASE = 1   # channels 1, 2, 3 — ClaimRow row partner (joint A)
+_CH_CLAIM_RING = 4       # channel 4 — ClaimRow ring partner (joint B)
+_CH_MOVE_BASE = 5        # channels 5..58: 6 dirs × 9 distances
 _MAX_RING_DIST = 9
 _NUM_DIRS = 6
 
@@ -82,12 +83,13 @@ def _apply_symmetry(
     policy: np.ndarray,
     sym: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Apply D6 transform `sym` to (board[9, 11, 11], policy[7139]).
+    """Apply D6 transform `sym` to (board[8, 11, 11], policy[7139]).
 
     Spatial channels are gathered using the grid permutation. Two channel groups
     need direction permutation:
-      - RemoveRow (ch 1-3): via row-direction table
+      - ClaimRow row (ch 1-3): via row-direction table
       - MoveRing  (ch 5-58): 6-direction blocks of 9 distances each
+    The ClaimRow ring channel (4) and PlaceRing channel (0) only need spatial gather.
     """
     if sym == 0:
         return board, policy
@@ -107,13 +109,13 @@ def _apply_symmetry(
     spatially_perm = pol_padded[:, grid_perm]  # (59, 121)
 
     new_policy = np.empty_like(spatially_perm)
-    # PlaceRing (ch 0) and RemoveRing (ch 4): spatial only.
+    # PlaceRing (ch 0) and ClaimRow ring (ch 4): spatial only.
     new_policy[_CH_PLACE_RING] = spatially_perm[_CH_PLACE_RING]
-    new_policy[_CH_REMOVE_RING] = spatially_perm[_CH_REMOVE_RING]
-    # RemoveRow (ch 1-3): permute direction channels via row-dir table.
+    new_policy[_CH_CLAIM_RING] = spatially_perm[_CH_CLAIM_RING]
+    # ClaimRow row (ch 1-3): permute direction channels via row-dir table.
     for d in range(3):
         old_d = int(dir_perm[d])
-        new_policy[_CH_REMOVE_ROW_BASE + d] = spatially_perm[_CH_REMOVE_ROW_BASE + old_d]
+        new_policy[_CH_CLAIM_ROW_BASE + d] = spatially_perm[_CH_CLAIM_ROW_BASE + old_d]
     # MoveRing (ch 5-58): permute the 6 direction-blocks of 9 distances.
     for new_d in range(_NUM_DIRS):
         old_d = int(move_dir_perm[new_d])

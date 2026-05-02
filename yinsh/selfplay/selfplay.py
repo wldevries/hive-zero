@@ -237,7 +237,11 @@ class SelfPlayTrainer:
                 random_opening_moves_max=opening_max,
             )
 
-            pbar = tqdm(total=91, unit="turn", desc="  Self-play", leave=False)
+            # Empirical max with the joint ClaimRow encoding: previous max was 91
+            # (with RemoveRow + RemoveRing as separate turns). At most 5 rings can
+            # come off in a game (winner 3, loser ≤2), and each claim now saves
+            # one MCTS decision, so max drops by 5 to 86.
+            pbar = tqdm(total=86, unit="turn", desc="  Self-play", leave=False)
             turn = [0]
 
             def progress_fn(finished, total, active, total_moves):

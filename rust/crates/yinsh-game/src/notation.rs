@@ -1,4 +1,7 @@
-/// YINSH move notation: "A2", "E5 G5", "RR E5 E6 E7 E8 E9", "RRing D3".
+/// YINSH move notation: "A2", "E5 G5", "Claim E5 E6 E7 E8 E9 D3".
+///
+/// `Claim` is a joint row+ring removal: 5 row cells (consecutive in one of the
+/// 3 axial directions) followed by the ring cell to take off.
 
 use crate::board::YinshMove;
 use crate::hex::{ROW_DIRS, cell_index, index_to_cell, is_valid};
@@ -34,19 +37,16 @@ pub fn move_to_str(mv: &YinshMove) -> String {
             let (tc, tr) = index_to_cell(to);
             format!("{} {}", cell_to_str(fc, fr), cell_to_str(tc, tr))
         }
-        YinshMove::RemoveRow { start, dir } => {
+        YinshMove::ClaimRow { start, dir, ring } => {
             let (sc, sr) = index_to_cell(start);
             let (dc, dr) = ROW_DIRS[dir];
-            let cells: Vec<String> = (0i8..5).map(|k| {
+            let row_cells: Vec<String> = (0i8..5).map(|k| {
                 let c = (sc as i8 + dc * k) as u8;
                 let r = (sr as i8 + dr * k) as u8;
                 cell_to_str(c, r)
             }).collect();
-            format!("RR {}", cells.join(" "))
-        }
-        YinshMove::RemoveRing(idx) => {
-            let (c, r) = index_to_cell(idx);
-            format!("RRing {}", cell_to_str(c, r))
+            let (rc, rr) = index_to_cell(ring);
+            format!("Claim {} {}", row_cells.join(" "), cell_to_str(rc, rr))
         }
         YinshMove::Pass => "Pass".to_string(),
     }
@@ -57,35 +57,37 @@ pub fn str_to_move(s: &str) -> Result<YinshMove, String> {
     if s.eq_ignore_ascii_case("Pass") {
         return Ok(YinshMove::Pass);
     }
-    if let Some(rest) = s.strip_prefix("RRing ").or_else(|| s.strip_prefix("RRING ").or_else(|| s.strip_prefix("rring "))) {
-        let (c, r) = str_to_cell(rest).ok_or_else(|| format!("bad cell in RRing: {}", rest))?;
-        return Ok(YinshMove::RemoveRing(cell_index(c, r)));
-    }
-    if let Some(rest) = s.strip_prefix("RR ").or_else(|| s.strip_prefix("rr ")) {
+    if let Some(rest) = s.strip_prefix("Claim ")
+        .or_else(|| s.strip_prefix("CLAIM "))
+        .or_else(|| s.strip_prefix("claim "))
+    {
         let parts: Vec<&str> = rest.split_whitespace().collect();
-        if parts.len() != 5 {
-            return Err(format!("RR expects 5 cells, got {}", parts.len()));
+        if parts.len() != 6 {
+            return Err(format!("Claim expects 5 row cells + 1 ring cell, got {}", parts.len()));
         }
         let cells: Vec<(u8, u8)> = parts.iter()
             .map(|p| str_to_cell(p).ok_or_else(|| format!("bad cell: {}", p)))
             .collect::<Result<_, _>>()?;
         let start_idx = cell_index(cells[0].0, cells[0].1);
-        // Determine direction from cell[0] to cell[1]
         let (c0, r0) = cells[0];
         let (c1, r1) = cells[1];
         let dc = (c1 as i8 - c0 as i8).signum();
         let dr = (r1 as i8 - r0 as i8).signum();
         let dir = ROW_DIRS.iter().position(|&d| d == (dc, dr))
-            .ok_or_else(|| format!("bad direction ({}, {})", dc, dr))?;
-        // Sanity check
+            .ok_or_else(|| format!("bad row direction ({}, {})", dc, dr))?;
         for k in 0i8..5 {
             let ec = c0 as i8 + dc * k;
             let er = r0 as i8 + dr * k;
             if cells[k as usize] != (ec as u8, er as u8) {
-                return Err(format!("row cells not consecutive in direction"));
+                return Err("row cells not consecutive in direction".to_string());
             }
         }
-        return Ok(YinshMove::RemoveRow { start: start_idx, dir });
+        let (rc, rr) = cells[5];
+        return Ok(YinshMove::ClaimRow {
+            start: start_idx,
+            dir,
+            ring: cell_index(rc, rr),
+        });
     }
     // Otherwise: one or two cells
     let parts: Vec<&str> = s.split_whitespace().collect();
@@ -149,21 +151,14 @@ mod tests {
     }
 
     #[test]
-    fn test_move_roundtrip_remove_row() {
-        let mv = YinshMove::RemoveRow {
+    fn test_move_roundtrip_claim_row() {
+        let mv = YinshMove::ClaimRow {
             start: cell_index(4, 4),
             dir: 0, // vertical (0, 1)
+            ring: cell_index(3, 2),
         };
         let s = move_to_str(&mv);
-        assert_eq!(s, "RR E5 E6 E7 E8 E9");
-        assert_eq!(str_to_move(&s).unwrap(), mv);
-    }
-
-    #[test]
-    fn test_move_roundtrip_remove_ring() {
-        let mv = YinshMove::RemoveRing(cell_index(3, 2));
-        let s = move_to_str(&mv);
-        assert_eq!(s, "RRing D3");
+        assert_eq!(s, "Claim E5 E6 E7 E8 E9 D3");
         assert_eq!(str_to_move(&s).unwrap(), mv);
     }
 }
