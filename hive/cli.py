@@ -469,10 +469,10 @@ def main():
         help="PUCT exploration constant (default: 1.5)",
     )
     battle_parser.add_argument(
-        "--leaf-batch-size",
+        "--play-batch-size",
         type=int,
         default=1,
-        help="Leaf batch size for MCTS inference (default: 1)",
+        help="Leaves batched per MCTS inference call (default: 1)",
     )
 
     args = parser.parse_args()
@@ -546,7 +546,7 @@ def main():
                 device=_resolve_device(args.device),
                 max_moves=args.max_moves,
                 c_puct=args.c_puct,
-                leaf_batch_size=args.leaf_batch_size,
+                play_batch_size=args.play_batch_size,
             )
 
     elif args.command == "train":
@@ -582,7 +582,7 @@ def main():
             fast_cap=args.fast_cap,
             forced_playouts=args.forced_playouts,
             replay_window=args.replay_window,
-            leaf_batch_size=args.play_batch_sims,
+            play_batch_size=args.play_batch_sims,
             fixed_batch_size=args.play_batch_size,
             temperature=args.temperature,
             temp_threshold=args.temp_threshold,

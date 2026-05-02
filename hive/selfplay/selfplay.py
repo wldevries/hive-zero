@@ -221,7 +221,7 @@ class RustParallelSelfPlay:
         calibration_frac: float = 0.1,
         playout_cap_p: float = 0.0,
         fast_cap: int = 20,
-        leaf_batch_size: int = 1,
+        play_batch_size: int = 1,
         fixed_batch_size: int | None = None,
         random_opening_moves: int | tuple[int, int] = 0,
         skip_timeout_games: bool = False,
@@ -246,7 +246,7 @@ class RustParallelSelfPlay:
         self.calibration_frac = calibration_frac
         self.playout_cap_p = playout_cap_p
         self.fast_cap = fast_cap
-        self.leaf_batch_size = leaf_batch_size
+        self.play_batch_size = play_batch_size
         self.fixed_batch_size = fixed_batch_size
         self.random_opening_moves = random_opening_moves
         self.skip_timeout_games = skip_timeout_games
@@ -315,7 +315,7 @@ class RustParallelSelfPlay:
             c_puct=self.c_puct,
             dir_alpha=self.dir_alpha,
             dir_epsilon=self.dir_epsilon,
-            leaf_batch_size=self.leaf_batch_size,
+            play_batch_size=self.play_batch_size,
             fixed_batch_size=self.fixed_batch_size,
             resign_threshold=self.resign_threshold,
             resign_moves=self.resign_moves,
@@ -430,7 +430,7 @@ class SelfPlayTrainer:
         fast_cap: int = 20,
         forced_playouts: bool = False,
         replay_window: int = 8,
-        leaf_batch_size: int = 1,
+        play_batch_size: int = 1,
         fixed_batch_size: int | None = None,
         temperature: float = 1.0,
         temp_threshold: int = 30,
@@ -485,7 +485,7 @@ class SelfPlayTrainer:
             "c_puct": c_puct,
             "dir_alpha": dir_alpha,
             "dir_epsilon": dir_epsilon,
-            "leaf_batch_size": leaf_batch_size,
+            "play_batch_size": play_batch_size,
             "augment_symmetry": augment_symmetry,
         }
 
@@ -642,7 +642,7 @@ class SelfPlayTrainer:
                 calibration_frac=calibration_frac,
                 playout_cap_p=playout_cap_p,
                 fast_cap=fast_cap,
-                leaf_batch_size=leaf_batch_size,
+                play_batch_size=play_batch_size,
                 fixed_batch_size=fixed_batch_size,
                 random_opening_moves=random_opening_moves,
                 skip_timeout_games=skip_timeout_games,

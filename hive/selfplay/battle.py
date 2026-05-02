@@ -95,7 +95,7 @@ def run_parallel_match(
         max_moves=max_moves,
         grid_size=grid_size,
         c_puct=1.5,
-        leaf_batch_size=16,
+        play_batch_size=16,
     )
 
     if show_progress:
@@ -144,7 +144,7 @@ def run_battle(
     device: str = "cuda",
     max_moves: int = 200,
     c_puct: float = 1.5,
-    leaf_batch_size: int = 1,
+    play_batch_size: int = 1,
 ):
     from engine_zero import RustSelfPlaySession
 
@@ -196,7 +196,7 @@ def run_battle(
         c_puct=c_puct,
         dir_alpha=0.0,
         dir_epsilon=0.0,
-        leaf_batch_size=leaf_batch_size,
+        play_batch_size=play_batch_size,
         grid_size=grid_size,
     )
 
