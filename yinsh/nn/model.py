@@ -13,6 +13,7 @@ row-channel logit and the ring-channel logit. PlaceRing and MoveRing use
 
 from __future__ import annotations
 
+import copy
 import os
 
 import torch
@@ -160,25 +161,68 @@ def load_checkpoint(path: str) -> tuple[YinshNet, dict]:
 
 
 class _OnnxExportWrapper(nn.Module):
-    """Wraps YinshNet for ONNX export, softmaxing WDL logits to probabilities."""
+    """Wraps YinshNet for ONNX export.
+
+    Casts inputs to the wrapped model's parameter dtype and outputs back to
+    fp32, so the ONNX graph's external interface stays fp32 even when the
+    trunk runs in fp16 (Rust callers don't need to change). Softmax runs in
+    fp32 for numerical stability.
+    """
     def __init__(self, model: "YinshNet"):
         super().__init__()
         self.model = model
 
     def forward(self, board: torch.Tensor, reserve: torch.Tensor):
-        policy, wdl_logits = self.model(board, reserve)
-        wdl = F.softmax(wdl_logits, dim=1)
-        return policy, wdl
+        param_dtype = next(self.model.parameters()).dtype
+        policy, wdl_logits = self.model(
+            board.to(param_dtype), reserve.to(param_dtype)
+        )
+        wdl = F.softmax(wdl_logits.float(), dim=1)
+        return policy.float(), wdl
+
+
+def _should_export_fp16() -> bool:
+    """True iff the host has CUDA available for ORT and is not on QNN.
+
+    QNN's HTP backend already runs the fp32 graph in fp16 internally
+    (see `with_htp_fp16_precision(true)` in inference.rs), so an explicit
+    fp16 graph is redundant there. CPU EP's fp16 kernels are slow.
+
+    fp16 is preferred over bf16 for the exported trunk: ONNX opset 17
+    (highest the legacy `dynamo=False` exporter reaches) supports fp16 for
+    Conv since opset 11, but bf16 only since opset 22. For inference of a
+    trained model the precision difference is negligible.
+    """
+    try:
+        import onnxruntime as ort  # type: ignore
+    except ImportError:
+        return False
+    providers = ort.get_available_providers()
+    return (
+        "CUDAExecutionProvider" in providers
+        and "QNNExecutionProvider" not in providers
+    )
 
 
 def export_onnx(model: YinshNet, path: str):
-    """Export to ONNX for Rust-native inference via the `ort` crate."""
+    """Export to ONNX for Rust-native inference via the `ort` crate.
+
+    On CUDA hosts the trunk is converted to fp16 so the CUDA EP can use
+    half-precision tensor cores. Inputs/outputs stay fp32 via Cast nodes at
+    the graph boundary. On non-CUDA hosts the export stays fp32.
+    """
     was_training = model.training
     model.eval()
     device = next(model.parameters()).device
     dummy_board = torch.zeros(1, NUM_CHANNELS, GRID_SIZE, GRID_SIZE, device=device)
     dummy_reserve = torch.zeros(1, RESERVE_SIZE, device=device)
-    wrapper = _OnnxExportWrapper(model)
+
+    use_fp16 = _should_export_fp16()
+    export_model = copy.deepcopy(model).eval()
+    if use_fp16:
+        export_model = export_model.half()
+    wrapper = _OnnxExportWrapper(export_model)
+
     torch.onnx.export(
         wrapper,
         (dummy_board, dummy_reserve),
@@ -193,4 +237,5 @@ def export_onnx(model: YinshNet, path: str):
     if was_training:
         model.train()
     size_mb = os.path.getsize(path) / (1024 * 1024)
-    print(f"  ONNX exported: {path} ({size_mb:.1f} MB)")
+    precision = "fp16 trunk" if use_fp16 else "fp32"
+    print(f"  ONNX exported: {path} ({size_mb:.1f} MB, {precision})")
