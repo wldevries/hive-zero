@@ -215,6 +215,8 @@ pub struct PyYinshSelfPlaySession {
     playout_cap_p: f32,
     fast_cap: usize,
     draw_contempt: f32,
+    random_opening_moves_min: u32,
+    random_opening_moves_max: u32,
 }
 
 #[pymethods]
@@ -232,6 +234,8 @@ impl PyYinshSelfPlaySession {
         playout_cap_p = 0.0,
         fast_cap = 30,
         draw_contempt = 0.0,
+        random_opening_moves_min = 0,
+        random_opening_moves_max = 0,
     ))]
     fn new(
         num_games: usize,
@@ -245,6 +249,8 @@ impl PyYinshSelfPlaySession {
         playout_cap_p: f32,
         fast_cap: usize,
         draw_contempt: f32,
+        random_opening_moves_min: u32,
+        random_opening_moves_max: u32,
     ) -> Self {
         Self {
             num_games,
@@ -258,6 +264,8 @@ impl PyYinshSelfPlaySession {
             playout_cap_p,
             fast_cap,
             draw_contempt,
+            random_opening_moves_min,
+            random_opening_moves_max,
         }
     }
 
@@ -310,6 +318,8 @@ impl PyYinshSelfPlaySession {
             self.playout_cap_p,
             self.fast_cap,
             self.draw_contempt,
+            self.random_opening_moves_min,
+            self.random_opening_moves_max,
             core_eval,
             progress_core,
         )

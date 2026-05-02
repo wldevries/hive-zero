@@ -296,6 +296,8 @@ pub fn play_selfplay_core(
     playout_cap_p: f32,
     fast_cap: usize,
     draw_contempt: f32,
+    random_opening_moves_min: u32,
+    random_opening_moves_max: u32,
     eval_fn: EvalFn,
     progress_fn: Option<ProgressFn>,
 ) -> Result<SelfPlayResult, String> {
@@ -312,6 +314,18 @@ pub fn play_selfplay_core(
     let mut finished_count: u32 = 0;
     let mut rng = rand::rng();
 
+    // Per-game random opening move counts: each game plays this many random moves
+    // (sampled from valid_moves) before MCTS takes over. Diversifies openings.
+    let game_random_opening_moves: Vec<u32> = (0..num_games)
+        .map(|_| {
+            if random_opening_moves_max > random_opening_moves_min {
+                rng.random_range(random_opening_moves_min..=random_opening_moves_max)
+            } else {
+                random_opening_moves_min
+            }
+        })
+        .collect();
+
     let mut session_top1_sum = 0f64;
     let mut session_top1_sum_sq = 0f64;
     let mut session_top1_count = 0u64;
@@ -323,9 +337,56 @@ pub fn play_selfplay_core(
     let mut session_moves_count = 0u64;
 
     while active.iter().any(|&a| a) {
-        let active_games: Vec<usize> = (0..num_games).filter(|&gi| active[gi]).collect();
+        // Phase 1: play random opening moves for any active games still in their
+        // opening window. These moves do NOT produce training samples and are
+        // not counted in `total_turns` or per-iteration MCTS stats.
+        for gi in 0..num_games {
+            if !active[gi] || move_counts[gi] >= game_random_opening_moves[gi] {
+                continue;
+            }
+            let valid = boards[gi].valid_moves();
+            let mv = if valid.is_empty() {
+                YinshBoard::pass_move()
+            } else {
+                let idx = rng.random_range(0..valid.len());
+                valid[idx]
+            };
+            boards[gi].play_move(&mv).map_err(|e| e.to_string())?;
+            move_counts[gi] += 1;
+            result.total_moves += 1;
+            if boards[gi].is_game_over() {
+                active[gi] = false;
+                finished_count += 1;
+                let len = move_counts[gi];
+                result.game_lengths.push(len);
+                match boards[gi].outcome() {
+                    Outcome::WonBy(winner) => {
+                        if winner == Player::Player1 {
+                            result.wins_p1 += 1;
+                        } else {
+                            result.wins_p2 += 1;
+                        }
+                        result.decisive_lengths.push(len);
+                    }
+                    Outcome::Draw => result.draws += 1,
+                    Outcome::Ongoing => {}
+                }
+            }
+        }
+
+        // Phase 2: MCTS for games that have completed their opening window.
+        let active_games: Vec<usize> = (0..num_games)
+            .filter(|&gi| active[gi] && move_counts[gi] >= game_random_opening_moves[gi])
+            .collect();
         if active_games.is_empty() {
-            break;
+            if !active.iter().any(|&a| a) {
+                break;
+            }
+            if let Some(pfn) = &progress_fn {
+                let active_count = active.iter().filter(|&&a| a).count() as u32;
+                pfn(finished_count, num_games as u32, active_count, result.total_moves);
+            }
+            continue;
         }
         let n = active_games.len();
         result.total_turns += n as u32;

@@ -141,6 +141,7 @@ class SelfPlayTrainer:
         value_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
         draw_contempt: float = 0.0,
+        random_opening_moves: int | tuple[int, int] = 0,
     ):
         from engine_zero import YinshSelfPlaySession
 
@@ -153,6 +154,11 @@ class SelfPlayTrainer:
         dataset = YinshDataset(max_size=max_buffer, buf_dir=resolved_buf_dir)
         dataset.augment_symmetry = augment_symmetry
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        if isinstance(random_opening_moves, tuple):
+            opening_min, opening_max = random_opening_moves
+        else:
+            opening_min, opening_max = random_opening_moves, random_opening_moves
 
         train_params = {
             "simulations": simulations,
@@ -170,6 +176,7 @@ class SelfPlayTrainer:
             "play_batch_size": play_batch_size,
             "augment_symmetry": augment_symmetry,
             "draw_contempt": draw_contempt,
+            "random_opening_moves": random_opening_moves,
         }
 
         start_time = time.time()
@@ -226,6 +233,8 @@ class SelfPlayTrainer:
                 fast_cap=fast_cap,
                 play_batch_size=play_batch_size,
                 draw_contempt=draw_contempt,
+                random_opening_moves_min=opening_min,
+                random_opening_moves_max=opening_max,
             )
 
             pbar = tqdm(total=91, unit="turn", desc="  Self-play", leave=False)

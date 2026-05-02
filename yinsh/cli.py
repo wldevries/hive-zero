@@ -74,6 +74,15 @@ def main():
                    help="Draw contempt: MCTS value = W - L - contempt * D. "
                         "Positive = avoid draws (default: 0.0)")
 
+    def _opening_moves(s):
+        if "-" in s:
+            lo, hi = s.split("-", 1)
+            return (int(lo), int(hi))
+        return int(s)
+    t.add_argument("--random-opening-moves", type=_opening_moves, default=0,
+                   help="Play N (or N-M for a random range) random moves at the start of "
+                        "each game before MCTS takes over")
+
     # battle
     b = sub.add_parser("battle", help="Pit two models against each other")
     b.add_argument("model1", type=str)
@@ -129,6 +138,7 @@ def main():
             value_loss_scale=args.value_loss_scale,
             buf_dir=args.buf_dir,
             draw_contempt=args.draw_contempt,
+            random_opening_moves=args.random_opening_moves,
         )
     elif args.command == "battle":
         from yinsh.selfplay.battle import run_battle
