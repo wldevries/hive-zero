@@ -205,6 +205,7 @@ pub struct PyZertzSelfPlaySession {
     playout_cap_p: f32,
     fast_cap: usize,
     forced_playouts: bool,
+    draw_contempt: f32,
 }
 
 #[pymethods]
@@ -222,6 +223,7 @@ impl PyZertzSelfPlaySession {
         playout_cap_p = 0.0,
         fast_cap = 20,
         forced_playouts = false,
+        draw_contempt = 0.0,
     ))]
     fn new(
         num_games: usize,
@@ -235,11 +237,12 @@ impl PyZertzSelfPlaySession {
         playout_cap_p: f32,
         fast_cap: usize,
         forced_playouts: bool,
+        draw_contempt: f32,
     ) -> Self {
         PyZertzSelfPlaySession {
             num_games, simulations, temperature, temp_threshold,
             c_puct, dir_alpha, dir_epsilon, play_batch_size, playout_cap_p, fast_cap,
-            forced_playouts,
+            forced_playouts, draw_contempt,
         }
     }
 
@@ -291,9 +294,7 @@ impl PyZertzSelfPlaySession {
             dir_alpha: self.dir_alpha,
             dir_epsilon: self.dir_epsilon,
             forced_playouts: self.forced_playouts,
-            // Not yet exposed as a Python kwarg; wiring is in place so the
-            // CLI can opt in by adding a field to PyZertzSelfPlaySession.
-            draw_contempt: 0.0,
+            draw_contempt: self.draw_contempt,
             play_batch_size: self.play_batch_size,
             temperature: self.temperature,
             temp_threshold: self.temp_threshold,

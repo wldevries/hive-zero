@@ -88,6 +88,9 @@ def main():
                               help="KataGo-style forced playouts at the root: every legal move "
                                    "gets a visit floor proportional to sqrt(P*N). Pairs well with "
                                    "low c_puct (default: off)")
+    train_parser.add_argument("--draw-contempt", type=float, default=0.0,
+                              help="Draw contempt: MCTS value = W - L - contempt * D. "
+                                   "Positive = avoid draws (default: 0.0)")
 
     # Play mode
     play_parser = subparsers.add_parser("play", help="Play against the AI")
@@ -116,6 +119,7 @@ def main():
             human_color=args.color,
         )
     elif args.command == "train":
+        from shared.selfplay_config import MctsConfig, PlayoutCapConfig
         from zertz.selfplay.selfplay import SelfPlayTrainer
 
         lr_scheduler = None
@@ -129,29 +133,33 @@ def main():
             lr=args.lr,
             lr_scheduler=lr_scheduler,
         )
+        mcts = MctsConfig(
+            simulations=args.simulations,
+            c_puct=args.c_puct,
+            dir_alpha=args.dir_alpha,
+            dir_epsilon=args.dir_epsilon,
+            forced_playouts=args.forced_playouts,
+            draw_contempt=args.draw_contempt,
+            play_batch_size=args.play_batch_size,
+            temperature=args.temperature,
+            temp_threshold=args.temp_threshold,
+        )
+        playout_cap = PlayoutCapConfig(p=args.playout_cap_p, fast_cap=args.fast_cap)
         trainer.run(
+            mcts=mcts,
+            playout_cap=playout_cap,
             num_generations=args.generations,
             games_per_gen=args.games,
-            simulations=args.simulations,
             epochs_per_gen=args.epochs_per_gen,
             batch_size=args.training_batch_size,
             replay_window=args.replay_window,
             checkpoint_every=args.checkpoint_every,
-            playout_cap_p=args.playout_cap_p,
-            fast_cap=args.fast_cap,
-            temperature=args.temperature,
-            temp_threshold=args.temp_threshold,
-            c_puct=args.c_puct,
-            dir_alpha=args.dir_alpha,
-            dir_epsilon=args.dir_epsilon,
-            play_batch_size=args.play_batch_size,
             time_limit_minutes=args.time_limit,
             comment=args.comment,
             augment_symmetry=args.augment_symmetry,
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
             buf_dir=args.buf_dir,
-            forced_playouts=args.forced_playouts,
         )
     elif args.command == "battle":
         from zertz.selfplay.battle import run_battle
