@@ -99,7 +99,6 @@ pub fn best_move_core(
 pub fn play_battle_core(
     num_games: usize,
     simulations: usize,
-    max_moves: u32,
     c_puct: f32,
     play_batch_size: usize,
     eval_fn1: EvalFn,
@@ -237,7 +236,7 @@ pub fn play_battle_core(
             move_counts[gi] += 1;
             total_moves += 1;
 
-            if boards[gi].outcome() != Outcome::Ongoing || move_counts[gi] >= max_moves {
+            if boards[gi].outcome() != Outcome::Ongoing {
                 active[gi] = false;
                 finished_count += 1;
                 game_lengths.push(move_counts[gi]);
@@ -304,7 +303,6 @@ pub struct SelfPlayResult {
 pub fn play_selfplay_core(
     num_games: usize,
     simulations: usize,
-    max_moves: u32,
     temperature: f32,
     temp_threshold: u32,
     c_puct: f32,
@@ -483,7 +481,7 @@ pub fn play_selfplay_core(
             move_counts[gi] += 1;
             total_moves += 1;
 
-            if boards[gi].outcome() != Outcome::Ongoing || move_counts[gi] >= max_moves {
+            if boards[gi].outcome() != Outcome::Ongoing {
                 active[gi] = false;
                 finished_count += 1;
                 search_warm[gi] = false;

@@ -54,7 +54,6 @@ def main():
         "--lr-schedule", type=str, default=None,
         help="Stepped LR schedule as iter:lr pairs, e.g. '0:0.1,20:0.02,40:0.01'. Overrides --lr."
     )
-    train_parser.add_argument("--max-moves", type=int, default=40)
     train_parser.add_argument("--replay-window", type=int, default=8)
     train_parser.add_argument("--checkpoint-every", type=int, default=10)
     train_parser.add_argument("--playout-cap-p", type=float, default=0.0)
@@ -100,7 +99,6 @@ def main():
     battle_parser.add_argument("--games", type=int, default=100, help="Number of games to play (default: 100)")
     battle_parser.add_argument("--simulations", type=int, default=None, help="Simulations per move (default: from checkpoint metadata or 800)")
     battle_parser.add_argument("--device", type=str, default="cuda")
-    battle_parser.add_argument("--max-moves", type=int, default=40)
     battle_parser.add_argument("--play-batch-size", type=int, default=2)
 
     args = parser.parse_args()
@@ -133,7 +131,6 @@ def main():
             simulations=args.simulations,
             epochs_per_gen=args.epochs_per_gen,
             batch_size=args.training_batch_size,
-            max_moves=args.max_moves,
             replay_window=args.replay_window,
             checkpoint_every=args.checkpoint_every,
             playout_cap_p=args.playout_cap_p,
@@ -159,7 +156,6 @@ def main():
             num_games=args.games,
             simulations=args.simulations,
             device=args.device,
-            max_moves=args.max_moves,
             play_batch_size=args.play_batch_size,
         )
     else:

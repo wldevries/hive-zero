@@ -116,7 +116,6 @@ class SelfPlayTrainer:
         simulations: int = 100,
         epochs_per_gen: int = 1,
         batch_size: int = 256,
-        max_moves: int = 200,
         replay_window: int = 8,
         checkpoint_every: int = 10,
         playout_cap_p: float = 0.0,
@@ -141,7 +140,7 @@ class SelfPlayTrainer:
                 f.write(LOG_HEADER)
 
         resolved_buf_dir = buf_dir if buf_dir is not None else self.model_dir
-        max_buffer = games_per_gen * max_moves * replay_window
+        max_buffer = games_per_gen * 65 * replay_window
         dataset = ZertzDataset(max_size=max_buffer, buf_dir=resolved_buf_dir)
         dataset.augment_symmetry = augment_symmetry
         os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -151,7 +150,6 @@ class SelfPlayTrainer:
             "games_per_gen": games_per_gen,
             "epochs_per_gen": epochs_per_gen,
             "batch_size": batch_size,
-            "max_moves": max_moves,
             "replay_window": replay_window,
             "playout_cap_p": playout_cap_p,
             "fast_cap": fast_cap,
@@ -211,7 +209,6 @@ class SelfPlayTrainer:
             session = ZertzSelfPlaySession(
                 num_games=games_per_gen,
                 simulations=simulations,
-                max_moves=max_moves,
                 temperature=temperature,
                 temp_threshold=temp_threshold,
                 c_puct=c_puct,
@@ -222,7 +219,7 @@ class SelfPlayTrainer:
                 play_batch_size=play_batch_size,
             )
 
-            pbar = tqdm(total=max_moves, unit="turn", desc="  Self-play", leave=False)
+            pbar = tqdm(total=65, unit="turn", desc="  Self-play", leave=False)
             turn = [0]
 
             def progress_fn(finished, total, active, total_moves):
@@ -230,6 +227,9 @@ class SelfPlayTrainer:
                 advance = turn[0] - pbar.n
                 if advance > 0:
                     pbar.update(advance)
+                if turn[0] >= pbar.total:
+                    pbar.total = turn[0] + 10
+                    pbar.refresh()
                 pbar.set_postfix(active=f"{active}/{total}")
 
             play_start = time.time()

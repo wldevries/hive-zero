@@ -44,7 +44,6 @@ def run_battle(
     num_games: int = 100,
     simulations: int | None = None,
     device: str = "cuda",
-    max_moves: int = 40,
     play_batch_size: int = 2,
 ):
     from engine_zero import ZertzSelfPlaySession
@@ -67,7 +66,7 @@ def run_battle(
     print(f"\n{'='*60}")
     print(f"  Battle: {_cc(name1)}")
     print(f"      vs: {_cm(name2)}")
-    print(f"  Games: {num_games}  Simulations: {sims}  Max moves: {max_moves}")
+    print(f"  Games: {num_games}  Simulations: {sims}")
     print(f"{'='*60}")
 
     model1.to(device).eval()
@@ -79,14 +78,13 @@ def run_battle(
     session = ZertzSelfPlaySession(
         num_games=num_games,
         simulations=sims,
-        max_moves=max_moves,
         temp_threshold=0,
         playout_cap_p=0.0,
         fast_cap=sims,
         play_batch_size=play_batch_size,
     )
 
-    pbar = tqdm(total=max_moves, unit="turn", desc="  Battle", leave=False)
+    pbar = tqdm(total=65, unit="turn", desc="  Battle", leave=False)
     turn = [0]
 
     def progress_fn(finished, total, active, total_moves):
@@ -94,6 +92,9 @@ def run_battle(
         advance = turn[0] - pbar.n
         if advance > 0:
             pbar.update(advance)
+        if turn[0] >= pbar.total:
+            pbar.total = turn[0] + 10
+            pbar.refresh()
         pbar.set_postfix(done=f"{finished}/{total}")
 
     start = time.time()

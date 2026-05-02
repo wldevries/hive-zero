@@ -169,7 +169,6 @@ Key training flags:
 | `--temp-threshold` | 30 | Move number after which temperature drops to 0 |
 | `--augment-symmetry` | off | Apply D6 hex symmetry augmentation (12× data) |
 | `--lr` | 0.02 | Learning rate |
-| `--max-moves` | 40 | Max moves per game |
 | `--replay-window` | 8 | Replay buffer size (in iterations) |
 | `--checkpoint-every` | 10 | Save checkpoint every N iterations |
 | `--time-limit` | None | Stop after N minutes |

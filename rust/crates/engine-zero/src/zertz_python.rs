@@ -196,7 +196,6 @@ impl PyZertzBattleResult {
 pub struct PyZertzSelfPlaySession {
     num_games: usize,
     simulations: usize,
-    max_moves: u32,
     temperature: f32,
     temp_threshold: u32,
     c_puct: f32,
@@ -213,7 +212,6 @@ impl PyZertzSelfPlaySession {
     #[pyo3(signature = (
         num_games,
         simulations = 100,
-        max_moves = 200,
         temperature = 1.0,
         temp_threshold = 10,
         c_puct = 1.5,
@@ -226,7 +224,6 @@ impl PyZertzSelfPlaySession {
     fn new(
         num_games: usize,
         simulations: usize,
-        max_moves: u32,
         temperature: f32,
         temp_threshold: u32,
         c_puct: f32,
@@ -237,7 +234,7 @@ impl PyZertzSelfPlaySession {
         fast_cap: usize,
     ) -> Self {
         PyZertzSelfPlaySession {
-            num_games, simulations, max_moves, temperature, temp_threshold,
+            num_games, simulations, temperature, temp_threshold,
             c_puct, dir_alpha, dir_epsilon, play_batch_size, playout_cap_p, fast_cap,
         }
     }
@@ -287,7 +284,6 @@ impl PyZertzSelfPlaySession {
         let r = play_selfplay_core(
             self.num_games,
             self.simulations,
-            self.max_moves,
             self.temperature,
             self.temp_threshold,
             self.c_puct,
@@ -357,7 +353,6 @@ impl PyZertzSelfPlaySession {
         let r = play_battle_core(
             self.num_games,
             self.simulations,
-            self.max_moves,
             self.c_puct,
             self.play_batch_size,
             core_eval1,
