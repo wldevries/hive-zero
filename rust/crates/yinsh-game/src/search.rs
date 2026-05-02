@@ -16,6 +16,7 @@ use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::{
     CpuctStrategy, ForcedExploration, MctsSearch, RootNoise, SearchParams,
 };
+use core_game::selfplay_config::{MctsConfig, OpeningRandomConfig, PlayoutCapConfig};
 
 use crate::board::{Phase, YinshBoard, YinshMove};
 use crate::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
@@ -436,27 +437,18 @@ fn expand_from_resp(
 /// suitable for direct ingestion into the Python replay buffer.
 pub fn play_selfplay_core(
     num_games: usize,
-    simulations: usize,
-    temperature: f32,
-    temp_threshold: u32,
-    c_puct: f32,
-    dir_alpha: f32,
-    dir_epsilon: f32,
-    play_batch_size: usize,
-    playout_cap_p: f32,
-    fast_cap: usize,
-    draw_contempt: f32,
-    random_opening_moves_min: u32,
-    random_opening_moves_max: u32,
-    forced_playouts: bool,
+    mcts: MctsConfig,
+    playout_cap: PlayoutCapConfig,
+    opening: OpeningRandomConfig,
     eval_fn: EvalFn,
     progress_fn: Option<ProgressFn>,
 ) -> Result<SelfPlayResult, String> {
-    let use_playout_cap = playout_cap_p > 0.0;
+    let use_playout_cap = playout_cap.enabled();
 
     let mut boards: Vec<YinshBoard> = (0..num_games).map(|_| YinshBoard::new()).collect();
-    let mut searches: Vec<MctsSearch<YinshBoard>> =
-        (0..num_games).map(|_| make_search(simulations, c_puct, draw_contempt, forced_playouts)).collect();
+    let mut searches: Vec<MctsSearch<YinshBoard>> = (0..num_games)
+        .map(|_| make_search(mcts.simulations, mcts.c_puct, mcts.draw_contempt, mcts.forced_playouts))
+        .collect();
     let mut active = vec![true; num_games];
     let mut move_counts = vec![0u32; num_games];
     let mut histories: Vec<Vec<TurnRecord>> = (0..num_games).map(|_| Vec::new()).collect();
@@ -472,10 +464,10 @@ pub fn play_selfplay_core(
     // (sampled from valid_moves) before MCTS takes over. Diversifies openings.
     let game_random_opening_moves: Vec<u32> = (0..num_games)
         .map(|_| {
-            if random_opening_moves_max > random_opening_moves_min {
-                rng.random_range(random_opening_moves_min..=random_opening_moves_max)
+            if opening.max > opening.min {
+                rng.random_range(opening.min..=opening.max)
             } else {
-                random_opening_moves_min
+                opening.min
             }
         })
         .collect();
@@ -554,13 +546,13 @@ pub fn play_selfplay_core(
 
         // Decide full vs fast search per active game.
         let is_full: Vec<bool> = if use_playout_cap {
-            (0..n).map(|_| rng.random::<f32>() < playout_cap_p).collect()
+            (0..n).map(|_| rng.random::<f32>() < playout_cap.p).collect()
         } else {
             vec![true; n]
         };
         let sim_caps: Vec<usize> = is_full
             .iter()
-            .map(|&f| if f { simulations } else { fast_cap })
+            .map(|&f| if f { mcts.simulations } else { playout_cap.fast_cap })
             .collect();
         result.full_search_turns += is_full.iter().filter(|&&f| f).count() as u32;
 
@@ -592,7 +584,7 @@ pub fn play_selfplay_core(
         // Apply fresh Dirichlet noise to every full-search root (warm and cold).
         for (i, &gi) in active_games.iter().enumerate() {
             if is_full[i] {
-                searches[gi].apply_root_dirichlet(dir_alpha, dir_epsilon);
+                searches[gi].apply_root_dirichlet(mcts.dir_alpha, mcts.dir_epsilon);
             }
         }
 
@@ -602,7 +594,7 @@ pub fn play_selfplay_core(
             let Some(batch) = prepare_batch(
                 &mut searches,
                 &active_games,
-                play_batch_size,
+                mcts.play_batch_size,
                 &sim_caps,
                 &mut game_sims,
                 &mut t_select,
@@ -685,8 +677,8 @@ pub fn play_selfplay_core(
             // Sample the move (tempered for first `temp_threshold` moves).
             let mv = if dist.is_empty() {
                 YinshBoard::pass_move()
-            } else if move_counts[gi] < temp_threshold && temperature > 0.01 {
-                let weights: Vec<f32> = dist.iter().map(|(_, p)| p.powf(1.0 / temperature)).collect();
+            } else if move_counts[gi] < mcts.temp_threshold && mcts.temperature > 0.01 {
+                let weights: Vec<f32> = dist.iter().map(|(_, p)| p.powf(1.0 / mcts.temperature)).collect();
                 let wi = WeightedIndex::new(&weights).map_err(|e| e.to_string())?;
                 dist[wi.sample(&mut rng)].0
             } else {

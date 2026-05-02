@@ -354,21 +354,30 @@ impl PyYinshSelfPlaySession {
             }) as ProgressFn
         });
 
+        let mcts = core_game::selfplay_config::MctsConfig {
+            simulations: self.simulations,
+            c_puct: self.c_puct,
+            dir_alpha: self.dir_alpha,
+            dir_epsilon: self.dir_epsilon,
+            forced_playouts: self.forced_playouts,
+            draw_contempt: self.draw_contempt,
+            play_batch_size: self.play_batch_size,
+            temperature: self.temperature,
+            temp_threshold: self.temp_threshold,
+        };
+        let playout_cap = core_game::selfplay_config::PlayoutCapConfig {
+            p: self.playout_cap_p,
+            fast_cap: self.fast_cap,
+        };
+        let opening = core_game::selfplay_config::OpeningRandomConfig {
+            min: self.random_opening_moves_min,
+            max: self.random_opening_moves_max,
+        };
         let mut result = play_selfplay_core(
             self.num_games,
-            self.simulations,
-            self.temperature,
-            self.temp_threshold,
-            self.c_puct,
-            self.dir_alpha,
-            self.dir_epsilon,
-            self.play_batch_size,
-            self.playout_cap_p,
-            self.fast_cap,
-            self.draw_contempt,
-            self.random_opening_moves_min,
-            self.random_opening_moves_max,
-            self.forced_playouts,
+            mcts,
+            playout_cap,
+            opening,
             core_eval,
             progress_core,
         )
