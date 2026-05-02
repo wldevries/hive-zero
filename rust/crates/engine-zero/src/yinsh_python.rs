@@ -107,6 +107,22 @@ pub struct PyYinshSearchStats {
     #[pyo3(get)] pub valid_moves_std: f32,
 }
 
+/// Per-phase wall-clock breakdown of one self-play session, in seconds.
+/// `eval` covers the eval_fn boundary; on the ORT path it splits into
+/// `eval_input` + `eval_run` + `eval_extract`, all zero on the Python-callback
+/// path. Diagnostic only — gated by `--show-timing` on the Python side.
+#[pyclass(name = "YinshTiming")]
+#[derive(Clone)]
+pub struct PyYinshTiming {
+    #[pyo3(get)] pub select_s: f64,
+    #[pyo3(get)] pub encode_s: f64,
+    #[pyo3(get)] pub eval_s: f64,
+    #[pyo3(get)] pub expand_s: f64,
+    #[pyo3(get)] pub eval_input_s: f64,
+    #[pyo3(get)] pub eval_run_s: f64,
+    #[pyo3(get)] pub eval_extract_s: f64,
+}
+
 #[pyclass(name = "YinshSelfPlayResult")]
 pub struct PyYinshSelfPlayResult {
     inner: SelfPlayResult,
@@ -164,6 +180,23 @@ impl PyYinshSelfPlayResult {
     #[getter] fn decisive_lengths(&self) -> Vec<u32> { self.inner.decisive_lengths.clone() }
     #[getter] fn full_search_turns(&self) -> u32 { self.inner.full_search_turns }
     #[getter] fn total_turns(&self) -> u32 { self.inner.total_turns }
+
+    /// Per-phase wall-clock breakdown of the inner sim loop. See
+    /// `YinshTiming` for individual fields. Diagnostic only.
+    #[getter]
+    fn timing(&self) -> PyYinshTiming {
+        let t = &self.inner.timing;
+        PyYinshTiming {
+            select_s: t.select.as_secs_f64(),
+            encode_s: t.encode.as_secs_f64(),
+            eval_s: t.eval.as_secs_f64(),
+            expand_s: t.expand.as_secs_f64(),
+            eval_input_s: t.eval_input.as_secs_f64(),
+            eval_run_s: t.eval_run.as_secs_f64(),
+            eval_extract_s: t.eval_extract.as_secs_f64(),
+        }
+    }
+
     /// Returns list of (label, board_string) for up to 2 decisive games.
     fn sample_boards(&self) -> Vec<(String, String)> { self.inner.sample_board_data.clone() }
     #[getter]
@@ -278,10 +311,21 @@ impl PyYinshSelfPlaySession {
         progress_fn: Option<&Bound<'_, PyAny>>,
         onnx_path: Option<String>,
     ) -> PyResult<PyYinshSelfPlayResult> {
-        let core_eval: EvalFn = if let Some(path) = onnx_path {
-            let engine = crate::inference::YinshOrtEngine::load(&path)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            let shared = Arc::new(Mutex::new(engine));
+        // For the ORT path we keep an outer handle to the engine so we can read
+        // the per-phase timers after self-play finishes. The closure captures a
+        // clone of the Arc; after `play_selfplay_core` returns the closure is
+        // dropped, leaving us as the sole owner.
+        let engine_handle: Option<Arc<Mutex<crate::inference::YinshOrtEngine>>> =
+            if let Some(path) = onnx_path.as_deref() {
+                let engine = crate::inference::YinshOrtEngine::load(path)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                Some(Arc::new(Mutex::new(engine)))
+            } else {
+                None
+            };
+
+        let core_eval: EvalFn = if let Some(handle) = engine_handle.as_ref() {
+            let shared = Arc::clone(handle);
             Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
                 let mut engine = shared.lock().map_err(|_| "ONNX engine mutex poisoned".to_string())?;
                 engine.infer_batch(boards, reserves, n)
@@ -306,7 +350,7 @@ impl PyYinshSelfPlaySession {
             }) as ProgressFn
         });
 
-        let result = play_selfplay_core(
+        let mut result = play_selfplay_core(
             self.num_games,
             self.simulations,
             self.temperature,
@@ -324,6 +368,18 @@ impl PyYinshSelfPlaySession {
             progress_core,
         )
         .map_err(PyRuntimeError::new_err)?;
+
+        // Drain ORT-engine sub-phase timers into the result. core_eval is now
+        // dropped (consumed by play_selfplay_core), so the closure-side Arc is
+        // gone and the lock is uncontended.
+        if let Some(handle) = engine_handle {
+            if let Ok(engine) = handle.lock() {
+                let (t_in, t_run, t_ex) = engine.phase_times();
+                result.timing.eval_input = t_in;
+                result.timing.eval_run = t_run;
+                result.timing.eval_extract = t_ex;
+            }
+        }
 
         Ok(PyYinshSelfPlayResult { inner: result })
     }
@@ -634,6 +690,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyYinshSelfPlaySession>()?;
     m.add_class::<PyYinshSelfPlayResult>()?;
     m.add_class::<PyYinshSearchStats>()?;
+    m.add_class::<PyYinshTiming>()?;
     m.add_class::<PyYinshBattleResult>()?;
     m.add("YINSH_BOARD_SIZE", BOARD_SIZE)?;
     m.add("YINSH_GRID_SIZE", GRID_SIZE)?;

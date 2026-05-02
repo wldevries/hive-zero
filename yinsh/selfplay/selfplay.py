@@ -142,6 +142,7 @@ class SelfPlayTrainer:
         buf_dir: Optional[str] = None,
         draw_contempt: float = 0.0,
         random_opening_moves: int | tuple[int, int] = 0,
+        show_timing: bool = False,
     ):
         from engine_zero import YinshSelfPlaySession
 
@@ -316,6 +317,30 @@ class SelfPlayTrainer:
                 f"(play={play_time:.1f}s, buf={buf_time:.2f}s, {pos_per_s:.0f} pos/s), "
                 f"buffer: {len(dataset)}"
             )
+
+            # Per-phase wall-clock breakdown (gated by --show-timing). `other`
+            # covers root NN evals, move sampling, training-record bookkeeping,
+            # etc. — anything outside the four instrumented phases.
+            if show_timing:
+                t = result.timing
+                t_sum = t.select_s + t.encode_s + t.eval_s + t.expand_s
+                t_other = max(0.0, play_time - t_sum)
+                denom = play_time if play_time > 0 else 1.0
+                print(
+                    f"  Phase: select={t.select_s:.1f}s ({100*t.select_s/denom:.0f}%)  "
+                    f"encode={t.encode_s:.1f}s ({100*t.encode_s/denom:.0f}%)  "
+                    f"eval={t.eval_s:.1f}s ({100*t.eval_s/denom:.0f}%)  "
+                    f"expand={t.expand_s:.1f}s ({100*t.expand_s/denom:.0f}%)  "
+                    f"other={t_other:.1f}s ({100*t_other/denom:.0f}%)"
+                )
+                gpu_total = t.eval_input_s + t.eval_run_s + t.eval_extract_s
+                if gpu_total > 0.0:
+                    evl_denom = t.eval_s if t.eval_s > 0 else 1.0
+                    print(
+                        f"    eval split: input={t.eval_input_s:.1f}s ({100*t.eval_input_s/evl_denom:.0f}%)  "
+                        f"run={t.eval_run_s:.1f}s ({100*t.eval_run_s/evl_denom:.0f}%)  "
+                        f"extract={t.eval_extract_s:.1f}s ({100*t.eval_extract_s/evl_denom:.0f}%)"
+                    )
 
             samples = result.sample_boards()
             if samples:

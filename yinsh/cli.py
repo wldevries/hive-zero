@@ -73,6 +73,9 @@ def main():
     t.add_argument("--draw-contempt", type=float, default=0.0,
                    help="Draw contempt: MCTS value = W - L - contempt * D. "
                         "Positive = avoid draws (default: 0.0)")
+    t.add_argument("--show-timing", action="store_true",
+                   help="Print per-phase wall-clock breakdown (select / encode / "
+                        "eval / expand) and ORT eval subphase times each gen.")
 
     def _opening_moves(s):
         if "-" in s:
@@ -139,6 +142,7 @@ def main():
             buf_dir=args.buf_dir,
             draw_contempt=args.draw_contempt,
             random_opening_moves=args.random_opening_moves,
+            show_timing=args.show_timing,
         )
     elif args.command == "battle":
         from yinsh.selfplay.battle import run_battle

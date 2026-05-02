@@ -1,6 +1,7 @@
 //! Rust-native ONNX inference via the `ort` crate, replacing the Python eval callback.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use ort::session::Session;
 use ort::value::Tensor;
@@ -193,6 +194,14 @@ pub struct YinshOrtEngine {
     grid_size: usize,
     reserve_size: usize,
     policy_size: usize,
+
+    // Per-call wall-clock accumulators, drained from outside via `take_phase_times`.
+    // `t_input`: Tensor::from_array allocations + the boards/reserves to_vec copies.
+    // `t_run`: session.run (host↔device transfer + GPU compute + ORT marshaling).
+    // `t_extract`: try_extract_tensor + the policy/wdl output copies.
+    t_input: Duration,
+    t_run: Duration,
+    t_extract: Duration,
 }
 
 impl YinshOrtEngine {
@@ -225,7 +234,17 @@ impl YinshOrtEngine {
             grid_size,
             reserve_size,
             policy_size,
+            t_input: Duration::ZERO,
+            t_run: Duration::ZERO,
+            t_extract: Duration::ZERO,
         })
+    }
+
+    /// Drain the accumulated per-phase wall-clock times for diagnostics.
+    /// Caller is expected to read this once after the self-play session
+    /// completes; we don't reset on read since the engine is one-shot.
+    pub fn phase_times(&self) -> (Duration, Duration, Duration) {
+        (self.t_input, self.t_run, self.t_extract)
     }
 
     /// Returns `(policy_flat[B*POLICY_SIZE], values[B], draws[B])`.
@@ -236,6 +255,7 @@ impl YinshOrtEngine {
         reserves: &[f32],
         batch_size: usize,
     ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+        let t0 = Instant::now();
         let board_tensor = Tensor::from_array((
             [batch_size, self.num_channels, self.grid_size, self.grid_size],
             boards.to_vec(),
@@ -246,7 +266,9 @@ impl YinshOrtEngine {
             reserves.to_vec(),
         ))
         .map_err(|e| e.to_string())?;
+        self.t_input += t0.elapsed();
 
+        let t1 = Instant::now();
         let outputs = self
             .session
             .run(ort::inputs![
@@ -254,7 +276,9 @@ impl YinshOrtEngine {
                 "reserve" => reserve_tensor,
             ])
             .map_err(|e| e.to_string())?;
+        self.t_run += t1.elapsed();
 
+        let t2 = Instant::now();
         let (_, policy_data) = outputs["policy"]
             .try_extract_tensor::<f32>()
             .map_err(|e| e.to_string())?;
@@ -272,7 +296,9 @@ impl YinshOrtEngine {
             draws.push(wdl_data[i * 3 + 1]);                      // D
         }
 
-        Ok((policy_data.to_vec(), values, draws))
+        let result = Ok((policy_data.to_vec(), values, draws));
+        self.t_extract += t2.elapsed();
+        result
     }
 }
 

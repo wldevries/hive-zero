@@ -5,6 +5,8 @@
 //! (847 entries) consumed via the `PolicyIndex::Sum` mechanism that
 //! `core_game::mcts` already supports.
 
+use std::time::{Duration, Instant};
+
 use rand::RngExt;
 use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
@@ -267,6 +269,31 @@ pub struct SelfPlayResult {
     pub search_depth_std: f32,
     pub valid_moves_mean: f32,
     pub valid_moves_std: f32,
+
+    /// Per-phase wall-clock breakdown of the self-play inner loop. Optional
+    /// to consume — see `SelfPlayTiming` for the measured phases.
+    pub timing: SelfPlayTiming,
+}
+
+/// Wall-clock accumulators for one self-play session, broken out by phase.
+/// `select`/`encode`/`eval`/`expand` are measured around the four phases of
+/// the synchronous inner sim loop on the main thread. `eval_input/run/extract`
+/// are a finer subdivision of `eval` populated only by the ORT engine path —
+/// they're set externally after self-play completes (see
+/// `yinsh_python::play_games`) and stay zero for the Python-callback path.
+#[derive(Clone, Debug, Default)]
+pub struct SelfPlayTiming {
+    pub select: Duration,
+    pub encode: Duration,
+    pub eval: Duration,
+    pub expand: Duration,
+
+    /// Tensor construction + boards/reserves clone-into-Tensor.
+    pub eval_input: Duration,
+    /// ort::Session::run (H2D + GPU compute + D2H).
+    pub eval_run: Duration,
+    /// try_extract_tensor + output policy.to_vec.
+    pub eval_extract: Duration,
 }
 
 /// One training record per turn, accumulated per game.
@@ -277,6 +304,120 @@ struct TurnRecord {
     player: Player,
     value_only: bool,
     phase: u8,
+}
+
+// ---------------------------------------------------------------------------
+// Self-play inner-loop helpers
+// ---------------------------------------------------------------------------
+
+/// Identifies which active game each leaf in a batch belongs to. Needed by
+/// `expand_from_resp` to regroup the flat policy/values/draws back per-game
+/// in stash order.
+struct BatchMeta {
+    leaf_game_idx: Vec<usize>,
+}
+
+/// One inference batch's worth of data: leaf metadata plus flat tensors
+/// ready for the eval callback.
+struct PreparedBatch {
+    meta: BatchMeta,
+    boards: Vec<f32>,
+    reserves: Vec<f32>,
+    nl: usize,
+}
+
+/// Select up to `play_batch_size` leaves per still-running active game and
+/// encode them into flat tensors. Mirrors what the synchronous loop used to do
+/// inline. Updates `game_sims[i]` in place. Returns `None` if no leaves were
+/// produced (every game has hit its sim cap or all trees are exhausted).
+fn prepare_batch(
+    searches: &mut [MctsSearch<YinshBoard>],
+    active_games: &[usize],
+    play_batch_size: usize,
+    sim_caps: &[usize],
+    game_sims: &mut [usize],
+    t_select: &mut Duration,
+    t_encode: &mut Duration,
+) -> Option<PreparedBatch> {
+    let t0 = Instant::now();
+    let mut leaf_ids: Vec<NodeId> = Vec::new();
+    let mut leaf_game_idx: Vec<usize> = Vec::new();
+    for _round in 0..play_batch_size {
+        let mut any_collected = false;
+        for (i, &gi) in active_games.iter().enumerate() {
+            if game_sims[i] >= sim_caps[i] {
+                continue;
+            }
+            let leaves = searches[gi].select_leaves(1);
+            let count = leaves.len();
+            if count > 0 {
+                any_collected = true;
+            }
+            for leaf in leaves {
+                leaf_ids.push(leaf);
+                leaf_game_idx.push(i);
+            }
+            game_sims[i] += count;
+        }
+        if !any_collected {
+            break;
+        }
+    }
+    *t_select += t0.elapsed();
+
+    if leaf_ids.is_empty() {
+        return None;
+    }
+
+    let t1 = Instant::now();
+    let nl = leaf_ids.len();
+    let mut leaf_boards = vec![0f32; nl * BOARD_FLAT];
+    let mut leaf_reserves = vec![0f32; nl * RESERVE_SIZE];
+    for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
+        let gi = active_games[i];
+        let (b, r) = searches[gi].encode_leaf(leaf);
+        leaf_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&b);
+        leaf_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&r);
+    }
+    *t_encode += t1.elapsed();
+
+    let _ = leaf_ids;
+    Some(PreparedBatch {
+        meta: BatchMeta { leaf_game_idx },
+        boards: leaf_boards,
+        reserves: leaf_reserves,
+        nl,
+    })
+}
+
+/// Regroup an inference batch's results back per-game and call
+/// `expand_and_backprop` on each game's portion in stash order. Mirrors what
+/// the synchronous loop used to do inline.
+fn expand_from_resp(
+    searches: &mut [MctsSearch<YinshBoard>],
+    active_games: &[usize],
+    n: usize,
+    meta: &BatchMeta,
+    policy: &[f32],
+    values: &[f32],
+    draws: &[f32],
+) {
+    let mut per_game_policies: Vec<Vec<Vec<f32>>> = (0..n).map(|_| Vec::new()).collect();
+    let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
+    let mut per_game_draws: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
+    for (k, &i) in meta.leaf_game_idx.iter().enumerate() {
+        per_game_policies[i].push(
+            policy[k * POLICY_SIZE..(k + 1) * POLICY_SIZE].to_vec(),
+        );
+        per_game_values[i].push(values[k]);
+        per_game_draws[i].push(draws[k]);
+    }
+    for (i, &gi) in active_games.iter().enumerate() {
+        if per_game_policies[i].is_empty() {
+            continue;
+        }
+        searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i], &per_game_draws[i]);
+    }
 }
 
 /// Run `num_games` of self-play in parallel. Each game uses its own
@@ -334,6 +475,13 @@ pub fn play_selfplay_core(
     let mut session_moves_sum = 0f64;
     let mut session_moves_sum_sq = 0f64;
     let mut session_moves_count = 0u64;
+
+    // Per-phase wall-clock accumulators. See `SelfPlayTiming` for the
+    // semantics of each phase.
+    let mut t_select = Duration::ZERO;
+    let mut t_encode = Duration::ZERO;
+    let mut t_eval = Duration::ZERO;
+    let mut t_expand = Duration::ZERO;
 
     while active.iter().any(|&a| a) {
         // Phase 1: play random opening moves for any active games still in their
@@ -423,67 +571,33 @@ pub fn play_selfplay_core(
         // Cross-game batched simulations.
         let mut game_sims = vec![0usize; n];
         loop {
-            let mut leaf_ids: Vec<NodeId> = Vec::new();
-            let mut leaf_game_idx: Vec<usize> = Vec::new();
-
-            // Collect up to `play_batch_size` leaves per round, one leaf at a time per game.
-            for _round in 0..play_batch_size {
-                let mut any_collected = false;
-                for (i, &gi) in active_games.iter().enumerate() {
-                    if game_sims[i] >= sim_caps[i] {
-                        continue;
-                    }
-                    let leaves = searches[gi].select_leaves(1);
-                    let count = leaves.len();
-                    if count > 0 {
-                        any_collected = true;
-                    }
-                    for leaf in leaves {
-                        leaf_ids.push(leaf);
-                        leaf_game_idx.push(i);
-                    }
-                    game_sims[i] += count;
-                }
-                if !any_collected {
-                    break;
-                }
-            }
-            if leaf_ids.is_empty() {
+            let Some(batch) = prepare_batch(
+                &mut searches,
+                &active_games,
+                play_batch_size,
+                &sim_caps,
+                &mut game_sims,
+                &mut t_select,
+                &mut t_encode,
+            ) else {
                 break;
-            }
+            };
 
-            let nl = leaf_ids.len();
-            let mut leaf_boards = vec![0f32; nl * BOARD_FLAT];
-            let mut leaf_reserves = vec![0f32; nl * RESERVE_SIZE];
-            for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
-                let gi = active_games[i];
-                let (b, r) = searches[gi].encode_leaf(leaf);
-                leaf_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&b);
-                leaf_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&r);
-            }
-            let (leaf_policy, leaf_values, leaf_draws) = eval_fn(&leaf_boards, &leaf_reserves, nl)?;
+            let t = Instant::now();
+            let (policy, values, draws) = eval_fn(&batch.boards, &batch.reserves, batch.nl)?;
+            t_eval += t.elapsed();
 
-            // Group results back per game and call expand_and_backprop in stash order.
-            let mut per_game_policies: Vec<Vec<Vec<f32>>> = (0..n).map(|_| Vec::new()).collect();
-            let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
-            let mut per_game_draws: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
-            for (k, &i) in leaf_game_idx.iter().enumerate() {
-                per_game_policies[i].push(
-                    leaf_policy[k * POLICY_SIZE..(k + 1) * POLICY_SIZE].to_vec(),
-                );
-                per_game_values[i].push(leaf_values[k]);
-                per_game_draws[i].push(leaf_draws[k]);
-            }
-            for (i, &gi) in active_games.iter().enumerate() {
-                if per_game_policies[i].is_empty() {
-                    continue;
-                }
-                searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i], &per_game_draws[i]);
-            }
-
-            if game_sims.iter().zip(sim_caps.iter()).all(|(s, c)| *s >= *c) {
-                break;
-            }
+            let te = Instant::now();
+            expand_from_resp(
+                &mut searches,
+                &active_games,
+                n,
+                &batch.meta,
+                &policy,
+                &values,
+                &draws,
+            );
+            t_expand += te.elapsed();
         }
 
         // Collect per-turn MCTS stats for full-search turns.
@@ -628,6 +742,13 @@ pub fn play_selfplay_core(
         mean_std(session_depth_sum, session_depth_sum_sq, session_depth_count);
     (result.valid_moves_mean, result.valid_moves_std) =
         mean_std(session_moves_sum, session_moves_sum_sq, session_moves_count);
+
+    result.timing.select = t_select;
+    result.timing.encode = t_encode;
+    result.timing.eval = t_eval;
+    result.timing.expand = t_expand;
+    // `eval_input/run/extract` are populated by the caller (see
+    // `yinsh_python::play_games`) once the ORT engine is drained.
 
     Ok(result)
 }
