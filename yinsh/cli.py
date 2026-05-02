@@ -63,8 +63,8 @@ def main():
     t.add_argument("--play-batch-size", type=int, default=8,
                    help="MCTS rounds per inference batch (× active games)")
     t.add_argument("--comment", type=str, default="")
-    t.add_argument("--augment-symmetry", action="store_true",
-                   help="Apply Yinsh-valid D6 hex symmetry augmentation in the dataset")
+    t.add_argument("--augment-symmetry", action=argparse.BooleanOptionalAction, default=True,
+                   help="Apply Yinsh-valid D6 hex symmetry augmentation in the dataset (default: on)")
     t.add_argument("--use-ort", action="store_true",
                    help="Use Rust-native ORT inference (requires .onnx export)")
     t.add_argument("--value-loss-scale", type=float, default=1.0)

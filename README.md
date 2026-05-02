@@ -149,7 +149,6 @@ uv run zertz train \
   --device cuda \
   --playout-cap-p 0.25 \
   --play-batch-size 2 \
-  --augment-symmetry \
   --temp-threshold 30 \
   --comment "my run"
 ```
@@ -167,7 +166,7 @@ Key training flags:
 | `--fast-cap` | 20 | Simulations for fast-search turns |
 | `--play-batch-size` | 2 | MCTS rounds per GPU inference call |
 | `--temp-threshold` | 30 | Move number after which temperature drops to 0 |
-| `--augment-symmetry` | off | Apply D6 hex symmetry augmentation (12× data) |
+| `--augment-symmetry` / `--no-augment-symmetry` | on | Apply D6 hex symmetry augmentation (12× data) |
 | `--lr` | 0.02 | Learning rate |
 | `--replay-window` | 8 | Replay buffer size (in iterations) |
 | `--checkpoint-every` | 10 | Save checkpoint every N iterations |
@@ -232,7 +231,7 @@ Key training flags:
 | `--fast-cap` | 30 | Simulations for fast-search turns |
 | `--play-batch-size` | 8 | MCTS rounds per GPU inference call |
 | `--temp-threshold` | 20 | Move number after which temperature drops to 0 |
-| `--augment-symmetry` | off | Apply D6 hex symmetry augmentation |
+| `--augment-symmetry` / `--no-augment-symmetry` | on | Apply D6 hex symmetry augmentation |
 | `--lr` | 0.02 | Learning rate |
 | `--checkpoint-every` | 10 | Save checkpoint every N generations |
 | `--time-limit` | None | Stop after N minutes |

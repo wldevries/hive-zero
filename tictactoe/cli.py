@@ -46,8 +46,8 @@ def main():
     train_parser.add_argument("--dir-epsilon", type=float, default=0.25)
     train_parser.add_argument("--comment", type=str, default="")
     train_parser.add_argument("--value-loss-scale", type=float, default=1.0)
-    train_parser.add_argument("--augment-symmetry", action="store_true",
-                              help="Apply 8-fold symmetry augmentation during training")
+    train_parser.add_argument("--augment-symmetry", action=argparse.BooleanOptionalAction, default=True,
+                              help="Apply 8-fold symmetry augmentation during training (default: on)")
 
     # Play mode
     play_parser = subparsers.add_parser("play", help="Play against the AI")

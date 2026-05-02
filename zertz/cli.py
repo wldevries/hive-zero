@@ -76,8 +76,8 @@ def main():
         "Actual batch = play_batch_size × active_games.",
     )
     train_parser.add_argument("--comment", type=str, default="")
-    train_parser.add_argument("--augment-symmetry", action="store_true",
-                              help="Apply random D6 hex symmetry augmentation during training (12x effective data)")
+    train_parser.add_argument("--augment-symmetry", action=argparse.BooleanOptionalAction, default=True,
+                              help="Apply random D6 hex symmetry augmentation during training, 12x effective data (default: on)")
     train_parser.add_argument("--use-ort", action="store_true",
                               help="Use Rust-native ORT inference instead of Python eval (requires .onnx model)")
     train_parser.add_argument("--value-loss-scale", type=float, default=1.0,

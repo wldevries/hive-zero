@@ -286,8 +286,9 @@ def main():
     )
     train_parser.add_argument(
         "--augment-symmetry",
-        action="store_true",
-        help="Apply random D6 hex symmetry augmentation during training (12x effective data)",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply random D6 hex symmetry augmentation during training, 12x effective data (default: on)",
     )
     train_parser.add_argument(
         "--use-ort",
@@ -395,15 +396,9 @@ def main():
     )
     pretrain_parser.add_argument(
         "--augment-symmetry",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Apply D6 hex symmetry augmentation during training (default: True)",
-    )
-    pretrain_parser.add_argument(
-        "--no-augment-symmetry",
-        dest="augment_symmetry",
-        action="store_false",
-        help="Disable D6 symmetry augmentation",
+        help="Apply D6 hex symmetry augmentation during training (default: on)",
     )
     pretrain_parser.add_argument(
         "--exclude-players",

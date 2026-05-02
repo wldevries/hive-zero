@@ -443,7 +443,7 @@ class SelfPlayTrainer:
         boardspace_frac: float = 1.0,
         opening_min_elo: float = 1600.0,
         skip_timeout_games: bool = False,
-        augment_symmetry: bool = False,
+        augment_symmetry: bool = True,
         comment: str = "",
         use_ort: bool = False,
         use_heuristic: bool = False,

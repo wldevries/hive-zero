@@ -117,7 +117,7 @@ class SelfPlayTrainer:
         time_limit_minutes: Optional[float] = None,
         comment: str = "",
         value_loss_scale: float = 1.0,
-        augment_symmetry: bool = False,
+        augment_symmetry: bool = True,
     ):
         from engine_zero import TTTSelfPlaySession
 

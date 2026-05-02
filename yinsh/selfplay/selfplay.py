@@ -136,7 +136,7 @@ class SelfPlayTrainer:
         dir_epsilon: float = 0.25,
         time_limit_minutes: Optional[float] = None,
         comment: str = "",
-        augment_symmetry: bool = False,
+        augment_symmetry: bool = True,
         use_ort: bool = False,
         value_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
