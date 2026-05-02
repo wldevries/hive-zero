@@ -550,6 +550,7 @@ def main():
             )
 
     elif args.command == "train":
+        from shared.selfplay_config import MctsConfig, OpeningRandomConfig, PlayoutCapConfig
         from hive.selfplay.selfplay import SelfPlayTrainer
 
         if args.resign_threshold > 0:
@@ -568,30 +569,37 @@ def main():
             lr=args.lr,
             lr_scheduler=lr_scheduler,
         )
+        mcts = MctsConfig(
+            simulations=args.simulations,
+            c_puct=args.c_puct,
+            dir_alpha=args.dir_alpha,
+            dir_epsilon=args.dir_epsilon,
+            forced_playouts=args.forced_playouts,
+            draw_contempt=args.draw_contempt,
+            # Hive's --play-batch-sims is the leaf-batching round count; --play-batch-size
+            # is a different flag on this CLI that maps to fixed_batch_size below.
+            play_batch_size=args.play_batch_sims,
+            temperature=args.temperature,
+            temp_threshold=args.temp_threshold,
+        )
+        playout_cap = PlayoutCapConfig(p=args.playout_cap_p, fast_cap=args.fast_cap)
+        opening = OpeningRandomConfig.from_cli_arg(args.random_opening_moves)
         trainer.run(
+            mcts=mcts,
+            playout_cap=playout_cap,
+            opening=opening,
             num_generations=args.generations,
             games_per_gen=args.games,
-            simulations=args.simulations,
             epochs_per_gen=args.epochs,
             batch_size=args.training_batch_size,
             max_moves=args.max_moves,
             time_limit_minutes=args.time_limit,
             checkpoint_every=args.checkpoint_every,
             checkpoint_eval=args.checkpoint_eval,
-            playout_cap_p=args.playout_cap_p,
-            fast_cap=args.fast_cap,
-            forced_playouts=args.forced_playouts,
             replay_window=args.replay_window,
-            play_batch_size=args.play_batch_sims,
             fixed_batch_size=args.play_batch_size,
-            temperature=args.temperature,
-            temp_threshold=args.temp_threshold,
-            c_puct=args.c_puct,
-            dir_alpha=args.dir_alpha,
-            dir_epsilon=args.dir_epsilon,
             resign_threshold=args.resign_threshold,
             resign_min_moves=args.resign_min_moves,
-            random_opening_moves=args.random_opening_moves,
             opening_games_csv=args.opening_book,
             opening_boardspace_dir=args.opening_boardspace_dir,
             boardspace_frac=args.boardspace_frac,
@@ -604,7 +612,6 @@ def main():
             use_heuristic=args.use_heuristic,
             buf_dir=args.buf_dir,
             export_sgf=args.export_sgf,
-            draw_contempt=args.draw_contempt,
             bot_frac=args.bot_frac if args.opponent_bot == "alphabeta" else 0.0,
             bot_depth=args.bot_depth,
         )

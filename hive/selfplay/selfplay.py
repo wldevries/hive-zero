@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from shared.lr_scheduler import LRScheduler
+from shared.selfplay_config import MctsConfig, OpeningRandomConfig, PlayoutCapConfig
 from shared.training_log import csv_comment
 
 from ..encoding.move_encoder import policy_size as compute_policy_size
@@ -207,51 +208,35 @@ class RustParallelSelfPlay:
     def __init__(
         self,
         model,
+        mcts: MctsConfig,
+        playout_cap: PlayoutCapConfig = PlayoutCapConfig(),
+        opening: OpeningRandomConfig = OpeningRandomConfig(),
         device: str = "cpu",
-        simulations: int = 100,
+        # Hive-specific (resignation, calibration, opponent bot, heuristic eval, etc.)
         max_moves: int = 200,
-        temperature: float = 1.0,
-        temp_threshold: int = 30,
-        c_puct: float = 1.5,
-        dir_alpha: float = 0.3,
-        dir_epsilon: float = 0.25,
         resign_threshold: float = -0.97,
         resign_moves: int = 5,
         resign_min_moves: int = 20,
         calibration_frac: float = 0.1,
-        playout_cap_p: float = 0.0,
-        fast_cap: int = 20,
-        play_batch_size: int = 1,
         fixed_batch_size: int | None = None,
-        random_opening_moves: int | tuple[int, int] = 0,
         skip_timeout_games: bool = False,
         use_heuristic: bool = False,
-        draw_contempt: float = 0.0,
         bot_frac: float = 0.0,
         bot_depth: int = 2,
-        **kwargs,
     ):
         self.model = model
         self.device = device
-        self.simulations = simulations
+        self.mcts = mcts
+        self.playout_cap = playout_cap
+        self.opening = opening
         self.max_moves = max_moves
-        self.temperature = temperature
-        self.temp_threshold = temp_threshold
-        self.c_puct = c_puct
-        self.dir_alpha = dir_alpha
-        self.dir_epsilon = dir_epsilon
         self.resign_threshold = resign_threshold
         self.resign_moves = resign_moves
         self.resign_min_moves = resign_min_moves
         self.calibration_frac = calibration_frac
-        self.playout_cap_p = playout_cap_p
-        self.fast_cap = fast_cap
-        self.play_batch_size = play_batch_size
         self.fixed_batch_size = fixed_batch_size
-        self.random_opening_moves = random_opening_moves
         self.skip_timeout_games = skip_timeout_games
         self.use_heuristic = use_heuristic
-        self.draw_contempt = draw_contempt
         self.bot_frac = bot_frac
         self.bot_depth = bot_depth
 
@@ -306,31 +291,18 @@ class RustParallelSelfPlay:
         grid_size = getattr(self.model, "grid_size", 23) if self.model else 23
         session = RustSelfPlaySession(
             num_games=num_games,
-            simulations=self.simulations,
+            **self.mcts.session_kwargs(),
+            **self.playout_cap.session_kwargs(),
+            **self.opening.session_kwargs(),
             max_moves=self.max_moves,
-            temperature=self.temperature,
-            temp_threshold=self.temp_threshold,
-            playout_cap_p=self.playout_cap_p,
-            fast_cap=self.fast_cap,
-            c_puct=self.c_puct,
-            dir_alpha=self.dir_alpha,
-            dir_epsilon=self.dir_epsilon,
-            play_batch_size=self.play_batch_size,
             fixed_batch_size=self.fixed_batch_size,
             resign_threshold=self.resign_threshold,
             resign_moves=self.resign_moves,
             resign_min_moves=self.resign_min_moves,
             calibration_frac=self.calibration_frac,
-            random_opening_moves_min=self.random_opening_moves[0]
-            if isinstance(self.random_opening_moves, tuple)
-            else self.random_opening_moves,
-            random_opening_moves_max=self.random_opening_moves[1]
-            if isinstance(self.random_opening_moves, tuple)
-            else self.random_opening_moves,
             skip_timeout_games=self.skip_timeout_games,
             use_heuristic=self.use_heuristic,
             grid_size=grid_size,
-            draw_contempt=self.draw_contempt,
             bot_frac=self.bot_frac,
             bot_depth=self.bot_depth,
         )
@@ -411,9 +383,11 @@ class SelfPlayTrainer:
 
     def run(
         self,
+        mcts: MctsConfig,
+        playout_cap: PlayoutCapConfig = PlayoutCapConfig(),
+        opening: OpeningRandomConfig = OpeningRandomConfig(),
         num_generations: int | None = None,
         games_per_gen: int = 10,
-        simulations: int = 100,
         epochs_per_gen: int = 1,
         batch_size: int = 64,
         max_moves: int = 200,
@@ -426,18 +400,8 @@ class SelfPlayTrainer:
         resign_moves: int = 5,
         resign_min_moves: int = 20,
         calibration_frac: float = 0.1,
-        playout_cap_p: float = 0.0,
-        fast_cap: int = 20,
-        forced_playouts: bool = False,
         replay_window: int = 8,
-        play_batch_size: int = 1,
         fixed_batch_size: int | None = None,
-        temperature: float = 1.0,
-        temp_threshold: int = 30,
-        c_puct: float = 1.5,
-        dir_alpha: float = 0.3,
-        dir_epsilon: float = 0.25,
-        random_opening_moves: int | tuple[int, int] = 0,
         opening_games_csv: str | None = None,
         opening_boardspace_dir: str | None = None,
         boardspace_frac: float = 1.0,
@@ -451,7 +415,6 @@ class SelfPlayTrainer:
         aux_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
         export_sgf: bool = True,
-        draw_contempt: float = 0.0,
         bot_frac: float = 0.0,
         bot_depth: int = 2,
     ):
@@ -460,33 +423,33 @@ class SelfPlayTrainer:
         Args:
             checkpoint_eval_games: Games per checkpoint self-eval (default 2x games_per_gen).
             checkpoint_eval_simulations: Simulations for checkpoint eval.
-                Defaults to same as `simulations`.
-            playout_cap_p: Probability of full search per turn (0=disabled,
-                all turns are full). KataGo-style playout cap randomization.
-            fast_cap: Number of simulations for fast-search turns.
+                Defaults to same as `mcts.simulations`.
         """
         start_time = time.time()
         self._comment = comment
 
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
+        # Flat metadata stored in the checkpoint — keep keys stable for any
+        # downstream tooling that reads them.
         train_params = {
-            "simulations": simulations,
+            "simulations": mcts.simulations,
             "games_per_gen": games_per_gen,
             "epochs_per_gen": epochs_per_gen,
             "batch_size": batch_size,
             "max_moves": max_moves,
             "replay_window": replay_window,
-            "playout_cap_p": playout_cap_p,
-            "fast_cap": fast_cap,
-            "forced_playouts": forced_playouts,
-            "temperature": temperature,
-            "temp_threshold": temp_threshold,
-            "c_puct": c_puct,
-            "dir_alpha": dir_alpha,
-            "dir_epsilon": dir_epsilon,
-            "play_batch_size": play_batch_size,
+            "playout_cap_p": playout_cap.p,
+            "fast_cap": playout_cap.fast_cap,
+            "forced_playouts": mcts.forced_playouts,
+            "temperature": mcts.temperature,
+            "temp_threshold": mcts.temp_threshold,
+            "c_puct": mcts.c_puct,
+            "dir_alpha": mcts.dir_alpha,
+            "dir_epsilon": mcts.dir_epsilon,
+            "play_batch_size": mcts.play_batch_size,
             "augment_symmetry": augment_symmetry,
+            "draw_contempt": mcts.draw_contempt,
         }
 
         # Training log (CSV, truncated on fresh start)
@@ -506,7 +469,7 @@ class SelfPlayTrainer:
                 eval_sims = (
                     checkpoint_eval_simulations
                     if checkpoint_eval_simulations is not None
-                    else simulations
+                    else mcts.simulations
                 )
                 eval_games = (
                     checkpoint_eval_games
@@ -534,10 +497,10 @@ class SelfPlayTrainer:
             )
 
         sim_label = ""
-        if playout_cap_p > 0:
-            sim_label = f" [sims={simulations}, fast={fast_cap}, p={playout_cap_p}]"
+        if playout_cap.p > 0:
+            sim_label = f" [sims={mcts.simulations}, fast={playout_cap.fast_cap}, p={playout_cap.p}]"
         else:
-            sim_label = f" [sims={simulations}]"
+            sim_label = f" [sims={mcts.simulations}]"
 
         generation = self.start_generation
 
@@ -579,28 +542,21 @@ class SelfPlayTrainer:
 
             mode_label = "MCTS"
             sim_label = (
-                f" [sims={simulations}, fast={fast_cap}, p={playout_cap_p}]"
-                if playout_cap_p > 0
-                else f" [sims={simulations}]"
+                f" [sims={mcts.simulations}, fast={playout_cap.fast_cap}, p={playout_cap.p}]"
+                if playout_cap.p > 0
+                else f" [sims={mcts.simulations}]"
+            )
+            rand_str = (
+                f"{opening.min}-{opening.max}" if opening.min != opening.max else str(opening.min)
             )
             opening_label = ""
             if opening_book:
-                rand_str = (
-                    f"{random_opening_moves[0]}-{random_opening_moves[1]}"
-                    if isinstance(random_opening_moves, tuple)
-                    else random_opening_moves
-                )
                 opening_label = (
                     f" [book={boardspace_frac:.0%} rand={rand_str}]"
-                    if random_opening_moves
+                    if opening.enabled()
                     else f" [book={boardspace_frac:.0%}]"
                 )
-            elif random_opening_moves:
-                rand_str = (
-                    f"{random_opening_moves[0]}-{random_opening_moves[1]}"
-                    if isinstance(random_opening_moves, tuple)
-                    else random_opening_moves
-                )
+            elif opening.enabled():
                 opening_label = f" [rand={rand_str}]"
             print(
                 f"\n=== {_cc(self.model_name)}  Gen {generation} [{mode_label}]{sim_label}{opening_label}{elapsed_str} ==="
@@ -610,11 +566,7 @@ class SelfPlayTrainer:
             torch.cuda.empty_cache()
             _print_vram("pre-play")
 
-            _book_opening_moves = (
-                random_opening_moves[1]
-                if isinstance(random_opening_moves, tuple)
-                else random_opening_moves
-            )
+            _book_opening_moves = opening.max
             opening_sequences = (
                 _make_opening_sequences(
                     games_per_gen,
@@ -628,26 +580,18 @@ class SelfPlayTrainer:
 
             sp = RustParallelSelfPlay(
                 model=self.model,
+                mcts=mcts,
+                playout_cap=playout_cap,
+                opening=opening,
                 device=self.device,
-                simulations=simulations,
                 max_moves=max_moves,
-                temperature=temperature,
-                temp_threshold=temp_threshold,
-                c_puct=c_puct,
-                dir_alpha=dir_alpha,
-                dir_epsilon=dir_epsilon,
                 resign_threshold=resign_threshold,
                 resign_moves=resign_moves,
                 resign_min_moves=resign_min_moves,
                 calibration_frac=calibration_frac,
-                playout_cap_p=playout_cap_p,
-                fast_cap=fast_cap,
-                play_batch_size=play_batch_size,
                 fixed_batch_size=fixed_batch_size,
-                random_opening_moves=random_opening_moves,
                 skip_timeout_games=skip_timeout_games,
                 use_heuristic=use_heuristic,
-                draw_contempt=draw_contempt,
                 bot_frac=bot_frac,
                 bot_depth=bot_depth,
             )
@@ -912,7 +856,7 @@ class SelfPlayTrainer:
             )
             with open(log_path, "a") as f:
                 f.write(
-                    f"{generation},MCTS,{simulations},"
+                    f"{generation},MCTS,{mcts.simulations},"
                     f"{wins_w},{wins_b},"
                     f"{draws_total},{draws_repetition},{draws_timeout},{draws_real},"
                     f"{resignations},{total_positions},"
@@ -945,7 +889,7 @@ class SelfPlayTrainer:
                     eval_sims = (
                         checkpoint_eval_simulations
                         if checkpoint_eval_simulations is not None
-                        else simulations
+                        else mcts.simulations
                     )
                     eval_games = (
                         checkpoint_eval_games
