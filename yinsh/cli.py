@@ -60,7 +60,7 @@ def main():
     t.add_argument("--c-puct", type=float, default=1.5)
     t.add_argument("--dir-alpha", type=float, default=0.3)
     t.add_argument("--dir-epsilon", type=float, default=0.25)
-    t.add_argument("--play-batch-size", type=int, default=8,
+    t.add_argument("--play-batch-sims", type=int, default=8,
                    help="MCTS rounds per inference batch (× active games)")
     t.add_argument("--comment", type=str, default="")
     t.add_argument("--augment-symmetry", action=argparse.BooleanOptionalAction, default=True,
@@ -97,7 +97,7 @@ def main():
     b.add_argument("--games", type=int, default=20)
     b.add_argument("--simulations", type=int, default=None)
     b.add_argument("--device", type=str, default="cuda")
-    b.add_argument("--play-batch-size", type=int, default=8)
+    b.add_argument("--play-batch-sims", type=int, default=8)
 
     # play
     p = sub.add_parser("play", help="REPL: list valid moves and play interactively")
@@ -130,7 +130,7 @@ def main():
             dir_epsilon=args.dir_epsilon,
             forced_playouts=args.forced_playouts,
             draw_contempt=args.draw_contempt,
-            play_batch_size=args.play_batch_size,
+            play_batch_size=args.play_batch_sims,
             temperature=args.temperature,
             temp_threshold=args.temp_threshold,
         )
@@ -162,7 +162,7 @@ def main():
             num_games=args.games,
             simulations=args.simulations,
             device=args.device,
-            play_batch_size=args.play_batch_size,
+            play_batch_size=args.play_batch_sims,
         )
     elif args.command == "play":
         _run_play(args)

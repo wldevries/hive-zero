@@ -148,7 +148,7 @@ uv run zertz train \
   --games 100 --simulations 400 \
   --device cuda \
   --playout-cap-p 0.25 \
-  --play-batch-size 2 \
+  --play-batch-sims 2 \
   --temp-threshold 30 \
   --comment "my run"
 ```
@@ -164,7 +164,7 @@ Key training flags:
 | `--simulations` | 100 | MCTS simulations per move |
 | `--playout-cap-p` | 0.0 | Fraction of full-search turns (KataGo-style) |
 | `--fast-cap` | 20 | Simulations for fast-search turns |
-| `--play-batch-size` | 2 | MCTS rounds per GPU inference call |
+| `--play-batch-sims` | 2 | MCTS rounds per GPU inference call |
 | `--temp-threshold` | 30 | Move number after which temperature drops to 0 |
 | `--augment-symmetry` / `--no-augment-symmetry` | on | Apply D6 hex symmetry augmentation (12× data) |
 | `--lr` | 0.02 | Learning rate |
@@ -213,7 +213,7 @@ uv run yinsh train \
   --blocks 8 --channels 96 \
   --games 16 --simulations 200 \
   --device cuda \
-  --play-batch-size 8
+  --play-batch-sims 8
 ```
 
 Key training flags:
@@ -229,7 +229,7 @@ Key training flags:
 | `--replay-window` | 8 | Replay buffer size (in generations) |
 | `--playout-cap-p` | 0.0 | Fraction of full-search turns (KataGo-style) |
 | `--fast-cap` | 30 | Simulations for fast-search turns |
-| `--play-batch-size` | 8 | MCTS rounds per GPU inference call |
+| `--play-batch-sims` | 8 | MCTS rounds per GPU inference call |
 | `--temp-threshold` | 20 | Move number after which temperature drops to 0 |
 | `--augment-symmetry` / `--no-augment-symmetry` | on | Apply D6 hex symmetry augmentation |
 | `--lr` | 0.02 | Learning rate |

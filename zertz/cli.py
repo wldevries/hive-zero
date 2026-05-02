@@ -69,11 +69,11 @@ def main():
     train_parser.add_argument("--dir-epsilon", type=float, default=0.25,
                               help="Dirichlet noise weight (default: 0.25)")
     train_parser.add_argument(
-        "--play-batch-size",
+        "--play-batch-sims",
         type=int,
         default=2,
         help="MCTS simulation rounds per GPU inference call. "
-        "Actual batch = play_batch_size × active_games.",
+        "Actual batch = play_batch_sims × active_games.",
     )
     train_parser.add_argument("--comment", type=str, default="")
     train_parser.add_argument("--augment-symmetry", action=argparse.BooleanOptionalAction, default=True,
@@ -106,7 +106,7 @@ def main():
     battle_parser.add_argument("--games", type=int, default=100, help="Number of games to play (default: 100)")
     battle_parser.add_argument("--simulations", type=int, default=None, help="Simulations per move (default: from checkpoint metadata or 800)")
     battle_parser.add_argument("--device", type=str, default="cuda")
-    battle_parser.add_argument("--play-batch-size", type=int, default=2)
+    battle_parser.add_argument("--play-batch-sims", type=int, default=2)
 
     args = parser.parse_args()
 
@@ -140,7 +140,7 @@ def main():
             dir_epsilon=args.dir_epsilon,
             forced_playouts=args.forced_playouts,
             draw_contempt=args.draw_contempt,
-            play_batch_size=args.play_batch_size,
+            play_batch_size=args.play_batch_sims,
             temperature=args.temperature,
             temp_threshold=args.temp_threshold,
         )
@@ -169,7 +169,7 @@ def main():
             num_games=args.games,
             simulations=args.simulations,
             device=args.device,
-            play_batch_size=args.play_batch_size,
+            play_batch_size=args.play_batch_sims,
         )
     else:
         parser.print_help()

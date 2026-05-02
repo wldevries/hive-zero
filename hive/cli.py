@@ -158,7 +158,7 @@ def main():
         "(batch ≈ N × active games). Default 1 = flush every round.",
     )
     train_parser.add_argument(
-        "--play-batch-size",
+        "--fixed-batch-size",
         type=int,
         default=None,
         help="Fixed inference batch size in positions (for QNN/NPU). "
@@ -469,10 +469,10 @@ def main():
         help="PUCT exploration constant (default: 1.5)",
     )
     battle_parser.add_argument(
-        "--play-batch-size",
+        "--play-batch-sims",
         type=int,
         default=1,
-        help="Leaves batched per MCTS inference call (default: 1)",
+        help="MCTS sim rounds per inference call (default: 1)",
     )
 
     args = parser.parse_args()
@@ -546,7 +546,7 @@ def main():
                 device=_resolve_device(args.device),
                 max_moves=args.max_moves,
                 c_puct=args.c_puct,
-                play_batch_size=args.play_batch_size,
+                play_batch_size=args.play_batch_sims,
             )
 
     elif args.command == "train":
@@ -576,8 +576,6 @@ def main():
             dir_epsilon=args.dir_epsilon,
             forced_playouts=args.forced_playouts,
             draw_contempt=args.draw_contempt,
-            # Hive's --play-batch-sims is the leaf-batching round count; --play-batch-size
-            # is a different flag on this CLI that maps to fixed_batch_size below.
             play_batch_size=args.play_batch_sims,
             temperature=args.temperature,
             temp_threshold=args.temp_threshold,
@@ -597,7 +595,7 @@ def main():
             checkpoint_every=args.checkpoint_every,
             checkpoint_eval=args.checkpoint_eval,
             replay_window=args.replay_window,
-            fixed_batch_size=args.play_batch_size,
+            fixed_batch_size=args.fixed_batch_size,
             resign_threshold=args.resign_threshold,
             resign_min_moves=args.resign_min_moves,
             opening_games_csv=args.opening_book,
