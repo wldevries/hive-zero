@@ -285,18 +285,27 @@ impl PyZertzSelfPlaySession {
             }) as Box<dyn Fn(u32, u32, u32, u32) + Send + Sync>
         });
 
+        let mcts = core_game::selfplay_config::MctsConfig {
+            simulations: self.simulations,
+            c_puct: self.c_puct,
+            dir_alpha: self.dir_alpha,
+            dir_epsilon: self.dir_epsilon,
+            forced_playouts: self.forced_playouts,
+            // Not yet exposed as a Python kwarg; wiring is in place so the
+            // CLI can opt in by adding a field to PyZertzSelfPlaySession.
+            draw_contempt: 0.0,
+            play_batch_size: self.play_batch_size,
+            temperature: self.temperature,
+            temp_threshold: self.temp_threshold,
+        };
+        let playout_cap = core_game::selfplay_config::PlayoutCapConfig {
+            p: self.playout_cap_p,
+            fast_cap: self.fast_cap,
+        };
         let r = play_selfplay_core(
             self.num_games,
-            self.simulations,
-            self.temperature,
-            self.temp_threshold,
-            self.c_puct,
-            self.dir_alpha,
-            self.dir_epsilon,
-            self.play_batch_size,
-            self.playout_cap_p,
-            self.fast_cap,
-            self.forced_playouts,
+            mcts,
+            playout_cap,
             eval_core,
             progress_core,
         ).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;

@@ -8,6 +8,7 @@ use crate::move_encoding::{encode_distribution_nn, NN_POLICY_SIZE};
 use core_game::game::{Game, Outcome, Player};
 use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::{MctsSearch, CpuctStrategy, ForcedExploration};
+use core_game::selfplay_config::{MctsConfig, PlayoutCapConfig};
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 
@@ -302,28 +303,21 @@ pub struct SelfPlayResult {
 /// Core self-play implementation factoring out business logic from Python bindings.
 pub fn play_selfplay_core(
     num_games: usize,
-    simulations: usize,
-    temperature: f32,
-    temp_threshold: u32,
-    c_puct: f32,
-    dir_alpha: f32,
-    dir_epsilon: f32,
-    play_batch_size: usize,
-    playout_cap_p: f32,
-    fast_cap: usize,
-    forced_playouts: bool,
+    mcts: MctsConfig,
+    playout_cap: PlayoutCapConfig,
     eval_fn: EvalFn,
     progress_fn: Option<ProgressFn>,
 ) -> Result<SelfPlayResult, String> {
-    let use_playout_cap = playout_cap_p > 0.0;
+    let use_playout_cap = playout_cap.enabled();
 
     let mut boards: Vec<ZertzBoard> = (0..num_games).map(|_| ZertzBoard::default()).collect();
-    let arena_capacity = simulations + 64;
+    let arena_capacity = mcts.simulations + 64;
     let mut searches: Vec<MctsSearch<ZertzBoard>> = (0..num_games).map(|_| {
         let mut s = MctsSearch::new(arena_capacity);
-        s.params.cpuct_strategy = CpuctStrategy::Constant { c_puct };
-        s.params.max_children = simulations;
-        if forced_playouts {
+        s.params.cpuct_strategy = CpuctStrategy::Constant { c_puct: mcts.c_puct };
+        s.params.max_children = mcts.simulations;
+        s.params.draw_contempt = mcts.draw_contempt;
+        if mcts.forced_playouts {
             s.params.forced_exploration = ForcedExploration::Soft { selection_k: 0.5, pruning_k: 2.0 };
         }
         s
@@ -366,9 +360,9 @@ pub fn play_selfplay_core(
 
         // Decide full vs fast per game
         let is_full: Vec<bool> = if use_playout_cap {
-            (0..n).map(|_| rng.random::<f32>() < playout_cap_p).collect()
+            (0..n).map(|_| rng.random::<f32>() < playout_cap.p).collect()
         } else { vec![true; n] };
-        let sim_caps: Vec<usize> = is_full.iter().map(|&f| if f { simulations } else { fast_cap }).collect();
+        let sim_caps: Vec<usize> = is_full.iter().map(|&f| if f { mcts.simulations } else { playout_cap.fast_cap }).collect();
         full_search_turns += is_full.iter().filter(|&&f| f).count() as u32;
 
         // Encode positions into the training buffer for ALL active games (warm or cold).
@@ -411,7 +405,7 @@ pub fn play_selfplay_core(
         // Apply fresh Dirichlet noise to every full-search root (both warm and cold).
         for (i, &gi) in mcts_games.iter().enumerate() {
             if is_full[i] {
-                searches[gi].apply_root_dirichlet(dir_alpha, dir_epsilon);
+                searches[gi].apply_root_dirichlet(mcts.dir_alpha, mcts.dir_epsilon);
             }
         }
 
@@ -421,7 +415,7 @@ pub fn play_selfplay_core(
             let mut leaf_ids: Vec<NodeId> = Vec::new();
             let mut leaf_game_idx: Vec<usize> = Vec::new();
 
-            for _round in 0..play_batch_size {
+            for _round in 0..mcts.play_batch_size {
                 let mut any_collected = false;
                 for (i, &gi) in mcts_games.iter().enumerate() {
                     if game_sims[i] >= sim_caps[i] { continue; }
@@ -473,8 +467,8 @@ pub fn play_selfplay_core(
 
             let mv = if dist.is_empty() {
                 ZertzMove::Pass
-            } else if move_counts[gi] < temp_threshold && temperature > 0.01 {
-                let weights: Vec<f32> = dist.iter().map(|(_, p)| p.powf(1.0 / temperature)).collect();
+            } else if move_counts[gi] < mcts.temp_threshold && mcts.temperature > 0.01 {
+                let weights: Vec<f32> = dist.iter().map(|(_, p)| p.powf(1.0 / mcts.temperature)).collect();
                 let wi = WeightedIndex::new(&weights).map_err(|e| e.to_string())?;
                 dist[wi.sample(&mut rng)].0
             } else {
