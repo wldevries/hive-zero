@@ -2,40 +2,23 @@ use numpy::{PyArray1, PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
+use core_game::selfplay_config::{MctsConfig, OpeningRandomConfig, PlayoutCapConfig};
+
 use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE, f32_to_bf16};
 use hive_game::game::Game;
 use hive_game::move_encoding;
 use hive_game::piece::PieceColor;
-use hive_game::search::{self, play_battle_core, play_selfplay_core};
+use hive_game::search::{self, play_battle_core, play_selfplay_core, SelfPlayConfig};
 
 use crate::inference::HiveInference;
 
-struct SelfPlayConfig {
+/// Binding-layer wrapper: holds the hive-game `SelfPlayConfig` plus
+/// session-only fields (num_games, fixed_batch_size) that don't belong
+/// inside `play_selfplay_core`'s config.
+struct SessionConfig {
     num_games: usize,
-    simulations: usize,
-    max_moves: u32,
-    temperature: f32,
-    temp_threshold: u32,
-    playout_cap_p: f32,
-    fast_cap: usize,
-    forced_playouts: bool,
-    c_puct: f32,
-    dir_alpha: f32,
-    dir_epsilon: f32,
-    leaf_batch_size: usize,
-    resign_threshold: Option<f32>,
-    resign_moves: u32,
-    resign_min_moves: u32,
-    calibration_frac: f32,
-    random_opening_moves_min: u32,
-    random_opening_moves_max: u32,
-    skip_timeout_games: bool,
-    use_heuristic: bool,
-    grid_size: usize,
+    config: SelfPlayConfig,
     fixed_batch_size: Option<usize>,
-    draw_contempt: f32,
-    bot_frac: f32,
-    bot_depth: u32,
 }
 
 fn call_python_eval_bf16(
@@ -455,7 +438,7 @@ impl PySelfPlayResult {
 
 #[pyclass(name = "RustSelfPlaySession")]
 pub struct PySelfPlaySession {
-    config: SelfPlayConfig,
+    session: SessionConfig,
 }
 
 #[pymethods]
@@ -516,32 +499,37 @@ impl PySelfPlaySession {
         bot_depth: u32,
     ) -> Self {
         PySelfPlaySession {
-            config: SelfPlayConfig {
+            session: SessionConfig {
                 num_games,
-                simulations,
-                max_moves,
-                temperature,
-                temp_threshold,
-                playout_cap_p,
-                fast_cap,
-                forced_playouts,
-                c_puct,
-                dir_alpha,
-                dir_epsilon,
-                leaf_batch_size,
-                resign_threshold,
-                resign_moves,
-                resign_min_moves,
-                calibration_frac,
-                random_opening_moves_min,
-                random_opening_moves_max,
-                skip_timeout_games,
-                use_heuristic,
-                grid_size,
                 fixed_batch_size,
-                draw_contempt,
-                bot_frac,
-                bot_depth,
+                config: SelfPlayConfig {
+                    mcts: MctsConfig {
+                        simulations,
+                        c_puct,
+                        dir_alpha,
+                        dir_epsilon,
+                        forced_playouts,
+                        draw_contempt,
+                        play_batch_size: leaf_batch_size,
+                        temperature,
+                        temp_threshold,
+                    },
+                    playout_cap: PlayoutCapConfig { p: playout_cap_p, fast_cap },
+                    opening: OpeningRandomConfig {
+                        min: random_opening_moves_min,
+                        max: random_opening_moves_max,
+                    },
+                    max_moves,
+                    resign_threshold,
+                    resign_moves,
+                    resign_min_moves,
+                    calibration_frac,
+                    skip_timeout_games,
+                    use_heuristic,
+                    grid_size,
+                    bot_frac,
+                    bot_depth,
+                },
             },
         }
     }
@@ -555,7 +543,9 @@ impl PySelfPlaySession {
         opening_sequences: Option<Vec<Vec<String>>>,
         onnx_path: Option<String>,
     ) -> PyResult<PySelfPlayResult> {
-        let cfg = &self.config;
+        let num_games = self.session.num_games;
+        let fixed_batch_size = self.session.fixed_batch_size;
+        let grid_size = self.session.config.grid_size;
         let opening_sequences = opening_sequences.unwrap_or_default();
         let progress_core = make_selfplay_progress(py, progress_fn);
 
@@ -563,7 +553,7 @@ impl PySelfPlaySession {
             let mut engine = crate::inference::HiveOrtEngine::load(&path)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let core_eval: search::EvalFn<'_> = Box::new(move |boards, reserves, actual| {
-                let target = cfg.fixed_batch_size.unwrap_or(actual);
+                let target = fixed_batch_size.unwrap_or(actual);
                 infer_padded(
                     |chunk_boards, chunk_reserves, batch_size| {
                         let result = engine
@@ -572,7 +562,7 @@ impl PySelfPlaySession {
                                 chunk_reserves,
                                 batch_size,
                                 NUM_CHANNELS,
-                                cfg.grid_size,
+                                grid_size,
                                 RESERVE_SIZE,
                             )
                             .map_err(|e| e.to_string())?;
@@ -591,34 +581,12 @@ impl PySelfPlaySession {
                     reserves,
                     actual,
                     target,
-                    cfg.grid_size,
+                    grid_size,
                 )
             });
             play_selfplay_core(
-                cfg.num_games,
-                cfg.simulations,
-                cfg.max_moves,
-                cfg.temperature,
-                cfg.temp_threshold,
-                cfg.playout_cap_p,
-                cfg.fast_cap,
-                cfg.forced_playouts,
-                cfg.c_puct,
-                cfg.dir_alpha,
-                cfg.dir_epsilon,
-                cfg.leaf_batch_size,
-                cfg.resign_threshold,
-                cfg.resign_moves,
-                cfg.resign_min_moves,
-                cfg.calibration_frac,
-                cfg.random_opening_moves_min,
-                cfg.random_opening_moves_max,
-                cfg.skip_timeout_games,
-                cfg.use_heuristic,
-                cfg.grid_size,
-                cfg.draw_contempt,
-                cfg.bot_frac,
-                cfg.bot_depth,
+                num_games,
+                self.session.config.clone(),
                 core_eval,
                 progress_core,
                 opening_sequences,
@@ -628,7 +596,7 @@ impl PySelfPlaySession {
                 pyo3::exceptions::PyValueError::new_err("eval_fn is required when onnx_path is not provided")
             })?;
             let core_eval: search::EvalFn<'_> = Box::new(move |boards, reserves, actual| {
-                let target = cfg.fixed_batch_size.unwrap_or(actual);
+                let target = fixed_batch_size.unwrap_or(actual);
                 infer_padded(
                     |chunk_boards, chunk_reserves, batch_size| {
                         call_python_eval_bf16(
@@ -637,41 +605,19 @@ impl PySelfPlaySession {
                             chunk_boards,
                             chunk_reserves,
                             batch_size,
-                            cfg.grid_size,
+                            grid_size,
                         )
                     },
                     boards,
                     reserves,
                     actual,
                     target,
-                    cfg.grid_size,
+                    grid_size,
                 )
             });
             play_selfplay_core(
-                cfg.num_games,
-                cfg.simulations,
-                cfg.max_moves,
-                cfg.temperature,
-                cfg.temp_threshold,
-                cfg.playout_cap_p,
-                cfg.fast_cap,
-                cfg.forced_playouts,
-                cfg.c_puct,
-                cfg.dir_alpha,
-                cfg.dir_epsilon,
-                cfg.leaf_batch_size,
-                cfg.resign_threshold,
-                cfg.resign_moves,
-                cfg.resign_min_moves,
-                cfg.calibration_frac,
-                cfg.random_opening_moves_min,
-                cfg.random_opening_moves_max,
-                cfg.skip_timeout_games,
-                cfg.use_heuristic,
-                cfg.grid_size,
-                cfg.draw_contempt,
-                cfg.bot_frac,
-                cfg.bot_depth,
+                num_games,
+                self.session.config.clone(),
                 core_eval,
                 progress_core,
                 opening_sequences,
@@ -690,22 +636,24 @@ impl PySelfPlaySession {
         eval_fn2: &Bound<'_, PyAny>,
         progress_fn: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyHiveBattleResult> {
-        let cfg = &self.config;
+        let session = &self.session;
+        let cfg = &session.config;
+        let grid_size = cfg.grid_size;
         let progress_core = make_battle_progress(py, progress_fn);
         let core_eval1: search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
-            call_python_eval_bf16(py, eval_fn1, boards, reserves, batch_size, cfg.grid_size)
+            call_python_eval_bf16(py, eval_fn1, boards, reserves, batch_size, grid_size)
         });
         let core_eval2: search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
-            call_python_eval_bf16(py, eval_fn2, boards, reserves, batch_size, cfg.grid_size)
+            call_python_eval_bf16(py, eval_fn2, boards, reserves, batch_size, grid_size)
         });
 
         let result = play_battle_core(
-            cfg.num_games,
-            cfg.simulations,
+            session.num_games,
+            cfg.mcts.simulations,
             cfg.max_moves,
-            cfg.c_puct,
-            cfg.leaf_batch_size,
-            cfg.grid_size,
+            cfg.mcts.c_puct,
+            cfg.mcts.play_batch_size,
+            grid_size,
             core_eval1,
             core_eval2,
             progress_core,

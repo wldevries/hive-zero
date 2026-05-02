@@ -6,6 +6,33 @@ use rayon::prelude::*;
 use core_game::game::{Game as GameTrait, Outcome, Player, PolicyIndex};
 use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::{CpuctStrategy, ForcedExploration, MctsSearch, RootNoise, SearchParams};
+use core_game::selfplay_config::{MctsConfig, OpeningRandomConfig, PlayoutCapConfig};
+
+/// Self-play config for Hive. Composes the shared cross-game structs as
+/// sub-fields plus Hive-specific knobs (resignation, calibration, max-moves
+/// cap, alphabeta-bot opponent, heuristic value) that the other games don't
+/// support.
+#[derive(Clone, Debug)]
+pub struct SelfPlayConfig {
+    pub mcts: MctsConfig,
+    pub playout_cap: PlayoutCapConfig,
+    pub opening: OpeningRandomConfig,
+    // Hive-specific:
+    pub max_moves: u32,
+    pub resign_threshold: Option<f32>,
+    pub resign_moves: u32,
+    pub resign_min_moves: u32,
+    /// Fraction of games that bypass resignation and play to completion to
+    /// measure resignation false-positive rate.
+    pub calibration_frac: f32,
+    pub skip_timeout_games: bool,
+    pub use_heuristic: bool,
+    pub grid_size: usize,
+    /// Fraction of games where one side plays via alphabeta `bot_depth` rather
+    /// than the NN — a curriculum-style opponent for early generations.
+    pub bot_frac: f32,
+    pub bot_depth: u32,
+}
 use core_game::symmetry::{D6Symmetry, Symmetry};
 
 use crate::board_encoding::{self, NUM_CHANNELS, RESERVE_SIZE};
@@ -214,33 +241,43 @@ fn mean_std(sum: f64, sum_sq: f64, count: u64) -> (f32, f32) {
 
 pub fn play_selfplay_core(
     num_games: usize,
-    simulations: usize,
-    max_moves: u32,
-    temperature: f32,
-    temp_threshold: u32,
-    playout_cap_p: f32,
-    fast_cap: usize,
-    forced_playouts: bool,
-    c_puct: f32,
-    dir_alpha: f32,
-    dir_epsilon: f32,
-    leaf_batch_size: usize,
-    resign_threshold: Option<f32>,
-    resign_moves: u32,
-    resign_min_moves: u32,
-    calibration_frac: f32,
-    random_opening_moves_min: u32,
-    random_opening_moves_max: u32,
-    skip_timeout_games: bool,
-    use_heuristic: bool,
-    grid_size: usize,
-    draw_contempt: f32,
-    bot_frac: f32,
-    bot_depth: u32,
+    config: SelfPlayConfig,
     mut eval_fn: EvalFn<'_>,
     mut progress_fn: Option<SelfPlayProgressFn<'_>>,
     opening_sequences: Vec<Vec<String>>,
 ) -> Result<SelfPlayResult, String> {
+    // Destructure once at the top so the (long) body can keep its original
+    // local variable names. MctsConfig/PlayoutCapConfig/OpeningRandomConfig
+    // are Copy; SelfPlayConfig is moved.
+    let SelfPlayConfig {
+        mcts,
+        playout_cap,
+        opening,
+        max_moves,
+        resign_threshold,
+        resign_moves,
+        resign_min_moves,
+        calibration_frac,
+        skip_timeout_games,
+        use_heuristic,
+        grid_size,
+        bot_frac,
+        bot_depth,
+    } = config;
+    let MctsConfig {
+        simulations,
+        c_puct,
+        dir_alpha,
+        dir_epsilon,
+        forced_playouts,
+        draw_contempt,
+        play_batch_size: leaf_batch_size,
+        temperature,
+        temp_threshold,
+    } = mcts;
+    let PlayoutCapConfig { p: playout_cap_p, fast_cap } = playout_cap;
+    let OpeningRandomConfig { min: random_opening_moves_min, max: random_opening_moves_max } = opening;
+
     let use_playout_cap = playout_cap_p > 0.0;
     let board_size = NUM_CHANNELS * grid_size * grid_size;
     let policy_size = move_encoding::policy_size(grid_size);

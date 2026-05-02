@@ -9,7 +9,7 @@
 //! and the binding layer unpacks them into these structs.
 
 /// MCTS-related knobs that every game's self-play loop uses identically.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct MctsConfig {
     pub simulations: usize,
     pub c_puct: f32,
@@ -28,7 +28,7 @@ pub struct MctsConfig {
 /// each turn flips a coin: with probability `p`, run the full `simulations`
 /// budget (full-search turn → trains policy + value); else run `fast_cap`
 /// sims (value-only training).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PlayoutCapConfig {
     pub p: f32,
     pub fast_cap: usize,
@@ -43,7 +43,7 @@ impl PlayoutCapConfig {
 /// Opening-move randomization: each game plays a uniform random count
 /// in `[min, max]` of random moves before MCTS takes over. `max == 0`
 /// disables it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct OpeningRandomConfig {
     pub min: u32,
     pub max: u32,
