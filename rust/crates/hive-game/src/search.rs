@@ -168,7 +168,13 @@ pub fn best_move_core(
     let (root_policy, _root_value, _root_draw) = eval_fn(&board_buf, &reserve_buf, 1)?;
 
     search.init(game, &root_policy);
-    search.apply_root_dirichlet(0.3, 0.25);
+    // Honor the caller's RootNoise setting. PyHiveGame::best_move passes
+    // RootNoise::None so UHP `bestmove` and one-shot best_move queries are
+    // deterministic; self-play and any other caller can opt into Dirichlet
+    // by setting params.root_noise themselves.
+    if let RootNoise::Dirichlet { alpha, epsilon } = params.root_noise {
+        search.apply_root_dirichlet(alpha, epsilon);
+    }
 
     let mut done = 0usize;
     while done < simulations {

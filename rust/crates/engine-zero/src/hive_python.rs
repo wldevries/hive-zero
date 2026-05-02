@@ -361,7 +361,9 @@ impl PyGame {
 
     /// Run MCTS for `simulations` sims and return the best move as a UHP string.
     /// eval_fn(board_4d[N, C, H, W], reserve[N, R]) -> (policy[N, P], wdl[N, 3])
-    #[pyo3(signature = (eval_fn, simulations=800, c_puct=1.5, draw_contempt=0.0))]
+    /// `dir_alpha`/`dir_epsilon` default to 0 (no noise → deterministic). Set
+    /// both >0 to add Dirichlet noise at the root for diversity.
+    #[pyo3(signature = (eval_fn, simulations=800, c_puct=1.5, draw_contempt=0.0, dir_alpha=0.0, dir_epsilon=0.0))]
     fn best_move(
         &mut self,
         _py: Python<'_>,
@@ -369,6 +371,8 @@ impl PyGame {
         simulations: usize,
         c_puct: f32,
         draw_contempt: f32,
+        dir_alpha: f32,
+        dir_epsilon: f32,
     ) -> PyResult<String> {
         if self.game.is_game_over() {
             return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
@@ -381,10 +385,15 @@ impl PyGame {
         let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
             call_python_eval(eval_fn, boards, reserves, batch_size, gs)
         });
+        let root_noise = if dir_alpha > 0.0 && dir_epsilon > 0.0 {
+            RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon }
+        } else {
+            RootNoise::None
+        };
         let mut search_params = SearchParams::new(
             CpuctStrategy::Constant { c_puct },
             ForcedExploration::None,
-            RootNoise::None,
+            root_noise,
         );
         search_params.draw_contempt = draw_contempt;
         let best = best_move_core(&self.game, simulations, &search_params, core_eval)
@@ -417,13 +426,17 @@ impl PyGame {
 
     /// Run MCTS using a pre-loaded ORT/QNN session (no Python eval callback).
     /// Use `HiveOrtSession` to load the session once; reuse it across calls.
-    #[pyo3(signature = (ort_session, simulations=800, c_puct=1.5, draw_contempt=0.0))]
+    /// `dir_alpha`/`dir_epsilon` default to 0 (no noise → deterministic). Set
+    /// both >0 to add Dirichlet noise at the root for diversity.
+    #[pyo3(signature = (ort_session, simulations=800, c_puct=1.5, draw_contempt=0.0, dir_alpha=0.0, dir_epsilon=0.0))]
     fn best_move_ort(
         &mut self,
         ort_session: &mut PyHiveOrtSession,
         simulations: usize,
         c_puct: f32,
         draw_contempt: f32,
+        dir_alpha: f32,
+        dir_epsilon: f32,
     ) -> PyResult<String> {
         if self.game.is_game_over() {
             return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
@@ -450,10 +463,15 @@ impl PyGame {
                 })
                 .map_err(|e| e.to_string())
         });
+        let root_noise = if dir_alpha > 0.0 && dir_epsilon > 0.0 {
+            RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon }
+        } else {
+            RootNoise::None
+        };
         let mut search_params = SearchParams::new(
             CpuctStrategy::Constant { c_puct },
             ForcedExploration::None,
-            RootNoise::None,
+            root_noise,
         );
         search_params.draw_contempt = draw_contempt;
         let best = best_move_core(&self.game, simulations, &search_params, core_eval)

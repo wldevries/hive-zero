@@ -390,7 +390,11 @@ def run_battle_mzinga(
                 turn_white = (game.turn_color == "w")
                 model_to_move = (turn_white == model_is_white)
                 if model_to_move:
-                    move = game.best_move(eval_fn, sims, c_puct)
+                    # Inject Dirichlet noise at the root so each game's opening
+                    # diverges; without this every game from the standard start
+                    # plays out identically (Mzinga's alpha-beta is deterministic).
+                    move = game.best_move(eval_fn, sims, c_puct,
+                                          dir_alpha=0.3, dir_epsilon=0.25)
                 else:
                     move = mzinga.bestmove()
                 if not move or move.startswith("err"):
