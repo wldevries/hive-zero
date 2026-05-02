@@ -1,8 +1,32 @@
 """CLI entry point for the Zertz AI engine."""
 
 import argparse
+import json
+import os
 
 from shared.lr_scheduler import lr_scheduler_from_string
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_HERE)
+_DEFAULT_MODEL_CONFIG_PATH = os.path.join(_REPO_ROOT, "configs", "zertz", "medium.json")
+
+_FALLBACK_MODEL_CONFIG = {
+    "channels": 96,
+    "num_blocks": 8,
+}
+
+
+def _load_model_config(path: str | None) -> dict:
+    """Load model config from a JSON file, falling back to the repo default."""
+    if path is None:
+        path = _DEFAULT_MODEL_CONFIG_PATH
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        if path != _DEFAULT_MODEL_CONFIG_PATH:
+            raise
+        return _FALLBACK_MODEL_CONFIG
 
 
 def main():
@@ -14,6 +38,9 @@ def main():
     train_parser.add_argument("--name", type=str, default="zertz",
                               help="Model name; all paths derived as models/{name}/")
     train_parser.add_argument("--device", type=str, default="cuda")
+    train_parser.add_argument("--model-config", type=str, default=None,
+                              help="Path to JSON model config (default: configs/zertz/medium.json)."
+                                   " Ignored when resuming from an existing checkpoint.")
     train_parser.add_argument("--generations", type=int, default=None)
     train_parser.add_argument(
         "--time-limit", type=float, default=None, help="Training time limit in minutes"
@@ -22,8 +49,6 @@ def main():
     train_parser.add_argument("--simulations", type=int, default=100)
     train_parser.add_argument("--epochs-per-gen", type=int, default=1)
     train_parser.add_argument("--training-batch-size", type=int, default=256)
-    train_parser.add_argument("--blocks", type=int, default=6)
-    train_parser.add_argument("--channels", type=int, default=64)
     train_parser.add_argument("--lr", type=float, default=0.02)
     train_parser.add_argument(
         "--lr-schedule", type=str, default=None,
@@ -98,8 +123,7 @@ def main():
         trainer = SelfPlayTrainer(
             name=args.name,
             device=args.device,
-            num_blocks=args.blocks,
-            channels=args.channels,
+            model_config=_load_model_config(args.model_config),
             lr=args.lr,
             lr_scheduler=lr_scheduler,
         )

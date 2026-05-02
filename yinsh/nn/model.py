@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from shared.nn.gpba import GlobalPoolBias
 from shared.nn.resblock import ResBlock
 
 # Mirror Rust constants — must match yinsh_game::board_encoding / move_encoding.
@@ -28,22 +29,53 @@ POLICY_CHANNELS = 59  # 5 single-move channels + 6 dirs × 9 distances
 POLICY_SIZE = POLICY_CHANNELS * GRID_SIZE * GRID_SIZE  # 7139
 
 
+def _describe_trunk(trunk_spec: list[dict]) -> str:
+    """Human-readable trunk summary, e.g. '8xres -> gpba -> 4xres'."""
+    parts = []
+    for spec in trunk_spec:
+        t = spec["type"]
+        c = spec.get("count", 1)
+        parts.append(f"{c}x{t}" if c > 1 else t)
+    return " -> ".join(parts)
+
+
 class YinshNet(nn.Module):
     """Trunk → flat policy head + WDL value head.
 
     Input:  board (B, 9, 11, 11), reserve (B, 6)
     Output: policy (B, 7139), wdl_logits (B, 3) raw — callers softmax as needed.
+
+    The trunk is a sequence of named layer types controlled by trunk_spec:
+        "res"  — ResBlock (standard 2-conv residual)
+        "gpba" — GlobalPoolBias (KataGo-style global context injection)
+
+    Each spec entry has a "type" field and an optional "count" (default 1).
+    Example: [{"type": "res", "count": 8}, {"type": "gpba"}, {"type": "res", "count": 4}]
     """
 
-    def __init__(self, num_blocks: int = 8, channels: int = 96):
+    def __init__(self, channels: int = 96, trunk: list[dict] | None = None):
         super().__init__()
         self.game = "yinsh"
+
+        trunk_spec = trunk or [{"type": "res", "count": 8}]
+        self.trunk_spec = trunk_spec
 
         self.input_conv = nn.Conv2d(
             NUM_CHANNELS + RESERVE_SIZE, channels, 3, padding=1, bias=False
         )
         self.input_bn = nn.BatchNorm2d(channels)
-        self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
+
+        self.trunk = nn.ModuleList()
+        for spec in trunk_spec:
+            layer_type = spec["type"]
+            count = spec.get("count", 1)
+            for _ in range(count):
+                if layer_type == "res":
+                    self.trunk.append(ResBlock(channels))
+                elif layer_type == "gpba":
+                    self.trunk.append(GlobalPoolBias(channels))
+                else:
+                    raise ValueError(f"Unknown trunk layer type: {layer_type!r}")
 
         # Single conv1x1 policy head producing 59 channels (matches the Rust
         # `move_encoding` layout: place_ring, remove_row×3, remove_ring,
@@ -62,8 +94,8 @@ class YinshNet(nn.Module):
         r = reserve.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, GRID_SIZE, GRID_SIZE)
         x = torch.cat([board, r], dim=1)
         x = F.relu(self.input_bn(self.input_conv(x)))
-        for block in self.res_blocks:
-            x = block(x)
+        for layer in self.trunk:
+            x = layer(x)
 
         policy_logits = self.policy_conv(x).reshape(x.size(0), -1)  # (B, 7139)
 
@@ -77,9 +109,13 @@ class YinshNet(nn.Module):
 
 def create_model(model_config: dict | None = None) -> YinshNet:
     cfg = model_config or {}
+    trunk = cfg.get("trunk")
+    # Backwards compat: a bare "num_blocks" maps to a single res-block run.
+    if trunk is None and "num_blocks" in cfg:
+        trunk = [{"type": "res", "count": cfg["num_blocks"]}]
     return YinshNet(
-        num_blocks=cfg.get("num_blocks", 8),
         channels=cfg.get("channels", 96),
+        trunk=trunk,
     )
 
 
@@ -90,8 +126,8 @@ def save_checkpoint(
         {
             "model_state_dict": model.state_dict(),
             "game": "yinsh",
-            "num_blocks": len(model.res_blocks),
             "channels": model.input_conv.out_channels,
+            "trunk": model.trunk_spec,
             "generation": generation,
             "metadata": metadata or {},
         },
@@ -101,9 +137,12 @@ def save_checkpoint(
 
 def load_checkpoint(path: str) -> tuple[YinshNet, dict]:
     ckpt = torch.load(path, weights_only=False)
-    num_blocks = ckpt.get("num_blocks", 8)
     channels = ckpt.get("channels", 96)
-    model = YinshNet(num_blocks=num_blocks, channels=channels)
+    trunk = ckpt.get("trunk")
+    # Backwards compat: older checkpoints stored "num_blocks" instead of a trunk spec.
+    if trunk is None and "num_blocks" in ckpt:
+        trunk = [{"type": "res", "count": ckpt["num_blocks"]}]
+    model = YinshNet(channels=channels, trunk=trunk)
     state_dict = ckpt.get("model_state_dict", ckpt)
     model_state = model.state_dict()
     compatible = {

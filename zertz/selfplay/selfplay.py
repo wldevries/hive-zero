@@ -23,7 +23,7 @@ _cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
 from shared.lr_scheduler import LRScheduler
 from shared.training_log import csv_comment
 
-from ..nn.model import ZertzNet, create_model, load_checkpoint, save_checkpoint, export_onnx
+from ..nn.model import ZertzNet, _describe_trunk, create_model, load_checkpoint, save_checkpoint, export_onnx
 from ..nn.training import Trainer, ZertzDataset
 
 LOG_HEADER = (
@@ -51,8 +51,7 @@ class SelfPlayTrainer:
         self,
         name: str = "zertz",
         device: str = "cuda",
-        num_blocks: int = 6,
-        channels: int = 64,
+        model_config: Optional[dict] = None,
         lr: float = 0.02,
         lr_scheduler: Optional[LRScheduler] = None,
     ):
@@ -68,19 +67,21 @@ class SelfPlayTrainer:
         if os.path.exists(self.model_path):
             self.model, ckpt = load_checkpoint(self.model_path)
             self.start_generation = ckpt.get("generation", 0)
-            blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
+            trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
                 f"Resumed from {self.model_path} (gen {self.start_generation}, "
-                f"{blocks} blocks, {ch} channels, {params / 1e6:.2f}M params)"
+                f"{ch}ch, {trunk_desc}, {params / 1e6:.2f}M params)"
             )
         else:
             os.makedirs(self.model_dir, exist_ok=True)
-            self.model = create_model(num_blocks=num_blocks, channels=channels)
+            self.model = create_model(model_config)
+            ch = self.model.input_conv.out_channels
+            trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"New model '{name}': {num_blocks} blocks, {channels} channels, "
+                f"New model '{name}': {ch}ch, {trunk_desc}, "
                 f"{params / 1e6:.2f}M params"
             )
 

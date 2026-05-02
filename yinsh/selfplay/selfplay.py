@@ -24,6 +24,7 @@ from shared.lr_scheduler import LRScheduler
 from shared.training_log import csv_comment
 
 from ..nn.model import (
+    _describe_trunk,
     create_model,
     export_onnx,
     load_checkpoint,
@@ -70,21 +71,21 @@ class SelfPlayTrainer:
         if os.path.exists(self.model_path):
             self.model, ckpt = load_checkpoint(self.model_path)
             self.start_generation = ckpt.get("generation", 0)
-            blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
+            trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
                 f"Resumed from {self.model_path} (gen {self.start_generation}, "
-                f"{blocks} blocks, {ch} channels, {params / 1e6:.2f}M params)"
+                f"{ch}ch, {trunk_desc}, {params / 1e6:.2f}M params)"
             )
         else:
             os.makedirs(self.model_dir, exist_ok=True)
             self.model = create_model(model_config)
-            blocks = len(self.model.res_blocks)
             ch = self.model.input_conv.out_channels
+            trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"New model '{name}': {blocks} blocks, {ch} channels, "
+                f"New model '{name}': {ch}ch, {trunk_desc}, "
                 f"{params / 1e6:.2f}M params"
             )
 

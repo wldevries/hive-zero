@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from shared.nn.gpba import GlobalPoolBias
 from shared.nn.resblock import ResBlock
 
 # From Rust board encoding
@@ -20,6 +21,16 @@ NUM_DIR_CHANNELS = 6  # one per hex direction (E, NE, NW, W, SW, SE)
 CAP_HEAD_SIZE = NUM_DIR_CHANNELS * GRID_SIZE * GRID_SIZE  # 294
 
 
+def _describe_trunk(trunk_spec: list[dict]) -> str:
+    """Human-readable trunk summary, e.g. '6xres -> gpba -> 6xres'."""
+    parts = []
+    for spec in trunk_spec:
+        t = spec["type"]
+        c = spec.get("count", 1)
+        parts.append(f"{c}x{t}" if c > 1 else t)
+    return " -> ".join(parts)
+
+
 class ZertzNet(nn.Module):
     """AlphaZero-style network for Zertz with direction-based capture policy head.
 
@@ -32,19 +43,39 @@ class ZertzNet(nn.Module):
     tensor before the trunk, so the trunk sees both board state and global
     context (supply, captures) through all residual blocks.
 
+    The trunk is a sequence of named layer types controlled by trunk_spec:
+        "res"  — ResBlock (standard 2-conv residual)
+        "gpba" — GlobalPoolBias (KataGo-style global context injection)
+
+    Each spec entry has a "type" field and an optional "count" (default 1).
+    Example: [{"type": "res", "count": 6}, {"type": "gpba"}, {"type": "res", "count": 2}]
+
     Policy heads are conv1x1 over the trunk (no flatten/FC).
     Rust MCTS scores each capture as cap_dir[direction][source_pos].
     """
 
-    def __init__(self, num_blocks: int = 6, channels: int = 64):
+    def __init__(self, channels: int = 64, trunk: list[dict] | None = None):
         super().__init__()
         self.game = "zertz"
+
+        trunk_spec = trunk or [{"type": "res", "count": 6}]
+        self.trunk_spec = trunk_spec
 
         # Input conv takes board channels + broadcast reserve
         self.input_conv = nn.Conv2d(NUM_CHANNELS + RESERVE_SIZE, channels, 3, padding=1, bias=False)
         self.input_bn = nn.BatchNorm2d(channels)
 
-        self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_blocks)])
+        self.trunk = nn.ModuleList()
+        for spec in trunk_spec:
+            layer_type = spec["type"]
+            count = spec.get("count", 1)
+            for _ in range(count):
+                if layer_type == "res":
+                    self.trunk.append(ResBlock(channels))
+                elif layer_type == "gpba":
+                    self.trunk.append(GlobalPoolBias(channels))
+                else:
+                    raise ValueError(f"Unknown trunk layer type: {layer_type!r}")
 
         # Policy heads (conv1x1 over trunk)
         self.policy_place = nn.Conv2d(channels, PLACE_HEAD_CHANNELS, 1)
@@ -70,8 +101,8 @@ class ZertzNet(nn.Module):
 
         # Trunk
         x = F.relu(self.input_bn(self.input_conv(x)))
-        for block in self.res_blocks:
-            x = block(x)
+        for layer in self.trunk:
+            x = layer(x)
 
         # Policy heads (conv1x1 over trunk, then flatten for Rust)
         place_logits = self.policy_place(x).view(x.size(0), -1)    # (B, 196)
@@ -86,8 +117,16 @@ class ZertzNet(nn.Module):
         return place_logits, cap_dir_logits, value
 
 
-def create_model(num_blocks: int = 6, channels: int = 64) -> ZertzNet:
-    return ZertzNet(num_blocks=num_blocks, channels=channels)
+def create_model(model_config: dict | None = None) -> ZertzNet:
+    cfg = model_config or {}
+    trunk = cfg.get("trunk")
+    # Backwards compat: a bare "num_blocks" maps to a single res-block run.
+    if trunk is None and "num_blocks" in cfg:
+        trunk = [{"type": "res", "count": cfg["num_blocks"]}]
+    return ZertzNet(
+        channels=cfg.get("channels", 64),
+        trunk=trunk,
+    )
 
 
 def save_checkpoint(model: ZertzNet, path: str, generation: int = 0,
@@ -95,8 +134,8 @@ def save_checkpoint(model: ZertzNet, path: str, generation: int = 0,
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "game": "zertz",
-        "num_blocks": len(model.res_blocks),
         "channels": model.input_conv.out_channels,
+        "trunk": model.trunk_spec,
         "generation": generation,
         "metadata": metadata or {},
     }
@@ -135,9 +174,12 @@ def export_onnx(model: ZertzNet, path: str):
 
 def load_checkpoint(path: str) -> tuple[ZertzNet, dict]:
     checkpoint = torch.load(path, weights_only=False)
-    num_blocks = checkpoint.get("num_blocks", 6)
     channels = checkpoint.get("channels", 64)
-    model = ZertzNet(num_blocks=num_blocks, channels=channels)
+    trunk = checkpoint.get("trunk")
+    # Backwards compat: older checkpoints stored "num_blocks" instead of a trunk spec.
+    if trunk is None and "num_blocks" in checkpoint:
+        trunk = [{"type": "res", "count": checkpoint["num_blocks"]}]
+    model = ZertzNet(channels=channels, trunk=trunk)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
     model_state = model.state_dict()
     compatible = {k: v for k, v in state_dict.items()
