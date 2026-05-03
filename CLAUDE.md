@@ -115,7 +115,7 @@ making the game finite by construction. When win rates converge to ~50/50, value
 balanced outcomes are harder to predict — fix is higher simulation count.
 
 ### Yinsh architecture
-- **Board encoding**: 8 channels on 11×11 grid (85-cell YINSH board). Channels 0-1: my/opp rings. Channels 2-3: my/opp markers. Channel 4: valid cell mask. Channels 5-7: phase flags (Setup, Normal, ClaimRow) broadcast over valid cells. Reserve vector of 6 floats: markers_in_pool/51, my_score/3, opp_score/3, my_rings_on_board/5, opp_rings_on_board/5, rings_placed_total/10. All current-player-relative.
+- **Board encoding**: 4 channels on 11×11 grid (85-cell YINSH board). Channels 0-1: my/opp rings. Channels 2-3: my/opp markers. Reserve vector of 9 floats: markers_in_pool/51, my_score/3, opp_score/3, my_rings_on_board/5, opp_rings_on_board/5, rings_placed_total/10, then phase one-hot (is_setup, is_normal, is_claimrow). All current-player-relative. The valid-cell mask is constant geometry, baked into the model as a non-trainable buffer and concatenated inside `forward()` so it doesn't have to be transferred per-sample.
 - **Policy encoding**: 59 channels × 11×11 = POLICY_SIZE 7139.
   - Channel 0: PlaceRing destination (Setup phase) — `PolicyIndex::Single`
   - Channels 1-3: ClaimRow row start × direction 0/1/2 (ClaimRow phase, joint partner A)

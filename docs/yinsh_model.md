@@ -4,8 +4,9 @@
 
 ```mermaid
 graph TD
-    BT["Board Tensor<br/>(B, 8, 11, 11)"]:::input --> CAT["Concat"]
-    RV["Reserve Vector<br/>(B, 6)"]:::input --> BC["Broadcast to (B, 6, 11, 11)"]
+    BT["Board Tensor<br/>(B, 4, 11, 11)"]:::input --> CAT["Concat"]
+    VM["Valid-cell mask<br/>(1, 1, 11, 11) buffer<br/>(broadcast to B)"] --> CAT
+    RV["Reserve Vector<br/>(B, 9)"]:::input --> BC["Broadcast to (B, 9, 11, 11)"]
     BC --> CAT
     CAT --> INPUT["(B, 14, 11, 11)"]
 
@@ -27,8 +28,8 @@ graph TD
 
 ## Input
 
-### Board tensor: `(B, 8, 11, 11)`
-8 spatial channels on an 11×11 grid (85 valid YINSH cells out of 121). Cell `(col, row)` maps to grid position `row * 11 + col`. All channels are current-player-relative.
+### Board tensor: `(B, 4, 11, 11)`
+4 spatial channels on an 11×11 grid (85 valid YINSH cells out of 121). Cell `(col, row)` maps to grid position `row * 11 + col`. All channels are current-player-relative.
 
 | Channel | Content |
 |---------|---------|
@@ -36,12 +37,13 @@ graph TD
 | 1 | Opponent rings |
 | 2 | My markers |
 | 3 | Opponent markers |
-| 4 | Valid cell mask (1.0 on the 85 board cells) |
-| 5 | Phase flag — Setup (broadcast on valid cells) |
-| 6 | Phase flag — Normal |
-| 7 | Phase flag — ClaimRow (joint row + ring removal pending) |
 
-### Reserve vector: `(B, 6)`
+The valid-cell mask and the phase one-hot used to be transferred per-sample. They've been moved off the wire to keep host→device traffic small:
+
+- **Valid-cell mask**: a constant 1×11×11 plane (1.0 on the 85 board cells), registered as a non-trainable buffer on the model and concatenated inside `forward` as a 5th input channel.
+- **Phase**: a one-hot scalar, now lives at the end of the reserve vector. It's broadcast spatially together with the rest of reserve, so the input conv still sees a per-cell phase plane.
+
+### Reserve vector: `(B, 9)`
 
 | Index | Content | Normalization |
 |-------|---------|---------------|
@@ -51,10 +53,13 @@ graph TD
 | 3 | My rings on board | / 5 |
 | 4 | Opponent rings on board | / 5 |
 | 5 | Total rings placed (setup progress) | / 10 |
+| 6 | Phase == Setup | one-hot |
+| 7 | Phase == Normal | one-hot |
+| 8 | Phase == ClaimRow | one-hot |
 
 ## Trunk
 
-Reserve vector is broadcast spatially and concatenated with the board tensor before the trunk: `(B, 8, 11, 11)` + `(B, 6, 11, 11)` → `(B, 14, 11, 11)`.
+Inside `forward`: the constant valid-cell mask is concatenated as a 5th channel, the 9-element reserve vector is broadcast spatially, and the three are concatenated: `(B, 4, 11, 11)` + `(B, 1, 11, 11)` + `(B, 9, 11, 11)` → `(B, 14, 11, 11)`.
 
 ```
 Input Conv2d(14 → C, 3x3, pad=1) + BN + ReLU

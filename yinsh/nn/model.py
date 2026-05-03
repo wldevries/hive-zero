@@ -25,11 +25,25 @@ from shared.nn.resblock import ResBlock
 from shared.nn.seresblock import SEResBlock
 
 # Mirror Rust constants — must match yinsh_game::board_encoding / move_encoding.
-NUM_CHANNELS = 8
+NUM_CHANNELS = 4
 GRID_SIZE = 11
-RESERVE_SIZE = 6
+RESERVE_SIZE = 9
 POLICY_CHANNELS = 59  # 5 single-move channels + 6 dirs × 9 distances
 POLICY_SIZE = POLICY_CHANNELS * GRID_SIZE * GRID_SIZE  # 7139
+
+# YINSH board geometry — mirror of `rust/crates/yinsh-game/src/hex.rs`.
+# The valid-cell mask is constant, so it's baked into the model as a buffer
+# rather than transferred per-sample.
+_YINSH_COL_STARTS = (1, 0, 0, 0, 0, 1, 1, 2, 3, 4, 6)
+_YINSH_COL_ENDS   = (4, 6, 7, 8, 9, 9, 10, 10, 10, 10, 9)
+
+
+def _build_valid_mask() -> torch.Tensor:
+    mask = torch.zeros(1, 1, GRID_SIZE, GRID_SIZE)
+    for col in range(GRID_SIZE):
+        for row in range(_YINSH_COL_STARTS[col], _YINSH_COL_ENDS[col] + 1):
+            mask[0, 0, row, col] = 1.0
+    return mask
 
 
 def _describe_trunk(trunk_spec: list[dict]) -> str:
@@ -45,8 +59,12 @@ def _describe_trunk(trunk_spec: list[dict]) -> str:
 class YinshNet(nn.Module):
     """Trunk → flat policy head + WDL value head.
 
-    Input:  board (B, 9, 11, 11), reserve (B, 6)
+    Input:  board (B, 4, 11, 11), reserve (B, 9)
     Output: policy (B, 7139), wdl_logits (B, 3) raw — callers softmax as needed.
+
+    Inside `forward` a constant 1×11×11 valid-cell mask is concatenated as an
+    extra channel, so the input conv sees 4 board + 1 mask + 9 reserve = 14
+    channels.
 
     The trunk is a sequence of named layer types controlled by trunk_spec:
         "res"   — ResBlock (standard 2-conv residual)
@@ -65,9 +83,10 @@ class YinshNet(nn.Module):
         self.trunk_spec = trunk_spec
 
         self.input_conv = nn.Conv2d(
-            NUM_CHANNELS + RESERVE_SIZE, channels, 3, padding=1, bias=False
+            NUM_CHANNELS + 1 + RESERVE_SIZE, channels, 3, padding=1, bias=False
         )
         self.input_bn = nn.BatchNorm2d(channels)
+        self.register_buffer("valid_mask", _build_valid_mask(), persistent=False)
 
         self.trunk = nn.ModuleList()
         for spec in trunk_spec:
@@ -95,10 +114,12 @@ class YinshNet(nn.Module):
         self.value_fc2 = nn.Linear(256, 3)
 
     def forward(self, board: torch.Tensor, reserve: torch.Tensor):
-        # Broadcast the 6-element reserve vector spatially so the trunk sees
-        # global state in every residual block.
+        # Broadcast the reserve vector spatially so the trunk sees global state
+        # in every residual block. The valid-cell mask is a constant plane.
+        b = board.size(0)
         r = reserve.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, GRID_SIZE, GRID_SIZE)
-        x = torch.cat([board, r], dim=1)
+        m = self.valid_mask.expand(b, -1, -1, -1)
+        x = torch.cat([board, m, r], dim=1)
         x = F.relu(self.input_bn(self.input_conv(x)))
         for layer in self.trunk:
             x = layer(x)

@@ -2,7 +2,7 @@
 
 The dataset optionally augments samples with the subset of D6 hex symmetries
 that map every Yinsh valid cell to another valid cell (computed in Rust by
-`yinsh_valid_d6_indices`). Two channel groups need direction permutation:
+`yinsh_valid_d6_indices`). Two policy channel groups need direction permutation:
   - ClaimRow row channels (1-3): 3 row directions, via `yinsh_d6_dir_permutations`
   - MoveRing channels (5-58): 6 movement directions, via `yinsh_d6_movement_dir_permutations`
 The ClaimRow ring channel (4) and PlaceRing channel (0) only need spatial gather.
@@ -83,13 +83,16 @@ def _apply_symmetry(
     policy: np.ndarray,
     sym: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Apply D6 transform `sym` to (board[8, 11, 11], policy[7139]).
+    """Apply D6 transform `sym` to (board[4, 11, 11], policy[7139]).
 
-    Spatial channels are gathered using the grid permutation. Two channel groups
-    need direction permutation:
+    Board channels are all rotation-symmetric (rings/markers, current-player-relative)
+    and need only spatial gather. Two policy channel groups also need a direction
+    permutation:
       - ClaimRow row (ch 1-3): via row-direction table
       - MoveRing  (ch 5-58): 6-direction blocks of 9 distances each
     The ClaimRow ring channel (4) and PlaceRing channel (0) only need spatial gather.
+    The reserve vector is unaffected by the symmetry (its phase one-hot is a
+    rotation-invariant scalar).
     """
     if sym == 0:
         return board, policy
