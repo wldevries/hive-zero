@@ -22,6 +22,7 @@ import torch.nn.functional as F
 
 from shared.nn.gpba import GlobalPoolBias
 from shared.nn.resblock import ResBlock
+from shared.nn.seresblock import SEResBlock
 
 # Mirror Rust constants — must match yinsh_game::board_encoding / move_encoding.
 NUM_CHANNELS = 8
@@ -48,11 +49,12 @@ class YinshNet(nn.Module):
     Output: policy (B, 7139), wdl_logits (B, 3) raw — callers softmax as needed.
 
     The trunk is a sequence of named layer types controlled by trunk_spec:
-        "res"  — ResBlock (standard 2-conv residual)
-        "gpba" — GlobalPoolBias (KataGo-style global context injection)
+        "res"   — ResBlock (standard 2-conv residual)
+        "seres" — SEResBlock (residual with Squeeze-and-Excitation channel gating)
+        "gpba"  — GlobalPoolBias (KataGo-style global context injection)
 
     Each spec entry has a "type" field and an optional "count" (default 1).
-    Example: [{"type": "res", "count": 8}, {"type": "gpba"}, {"type": "res", "count": 4}]
+    Example: [{"type": "seres", "count": 8}, {"type": "gpba"}, {"type": "seres", "count": 4}]
     """
 
     def __init__(self, channels: int = 96, trunk: list[dict] | None = None):
@@ -74,6 +76,8 @@ class YinshNet(nn.Module):
             for _ in range(count):
                 if layer_type == "res":
                     self.trunk.append(ResBlock(channels))
+                elif layer_type == "seres":
+                    self.trunk.append(SEResBlock(channels))
                 elif layer_type == "gpba":
                     self.trunk.append(GlobalPoolBias(channels))
                 else:

@@ -1,9 +1,9 @@
 {
   "channels": 96,
   "trunk": [
-    {"type": "res", "count": 4},
+    {"type": "seres", "count": 4},
     {"type": "gpba"},
-    {"type": "res", "count": 4},
+    {"type": "seres", "count": 4},
     {"type": "gpba"}
   ]
 }
