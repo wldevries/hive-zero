@@ -9,12 +9,13 @@ use crate::hex::{
     BOARD_SIZE, COL_ENDS, COL_STARTS, DIRECTIONS, GRID_SIZE, ROW_DIRS, cell_index, cell_index_i8,
     index_to_cell, is_valid, is_valid_i8,
 };
+use crate::zobrist;
 
 pub const INITIAL_MARKERS: u8 = 51;
 pub const RINGS_PER_PLAYER: u8 = 5;
 pub const WIN_SCORE: u8 = 3;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Cell {
     Empty,
     WhiteRing,
@@ -23,7 +24,7 @@ pub enum Cell {
     BlackMarker,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Phase {
     Setup,
     Normal,
@@ -58,6 +59,35 @@ pub struct YinshBoard {
     pub deferred_rows: Vec<(usize, usize)>,
     pub deferred_player: Option<Player>,
     pub original_mover: Option<Player>,
+    /// Incremental Zobrist hash maintained by every state-mutating helper
+    /// below. `tt_key()` returns this directly. Consistency is asserted
+    /// against `from_scratch_hash()` in the random-game test, so any helper
+    /// that misses an XOR pair fails immediately.
+    pub hash: u64,
+    /// Snapshot stack used by `undo()`. Pushed by `apply_move` immediately
+    /// before the mutation; popped + restored by `undo`. Snapshots intentionally
+    /// exclude the history field itself to avoid O(N²) memory growth.
+    pub history: Vec<YinshUndo>,
+}
+
+/// Saved state for one `apply_move` step. Mirrors every field of `YinshBoard`
+/// except `history`, so a snapshot is shallow w.r.t. the history stack.
+#[derive(Clone)]
+pub struct YinshUndo {
+    cells: [Cell; BOARD_SIZE],
+    white_rings_placed: u8,
+    black_rings_placed: u8,
+    white_score: u8,
+    black_score: u8,
+    markers_in_pool: u8,
+    next_player: Player,
+    outcome: Outcome,
+    phase: Phase,
+    pending_rows: Vec<(usize, usize)>,
+    deferred_rows: Vec<(usize, usize)>,
+    deferred_player: Option<Player>,
+    original_mover: Option<Player>,
+    hash: u64,
 }
 
 impl Default for YinshBoard {
@@ -68,7 +98,7 @@ impl Default for YinshBoard {
 
 impl YinshBoard {
     pub fn new() -> Self {
-        Self {
+        let mut b = Self {
             cells: [Cell::Empty; BOARD_SIZE],
             white_rings_placed: 0,
             black_rings_placed: 0,
@@ -82,7 +112,195 @@ impl YinshBoard {
             deferred_rows: Vec::new(),
             deferred_player: None,
             original_mover: None,
+            hash: 0,
+            history: Vec::new(),
+        };
+        b.hash = b.from_scratch_hash();
+        b
+    }
+
+    /// Recompute the Zobrist hash from scratch. Used to seed `hash` in `new()`
+    /// and to assert (in tests) that the incremental updates done by the
+    /// helper methods stay in sync with reality.
+    pub fn from_scratch_hash(&self) -> u64 {
+        let mut h = 0u64;
+        for i in 0..BOARD_SIZE {
+            h ^= zobrist::CELL[i][self.cells[i] as usize];
         }
+        if matches!(self.next_player, Player::Player2) {
+            h ^= zobrist::TURN_DIFF;
+        }
+        h ^= zobrist::PHASE[self.phase as usize];
+        h ^= zobrist::MARKERS_IN_POOL[self.markers_in_pool as usize];
+        h ^= zobrist::WHITE_SCORE[self.white_score as usize];
+        h ^= zobrist::BLACK_SCORE[self.black_score as usize];
+        h ^= zobrist::WHITE_RINGS_PLACED[self.white_rings_placed as usize];
+        h ^= zobrist::BLACK_RINGS_PLACED[self.black_rings_placed as usize];
+        for &(s, d) in &self.pending_rows {
+            h ^= zobrist::PENDING_ROW[s][d];
+        }
+        for &(s, d) in &self.deferred_rows {
+            h ^= zobrist::DEFERRED_ROW[s][d];
+        }
+        if let Some(p) = self.deferred_player {
+            h ^= zobrist::DEFERRED_PLAYER[p as usize];
+        }
+        if let Some(p) = self.original_mover {
+            h ^= zobrist::ORIGINAL_MOVER[p as usize];
+        }
+        h
+    }
+
+    // -------------------------------------------------------------------
+    // Hash-aware setters. Every state-mutating site in `apply_*` goes
+    // through these so the incremental Zobrist hash stays in sync.
+    // -------------------------------------------------------------------
+
+    fn set_cell(&mut self, idx: usize, new: Cell) {
+        let old = self.cells[idx];
+        if old != new {
+            self.hash ^= zobrist::CELL[idx][old as usize] ^ zobrist::CELL[idx][new as usize];
+            self.cells[idx] = new;
+        }
+    }
+
+    fn flip_turn(&mut self) {
+        self.hash ^= zobrist::TURN_DIFF;
+        self.next_player = self.next_player.opposite();
+    }
+
+    fn set_turn(&mut self, new: Player) {
+        if self.next_player != new {
+            self.flip_turn();
+        }
+    }
+
+    fn set_phase(&mut self, new: Phase) {
+        if self.phase != new {
+            self.hash ^= zobrist::PHASE[self.phase as usize] ^ zobrist::PHASE[new as usize];
+            self.phase = new;
+        }
+    }
+
+    fn set_markers_in_pool(&mut self, new: u8) {
+        if self.markers_in_pool != new {
+            self.hash ^= zobrist::MARKERS_IN_POOL[self.markers_in_pool as usize]
+                ^ zobrist::MARKERS_IN_POOL[new as usize];
+            self.markers_in_pool = new;
+        }
+    }
+
+    fn add_white_score(&mut self) {
+        let new = self.white_score + 1;
+        self.hash ^= zobrist::WHITE_SCORE[self.white_score as usize]
+            ^ zobrist::WHITE_SCORE[new as usize];
+        self.white_score = new;
+    }
+
+    fn add_black_score(&mut self) {
+        let new = self.black_score + 1;
+        self.hash ^= zobrist::BLACK_SCORE[self.black_score as usize]
+            ^ zobrist::BLACK_SCORE[new as usize];
+        self.black_score = new;
+    }
+
+    fn add_white_rings_placed(&mut self) {
+        let new = self.white_rings_placed + 1;
+        self.hash ^= zobrist::WHITE_RINGS_PLACED[self.white_rings_placed as usize]
+            ^ zobrist::WHITE_RINGS_PLACED[new as usize];
+        self.white_rings_placed = new;
+    }
+
+    fn add_black_rings_placed(&mut self) {
+        let new = self.black_rings_placed + 1;
+        self.hash ^= zobrist::BLACK_RINGS_PLACED[self.black_rings_placed as usize]
+            ^ zobrist::BLACK_RINGS_PLACED[new as usize];
+        self.black_rings_placed = new;
+    }
+
+    fn set_deferred_player(&mut self, new: Option<Player>) {
+        if let Some(p) = self.deferred_player {
+            self.hash ^= zobrist::DEFERRED_PLAYER[p as usize];
+        }
+        if let Some(p) = new {
+            self.hash ^= zobrist::DEFERRED_PLAYER[p as usize];
+        }
+        self.deferred_player = new;
+    }
+
+    fn set_original_mover(&mut self, new: Option<Player>) {
+        if let Some(p) = self.original_mover {
+            self.hash ^= zobrist::ORIGINAL_MOVER[p as usize];
+        }
+        if let Some(p) = new {
+            self.hash ^= zobrist::ORIGINAL_MOVER[p as usize];
+        }
+        self.original_mover = new;
+    }
+
+    fn replace_pending_rows(&mut self, new: Vec<(usize, usize)>) {
+        for &(s, d) in &self.pending_rows {
+            self.hash ^= zobrist::PENDING_ROW[s][d];
+        }
+        for &(s, d) in &new {
+            self.hash ^= zobrist::PENDING_ROW[s][d];
+        }
+        self.pending_rows = new;
+    }
+
+    fn replace_deferred_rows(&mut self, new: Vec<(usize, usize)>) {
+        for &(s, d) in &self.deferred_rows {
+            self.hash ^= zobrist::DEFERRED_ROW[s][d];
+        }
+        for &(s, d) in &new {
+            self.hash ^= zobrist::DEFERRED_ROW[s][d];
+        }
+        self.deferred_rows = new;
+    }
+
+    /// Capture the current state into an undo frame. Cheap: cells are Copy, the
+    /// two pending/deferred Vecs are usually empty (only populated mid-claim).
+    fn snapshot(&self) -> YinshUndo {
+        YinshUndo {
+            cells: self.cells,
+            white_rings_placed: self.white_rings_placed,
+            black_rings_placed: self.black_rings_placed,
+            white_score: self.white_score,
+            black_score: self.black_score,
+            markers_in_pool: self.markers_in_pool,
+            next_player: self.next_player,
+            outcome: self.outcome,
+            phase: self.phase,
+            pending_rows: self.pending_rows.clone(),
+            deferred_rows: self.deferred_rows.clone(),
+            deferred_player: self.deferred_player,
+            original_mover: self.original_mover,
+            hash: self.hash,
+        }
+    }
+
+    fn restore(&mut self, u: YinshUndo) {
+        self.cells = u.cells;
+        self.white_rings_placed = u.white_rings_placed;
+        self.black_rings_placed = u.black_rings_placed;
+        self.white_score = u.white_score;
+        self.black_score = u.black_score;
+        self.markers_in_pool = u.markers_in_pool;
+        self.next_player = u.next_player;
+        self.outcome = u.outcome;
+        self.phase = u.phase;
+        self.pending_rows = u.pending_rows;
+        self.deferred_rows = u.deferred_rows;
+        self.deferred_player = u.deferred_player;
+        self.original_mover = u.original_mover;
+        self.hash = u.hash;
+    }
+
+    /// Reverse the most recent `apply_move` (including pass). Panics if the
+    /// history stack is empty.
+    pub fn undo(&mut self) {
+        let u = self.history.pop().expect("undo with empty history");
+        self.restore(u);
     }
 
     fn my_ring(&self, p: Player) -> Cell {
@@ -219,18 +437,26 @@ impl YinshBoard {
         if self.outcome != Outcome::Ongoing {
             return Err("game is over".into());
         }
-        match (self.phase, mv) {
+        // Push the snapshot up front and pop it back if the sub-handler
+        // returns Err. Every sub-handler validates its arguments before
+        // mutating state, so a popped snapshot fully restores `self`.
+        self.history.push(self.snapshot());
+        let result = match (self.phase, mv) {
             (Phase::Setup, YinshMove::PlaceRing(idx)) => self.apply_place_ring(idx),
             (Phase::Normal, YinshMove::MoveRing { from, to }) => self.apply_move_ring(from, to),
             (Phase::ClaimRow, YinshMove::ClaimRow { start, dir, ring }) => {
                 self.apply_claim_row(start, dir, ring)
             }
             (_, YinshMove::Pass) => {
-                self.next_player = self.next_player.opposite();
+                self.flip_turn();
                 Ok(())
             }
             _ => Err(format!("move {:?} invalid in phase {:?}", mv, self.phase)),
+        };
+        if result.is_err() {
+            self.history.pop();
         }
+        result
     }
 
     fn apply_place_ring(&mut self, idx: usize) -> Result<(), String> {
@@ -238,15 +464,16 @@ impl YinshBoard {
             return Err("cell not empty".into());
         }
         let me = self.next_player;
-        self.cells[idx] = self.my_ring(me);
+        let ring = self.my_ring(me);
+        self.set_cell(idx, ring);
         match me {
-            Player::Player1 => self.white_rings_placed += 1,
-            Player::Player2 => self.black_rings_placed += 1,
+            Player::Player1 => self.add_white_rings_placed(),
+            Player::Player2 => self.add_black_rings_placed(),
         }
         if self.white_rings_placed + self.black_rings_placed >= 2 * RINGS_PER_PLAYER {
-            self.phase = Phase::Normal;
+            self.set_phase(Phase::Normal);
         }
-        self.next_player = me.opposite();
+        self.flip_turn();
         Ok(())
     }
 
@@ -265,45 +492,49 @@ impl YinshBoard {
         let dc = (tc as i8 - fc as i8).signum();
         let dr = (tr as i8 - fr as i8).signum();
 
-        // Place marker at from
-        self.cells[from] = self.my_marker(me);
-        self.markers_in_pool -= 1;
+        // Place marker at `from` (the ring leaves a marker behind).
+        let my_marker = self.my_marker(me);
+        self.set_cell(from, my_marker);
+        self.set_markers_in_pool(self.markers_in_pool - 1);
 
-        // Flip markers between from+dir and to (exclusive of to)
+        // Flip markers between from+dir and to (exclusive of to).
         let mut c = fc as i8 + dc;
         let mut r = fr as i8 + dr;
         while (c, r) != (tc as i8, tr as i8) {
             let idx = cell_index_i8(c, r);
-            self.cells[idx] = flip_marker(self.cells[idx]);
+            let flipped = flip_marker(self.cells[idx]);
+            self.set_cell(idx, flipped);
             c += dc;
             r += dr;
         }
 
-        // Place ring at to
-        self.cells[to] = self.my_ring(me);
+        // Place ring at `to`.
+        let my_ring = self.my_ring(me);
+        self.set_cell(to, my_ring);
 
-        // Scan for rows
+        // Scan for rows.
         let opp = me.opposite();
         let cur_rows = self.find_rows(me);
         let opp_rows = self.find_rows(opp);
 
         if !cur_rows.is_empty() {
-            self.original_mover = Some(me);
-            self.phase = Phase::ClaimRow;
-            self.pending_rows = cur_rows;
-            self.deferred_rows = opp_rows.clone();
-            self.deferred_player = if opp_rows.is_empty() { None } else { Some(opp) };
+            self.set_original_mover(Some(me));
+            self.set_phase(Phase::ClaimRow);
+            self.replace_pending_rows(cur_rows);
+            let new_deferred_player = if opp_rows.is_empty() { None } else { Some(opp) };
+            self.replace_deferred_rows(opp_rows);
+            self.set_deferred_player(new_deferred_player);
             // next_player stays as me (cur player claims their own rows first)
         } else if !opp_rows.is_empty() {
-            self.original_mover = Some(me);
-            self.phase = Phase::ClaimRow;
-            self.pending_rows = opp_rows;
-            self.deferred_rows = Vec::new();
-            self.deferred_player = None;
-            self.next_player = opp;
+            self.set_original_mover(Some(me));
+            self.set_phase(Phase::ClaimRow);
+            self.replace_pending_rows(opp_rows);
+            // deferred_rows already empty in this branch.
+            self.set_deferred_player(None);
+            self.set_turn(opp);
         } else {
-            // No rows: flip turn, check exhaustion
-            self.next_player = opp;
+            // No rows: flip turn, check exhaustion.
+            self.set_turn(opp);
             if self.markers_in_pool == 0 {
                 self.check_marker_exhaustion();
             }
@@ -331,9 +562,9 @@ impl YinshBoard {
             let nc = sc as i8 + dc * k;
             let nr = sr as i8 + dr * k;
             let mc = cell_index_i8(nc, nr);
-            self.cells[mc] = Cell::Empty;
+            self.set_cell(mc, Cell::Empty);
         }
-        self.markers_in_pool += 5;
+        self.set_markers_in_pool(self.markers_in_pool + 5);
 
         // Re-filter pending_rows: the row we just claimed is now gone (its markers
         // are Empty), and other rows that overlapped with it may no longer be
@@ -341,21 +572,27 @@ impl YinshBoard {
         // the intersecting row falls off after the first is claimed.
         let marker = self.my_marker(me);
         let cells_snapshot = self.cells;
-        self.pending_rows.retain(|&(s, d)| {
-            let (c, r) = index_to_cell(s);
-            let (ddc, ddr) = ROW_DIRS[d];
-            (0i8..5).all(|k| {
-                let nc = c as i8 + ddc * k;
-                let nr = r as i8 + ddr * k;
-                is_valid_i8(nc, nr) && cells_snapshot[cell_index_i8(nc, nr)] == marker
+        let new_pending: Vec<(usize, usize)> = self
+            .pending_rows
+            .iter()
+            .copied()
+            .filter(|&(s, d)| {
+                let (c, r) = index_to_cell(s);
+                let (ddc, ddr) = ROW_DIRS[d];
+                (0i8..5).all(|k| {
+                    let nc = c as i8 + ddc * k;
+                    let nr = r as i8 + ddr * k;
+                    is_valid_i8(nc, nr) && cells_snapshot[cell_index_i8(nc, nr)] == marker
+                })
             })
-        });
+            .collect();
+        self.replace_pending_rows(new_pending);
 
         // Remove the ring.
-        self.cells[ring] = Cell::Empty;
+        self.set_cell(ring, Cell::Empty);
         match me {
-            Player::Player1 => self.white_score += 1,
-            Player::Player2 => self.black_score += 1,
+            Player::Player1 => self.add_white_score(),
+            Player::Player2 => self.add_black_score(),
         }
 
         // Check win before transitioning. Per yinsh rule H.1, the game ends the
@@ -371,20 +608,22 @@ impl YinshBoard {
 
         if !self.pending_rows.is_empty() {
             // More rows still pending for this player — stay in ClaimRow phase.
-            self.phase = Phase::ClaimRow;
+            self.set_phase(Phase::ClaimRow);
         } else if !self.deferred_rows.is_empty() {
             // Current player done; opponent now claims their own (deferred) rows.
             let opp = self.deferred_player.expect("deferred_rows without deferred_player");
-            self.pending_rows = std::mem::take(&mut self.deferred_rows);
-            self.deferred_player = None;
-            self.phase = Phase::ClaimRow;
-            self.next_player = opp;
+            let new_pending = self.deferred_rows.clone();
+            self.replace_deferred_rows(Vec::new());
+            self.replace_pending_rows(new_pending);
+            self.set_deferred_player(None);
+            self.set_phase(Phase::ClaimRow);
+            self.set_turn(opp);
         } else {
             // All claims done: back to Normal, opponent of original mover's turn.
             let mover = self.original_mover.expect("no original_mover during claim");
-            self.phase = Phase::Normal;
-            self.next_player = mover.opposite();
-            self.original_mover = None;
+            self.set_phase(Phase::Normal);
+            self.set_turn(mover.opposite());
+            self.set_original_mover(None);
             if self.markers_in_pool == 0 {
                 self.check_marker_exhaustion();
             }
@@ -601,5 +840,94 @@ mod tests {
         let dests = b.ring_destinations(idx);
         // All 6 directions yield some empty cells — expect more than 6 total empty destinations
         assert!(!dests.is_empty());
+    }
+
+    /// Tiny xorshift64 — deterministic, no extra deps. Used to drive a
+    /// reproducible random walk through legal-move space.
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// Walk a random Yinsh game and assert that `hash` (maintained by the
+    /// helper setters) matches `from_scratch_hash()` after every move,
+    /// including pass and after entering ClaimRow.
+    ///
+    /// This is the "I forgot a mutation site" canary. If any helper falls out
+    /// of sync — or any new state-changing code skips a helper — this test
+    /// fails on the first divergent move with the offending move printed.
+    #[test]
+    fn zobrist_hash_matches_from_scratch_random_walk() {
+        let mut seed = 0xCAFE_F00D_DEAD_BEEFu64;
+        for trial in 0..16 {
+            let mut board = YinshBoard::new();
+            assert_eq!(
+                board.hash,
+                board.from_scratch_hash(),
+                "trial {trial}: initial hash mismatch",
+            );
+            for ply in 0..400usize {
+                if board.outcome != Outcome::Ongoing {
+                    break;
+                }
+                let moves = board.legal_moves();
+                if moves.is_empty() {
+                    board.apply_move(YinshMove::Pass).unwrap();
+                } else {
+                    let pick = (xorshift64(&mut seed) as usize) % moves.len();
+                    let mv = moves[pick];
+                    board.apply_move(mv).unwrap();
+                    let truth = board.from_scratch_hash();
+                    assert_eq!(
+                        board.hash, truth,
+                        "trial {trial} ply {ply}: hash diverged after {:?} \
+                         (phase={:?}, next={:?})",
+                        mv, board.phase, board.next_player,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Apply a sequence of moves, then undo them all in reverse order. After
+    /// each undo, `hash` must equal both the snapshot's pre-move hash and a
+    /// fresh `from_scratch_hash()`. Catches a snapshot/restore that misses
+    /// the hash field, or any helper whose XOR pair isn't a true inverse.
+    #[test]
+    fn zobrist_hash_round_trip_through_undo() {
+        let mut seed = 0x0123_4567_89AB_CDEFu64;
+        let mut board = YinshBoard::new();
+        let mut hashes_before: Vec<u64> = Vec::new();
+
+        for _ in 0..120 {
+            if board.outcome != Outcome::Ongoing {
+                break;
+            }
+            let moves = board.legal_moves();
+            if moves.is_empty() {
+                hashes_before.push(board.hash);
+                board.apply_move(YinshMove::Pass).unwrap();
+            } else {
+                let pick = (xorshift64(&mut seed) as usize) % moves.len();
+                hashes_before.push(board.hash);
+                board.apply_move(moves[pick]).unwrap();
+            }
+        }
+
+        while let Some(expected) = hashes_before.pop() {
+            board.undo();
+            assert_eq!(board.hash, expected, "undo failed to restore hash");
+            assert_eq!(
+                board.hash,
+                board.from_scratch_hash(),
+                "undo'd hash diverged from from_scratch",
+            );
+        }
+        assert!(board.history.is_empty());
+        assert_eq!(board.hash, YinshBoard::new().hash, "fully undone != fresh");
     }
 }

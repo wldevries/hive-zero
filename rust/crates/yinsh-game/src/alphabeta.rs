@@ -1,19 +1,22 @@
-//! Heuristic-only alpha-beta minimax bot for Yinsh.
+//! Yinsh-specific glue for the generic alphabeta driver in `core_game::alphabeta`.
 //!
-//! Self-contained negamax that clones the board per node (Yinsh state is
-//! ~150 bytes — cheaper than implementing a correct undo for `MoveRing`'s
-//! marker flips and `ClaimRow`'s 5-marker + ring removal). If/when we want
-//! transposition tables and the killer/history move ordering from
-//! `core_game::alphabeta`, we'll need to implement `Undoable` for `YinshBoard`.
+//! Provides:
+//! - `Undoable` (snapshot/restore via `YinshBoard::history`)
+//! - `TranspositionKey` (SipHash over all state that affects the score)
+//! - `MoveOrdering` (flat history-table index per (move-type, params))
+//! - `evaluate` — the static heuristic, current-player-relative
+//!
+//! The public `alphabeta_best_move` and `alphabeta_root_scores` entry points
+//! now go through the core driver, picking up iterative deepening, TT, and
+//! killer/history move ordering for free.
 
-use core_game::game::{Outcome, Player};
+use core_game::alphabeta::{
+    self, AlphaBetaParams, MoveOrdering, SearchContext, TranspositionKey, WIN_SCORE,
+};
+use core_game::game::{Outcome, Player, Undoable};
 
 use crate::board::{Cell, YinshBoard, YinshMove};
 use crate::hex::{BOARD_SIZE, ROW_DIRS, cell_index_i8, index_to_cell, is_valid_i8};
-
-/// Score returned for a position where the side-to-move has already won (or
-/// lost). Large enough that no positional term can outweigh it.
-pub const WIN_SCORE: f32 = 1_000_000.0;
 
 // Eval weights. Tune by play; current numbers are first-pass guesses.
 const SCORE_W: f32 = 1000.0;
@@ -141,119 +144,78 @@ pub fn evaluate(board: &YinshBoard) -> f32 {
         + MARKER_W * (my_markers - opp_markers)
 }
 
-/// Negamax with alpha-beta pruning. Score is from the perspective of whoever
-/// is about to move at `board`.
-///
-/// ClaimRow phase keeps `next_player` the same across a move (Yinsh rule G.3
-/// pairs row claims with ring removal, then continues — possibly with another
-/// claim — for the same player). On a same-player edge we don't flip the sign
-/// of the recursive score; on a normal edge we do.
-fn negamax(board: &mut YinshBoard, depth: u32, mut alpha: f32, beta: f32) -> f32 {
-    if depth == 0 || board.outcome != Outcome::Ongoing {
-        return evaluate(board);
-    }
+// ---------------------------------------------------------------------------
+// Core-driver trait impls
+// ---------------------------------------------------------------------------
 
-    let player_before = board.next_player;
-    let moves = board.legal_moves();
-    if moves.is_empty() {
-        return evaluate(board);
+impl Undoable for YinshBoard {
+    fn undo(&mut self) {
+        YinshBoard::undo(self);
     }
-
-    let mut best = f32::NEG_INFINITY;
-    for mv in moves {
-        let mut child = board.clone();
-        child
-            .apply_move(mv)
-            .expect("legal_moves yielded an illegal move");
-        let score = if child.next_player == player_before {
-            negamax(&mut child, depth - 1, alpha, beta)
-        } else {
-            -negamax(&mut child, depth - 1, -beta, -alpha)
-        };
-        if score > best {
-            best = score;
-        }
-        if score > alpha {
-            alpha = score;
-        }
-        if alpha >= beta {
-            break;
-        }
-    }
-    best
 }
 
-/// Pick the best move at `depth` plies. Operates on a clone — the caller's
-/// `board` is never mutated. Returns `Pass` if there are no legal moves
-/// (which shouldn't happen in Yinsh — included for safety).
+impl TranspositionKey for YinshBoard {
+    /// Read the incrementally maintained Zobrist hash. O(1) on every probe.
+    /// Order-independent set semantics for `pending_rows` / `deferred_rows`
+    /// fall out of XOR's commutativity, so two queues differing only in
+    /// push order map to the same key.
+    fn tt_key(&self) -> u64 {
+        self.hash
+    }
+}
+
+// History-table layout: one slot per (move-type, parameters) combination.
+// PlaceRing(idx)                              [0 .. 85)
+// MoveRing { from, to }                       [85 .. 85 + 85*85)
+// ClaimRow { start, dir, ring }               [next .. next + 85*3*85)
+// Pass                                        no slot
+const PLACE_BASE: usize = 0;
+const MOVE_BASE: usize = PLACE_BASE + BOARD_SIZE;
+const MOVE_SLOTS: usize = BOARD_SIZE * BOARD_SIZE;
+const CLAIM_BASE: usize = MOVE_BASE + MOVE_SLOTS;
+const CLAIM_SLOTS: usize = BOARD_SIZE * 3 * BOARD_SIZE;
+const TOTAL_HISTORY_SLOTS: usize = CLAIM_BASE + CLAIM_SLOTS;
+
+impl MoveOrdering for YinshMove {
+    const HISTORY_SIZE: usize = TOTAL_HISTORY_SLOTS;
+
+    fn history_index(&self) -> Option<usize> {
+        match *self {
+            YinshMove::PlaceRing(idx) => Some(PLACE_BASE + idx),
+            YinshMove::MoveRing { from, to } => Some(MOVE_BASE + from * BOARD_SIZE + to),
+            YinshMove::ClaimRow { start, dir, ring } => {
+                Some(CLAIM_BASE + start * 3 * BOARD_SIZE + dir * BOARD_SIZE + ring)
+            }
+            YinshMove::Pass => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
+
+/// Run alphabeta from a clone of `board`, returning the best move at the given
+/// depth (or `Pass` if the position has no legal moves). Operates on a clone
+/// — the caller's board is never mutated.
 pub fn alphabeta_best_move(board: &YinshBoard, depth: u32) -> YinshMove {
     let mut work = board.clone();
-    let moves = work.legal_moves();
-    if moves.is_empty() {
-        return YinshMove::Pass;
-    }
-    if depth == 0 {
-        return moves[0];
-    }
-
-    let player_before = work.next_player;
-    let mut alpha = f32::NEG_INFINITY;
-    let beta = f32::INFINITY;
-    let mut best_mv = moves[0];
-    let mut best_score = f32::NEG_INFINITY;
-
-    for mv in moves {
-        let mut child = board.clone();
-        child
-            .apply_move(mv)
-            .expect("legal_moves yielded an illegal move");
-        let score = if child.next_player == player_before {
-            negamax(&mut child, depth - 1, alpha, beta)
-        } else {
-            -negamax(&mut child, depth - 1, -beta, -alpha)
-        };
-        if score > best_score {
-            best_score = score;
-            best_mv = mv;
-        }
-        if score > alpha {
-            alpha = score;
-        }
-    }
-    best_mv
+    work.history.clear();
+    let mut ctx = SearchContext::new(AlphaBetaParams::new(depth));
+    let mut eval = evaluate;
+    let (mv, _score) = alphabeta::alphabeta_best_move(&mut work, &mut eval, &mut ctx);
+    mv.unwrap_or(YinshMove::Pass)
 }
 
-/// Return `(move, score)` for every legal root move at `depth`. Each move is
-/// searched with a full alpha-beta window so the score is exact (not an
-/// alpha-bounded estimate). Useful for debugging the eval and for showing the
-/// top-N moves in the REPL.
-///
-/// O(N · search) where N is the legal move count — slower than `best_move`
-/// but the right semantics for "show me the score of every move".
+/// Like `alphabeta_best_move`, but returns exact minimax scores for *every*
+/// root move at the given depth. Operates on a clone — the caller's board is
+/// never mutated.
 pub fn alphabeta_root_scores(board: &YinshBoard, depth: u32) -> Vec<(YinshMove, f32)> {
     let mut work = board.clone();
-    let moves = work.legal_moves();
-    let player_before = work.next_player;
-    let mut out = Vec::with_capacity(moves.len());
-    for mv in moves {
-        let mut child = board.clone();
-        child
-            .apply_move(mv)
-            .expect("legal_moves yielded an illegal move");
-        let score = if depth == 0 {
-            // No search — score the resulting position with the static eval.
-            // Flip sign if the move passed the turn so the score is from
-            // `player_before`'s perspective like the depth>0 branch.
-            let raw = evaluate(&child);
-            if child.next_player == player_before { raw } else { -raw }
-        } else if child.next_player == player_before {
-            negamax(&mut child, depth - 1, f32::NEG_INFINITY, f32::INFINITY)
-        } else {
-            -negamax(&mut child, depth - 1, f32::NEG_INFINITY, f32::INFINITY)
-        };
-        out.push((mv, score));
-    }
-    out
+    work.history.clear();
+    let mut ctx = SearchContext::new(AlphaBetaParams::new(depth));
+    let mut eval = evaluate;
+    alphabeta::alphabeta_root_scores(&mut work, &mut eval, &mut ctx)
 }
 
 #[cfg(test)]
@@ -268,14 +230,21 @@ mod tests {
         let opening = board.legal_moves()[0];
         board.apply_move(opening).unwrap();
 
-        let before = board.clone();
+        let cells_before = board.cells;
+        let next_before = board.next_player;
+        let phase_before = board.phase;
+        let history_len_before = board.history.len();
+
         let _ = alphabeta_best_move(&board, 2);
 
-        assert_eq!(board.cells, before.cells, "cells changed");
-        assert_eq!(board.next_player, before.next_player, "next_player changed");
-        assert_eq!(board.phase, before.phase, "phase changed");
-        assert_eq!(board.white_score, before.white_score);
-        assert_eq!(board.black_score, before.black_score);
+        assert_eq!(board.cells, cells_before, "cells changed");
+        assert_eq!(board.next_player, next_before, "next_player changed");
+        assert_eq!(board.phase, phase_before, "phase changed");
+        assert_eq!(
+            board.history.len(),
+            history_len_before,
+            "history length changed",
+        );
     }
 
     #[test]
@@ -359,5 +328,159 @@ mod tests {
         for (mv, _) in &scores {
             assert!(legal.iter().any(|m| m == mv));
         }
+    }
+
+    #[test]
+    fn undo_restores_state_through_search() {
+        // After a search on `work`, the work board should equal `start` again
+        // — the snapshot stack is fully drained.
+        let mut start = YinshBoard::new();
+        for _ in 0..6 {
+            let mv = start.legal_moves()[0];
+            start.apply_move(mv).unwrap();
+        }
+        let mut work = start.clone();
+        work.history.clear();
+        let snapshot_cells = work.cells;
+        let snapshot_next = work.next_player;
+        let snapshot_phase = work.phase;
+
+        let mut ctx = SearchContext::new(AlphaBetaParams::new(3));
+        let mut eval = evaluate;
+        let _ = alphabeta::alphabeta_best_move(&mut work, &mut eval, &mut ctx);
+
+        assert_eq!(work.cells, snapshot_cells, "cells diverged after search");
+        assert_eq!(work.next_player, snapshot_next);
+        assert_eq!(work.phase, snapshot_phase);
+        assert_eq!(work.history.len(), 0, "history should be drained");
+    }
+
+    #[test]
+    fn tt_does_not_change_search_result() {
+        // TT-enabled search must reach the same (best_move, score) as a
+        // search with the TT bypassed. Depth 2 in setup is fast and exercises
+        // the standard probe/store paths.
+        let mut start = YinshBoard::new();
+        for _ in 0..3 {
+            let mv = start.legal_moves()[0];
+            start.apply_move(mv).unwrap();
+        }
+        let mut eval = evaluate;
+
+        let mut work_no_tt = start.clone();
+        work_no_tt.history.clear();
+        let mut ctx_no_tt = SearchContext::new(AlphaBetaParams::new(2));
+        ctx_no_tt.tt_enabled = false;
+        let (mv_no_tt, score_no_tt) =
+            alphabeta::alphabeta_best_move(&mut work_no_tt, &mut eval, &mut ctx_no_tt);
+
+        let mut work_tt = start.clone();
+        work_tt.history.clear();
+        let mut ctx_tt = SearchContext::new(AlphaBetaParams::new(2));
+        let (mv_tt, score_tt) =
+            alphabeta::alphabeta_best_move(&mut work_tt, &mut eval, &mut ctx_tt);
+
+        assert_eq!(score_no_tt, score_tt, "TT changed best score");
+        assert_eq!(mv_no_tt, mv_tt, "TT changed best move");
+        assert!(
+            ctx_tt.nodes_visited <= ctx_no_tt.nodes_visited,
+            "TT visited more nodes: {} vs {}",
+            ctx_tt.nodes_visited, ctx_no_tt.nodes_visited,
+        );
+    }
+
+    #[test]
+    fn ordering_does_not_change_search_result() {
+        // With killers + history disabled, the search must reach the same
+        // (best_move, score) as with the full ordering stack.
+        let mut start = YinshBoard::new();
+        for _ in 0..3 {
+            let mv = start.legal_moves()[0];
+            start.apply_move(mv).unwrap();
+        }
+        let mut eval = evaluate;
+
+        let mut work_off = start.clone();
+        work_off.history.clear();
+        let mut ctx_off = SearchContext::new(AlphaBetaParams::new(2));
+        ctx_off.ordering_enabled = false;
+        let (mv_off, score_off) =
+            alphabeta::alphabeta_best_move(&mut work_off, &mut eval, &mut ctx_off);
+
+        let mut work_on = start.clone();
+        work_on.history.clear();
+        let mut ctx_on = SearchContext::new(AlphaBetaParams::new(2));
+        let (mv_on, score_on) =
+            alphabeta::alphabeta_best_move(&mut work_on, &mut eval, &mut ctx_on);
+
+        assert_eq!(score_off, score_on, "ordering changed best score");
+        assert_eq!(mv_off, mv_on, "ordering changed best move");
+        assert!(
+            ctx_on.nodes_visited <= ctx_off.nodes_visited,
+            "ordering visited more nodes: {} vs {}",
+            ctx_on.nodes_visited, ctx_off.nodes_visited,
+        );
+    }
+
+    #[test]
+    fn undo_round_trip_through_claimrow() {
+        // Force a ClaimRow situation, apply the claim, then undo and verify
+        // the pre-claim state is fully restored. ClaimRow has the messiest
+        // mutations (5 marker erasures, ring removal, score++, phase moves),
+        // so this is the strictest undo test.
+        let mut board = YinshBoard::new();
+        // Place all 10 rings.
+        for _ in 0..10 {
+            let mv = board.legal_moves()[0];
+            board.apply_move(mv).unwrap();
+        }
+        // Manually set up a 5-row of white markers along (0,1) starting at A1.
+        // Place a ring nearby so we have something to remove. Decrement the
+        // marker pool to keep state internally consistent (5 markers placed →
+        // pool drops by 5), so the post-claim `set_markers_in_pool(+5)` lands
+        // on a valid Zobrist table index.
+        let row_start_col = 1u8;
+        let row_start_row = 0u8;
+        for k in 0u8..5 {
+            let idx = crate::hex::cell_index(row_start_col, row_start_row + k);
+            board.cells[idx] = Cell::WhiteMarker;
+        }
+        board.markers_in_pool -= 5;
+        // Find an existing white ring to remove.
+        let ring_idx = (0..BOARD_SIZE)
+            .find(|&i| board.cells[i] == Cell::WhiteRing)
+            .expect("a white ring must exist after setup");
+        // Force the phase as if a row scan had just fired.
+        board.phase = crate::board::Phase::ClaimRow;
+        board.next_player = Player::Player1;
+        board.original_mover = Some(Player::Player1);
+        let row_start_idx = crate::hex::cell_index(row_start_col, row_start_row);
+        board.pending_rows = vec![(row_start_idx, 0)];
+        board.deferred_rows = vec![];
+        board.deferred_player = None;
+
+        let snapshot_cells = board.cells;
+        let snapshot_white_score = board.white_score;
+        let snapshot_phase = board.phase;
+        let snapshot_pending = board.pending_rows.clone();
+        // Drop the placement-phase snapshots so the post-undo `is_empty`
+        // assertion checks only the claim's own undo frame.
+        board.history.clear();
+
+        let claim = YinshMove::ClaimRow {
+            start: row_start_idx,
+            dir: 0,
+            ring: ring_idx,
+        };
+        board.apply_move(claim).unwrap();
+        assert_eq!(board.white_score, snapshot_white_score + 1);
+        assert_ne!(board.cells, snapshot_cells);
+
+        board.undo();
+        assert_eq!(board.cells, snapshot_cells, "claimrow undo missed cells");
+        assert_eq!(board.white_score, snapshot_white_score);
+        assert_eq!(board.phase, snapshot_phase);
+        assert_eq!(board.pending_rows, snapshot_pending);
+        assert!(board.history.is_empty());
     }
 }

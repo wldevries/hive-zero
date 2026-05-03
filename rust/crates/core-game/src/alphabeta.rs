@@ -335,9 +335,18 @@ where
     let mut best_move: Option<G::Move> = None;
     let mut cutoff = false;
     let mut cutoff_move: Option<G::Move> = None;
+    let player_before = game.next_player();
     for mv in moves.iter() {
         game.play_move(mv).expect("valid_moves returned an unplayable move");
-        let score = -negamax(game, depth - 1, ply + 1, -beta, -alpha, eval, ctx);
+        // Same-player edges (e.g. Yinsh ClaimRow chains, Zertz mid-capture)
+        // keep the score in the same player's frame: don't flip the sign or
+        // negate the (alpha, beta) window. Player-changing edges are the
+        // standard negamax case.
+        let score = if game.next_player() == player_before {
+            negamax(game, depth - 1, ply + 1, alpha, beta, eval, ctx)
+        } else {
+            -negamax(game, depth - 1, ply + 1, -beta, -alpha, eval, ctx)
+        };
         game.undo();
 
         if score > best {
@@ -462,10 +471,15 @@ where
         let beta = f32::INFINITY;
         let mut iter_best_move = moves[0];
         let mut iter_best_score = f32::NEG_INFINITY;
+        let player_before = game.next_player();
 
         for mv in moves.iter() {
             game.play_move(mv).expect("valid_moves returned an unplayable move");
-            let score = -negamax(game, depth - 1, 1, -beta, -alpha, eval, ctx);
+            let score = if game.next_player() == player_before {
+                negamax(game, depth - 1, 1, alpha, beta, eval, ctx)
+            } else {
+                -negamax(game, depth - 1, 1, -beta, -alpha, eval, ctx)
+            };
             game.undo();
 
             if score > iter_best_score {
@@ -546,9 +560,14 @@ where
         let beta = f32::INFINITY;
         let mut iter_best = moves[0];
         let mut iter_best_score = f32::NEG_INFINITY;
+        let player_before = game.next_player();
         for mv in moves.iter() {
             game.play_move(mv).expect("valid_moves returned an unplayable move");
-            let score = -negamax(game, depth - 1, 1, -beta, -alpha, eval, ctx);
+            let score = if game.next_player() == player_before {
+                negamax(game, depth - 1, 1, alpha, beta, eval, ctx)
+            } else {
+                -negamax(game, depth - 1, 1, -beta, -alpha, eval, ctx)
+            };
             game.undo();
             if score > iter_best_score {
                 iter_best_score = score;
@@ -575,17 +594,30 @@ where
     }
 
     let mut scores: Vec<(G::Move, f32)> = Vec::with_capacity(moves.len());
+    let player_before = game.next_player();
     for mv in moves.iter() {
         game.play_move(mv).expect("valid_moves returned an unplayable move");
-        let score = -negamax(
-            game,
-            max_depth - 1,
-            1,
-            f32::NEG_INFINITY,
-            f32::INFINITY,
-            eval,
-            ctx,
-        );
+        let score = if game.next_player() == player_before {
+            negamax(
+                game,
+                max_depth - 1,
+                1,
+                f32::NEG_INFINITY,
+                f32::INFINITY,
+                eval,
+                ctx,
+            )
+        } else {
+            -negamax(
+                game,
+                max_depth - 1,
+                1,
+                f32::NEG_INFINITY,
+                f32::INFINITY,
+                eval,
+                ctx,
+            )
+        };
         game.undo();
         scores.push((*mv, score));
     }
