@@ -18,13 +18,25 @@ use core_game::game::{Outcome, Player, Undoable};
 use crate::board::{Cell, YinshBoard, YinshMove};
 use crate::hex::{BOARD_SIZE, ROW_DIRS, cell_index_i8, index_to_cell, is_valid_i8};
 
-// Eval weights. Tune by play; current numbers are first-pass guesses.
-const SCORE_W: f32 = 1000.0;
-const ROW5_W: f32 = 500.0;
-const ROW4_W: f32 = 50.0;
-const ROW3_W: f32 = 5.0;
-const MOBILITY_W: f32 = 0.1;
-const MARKER_W: f32 = 0.5;
+/// Number of linear features in the eval. Feature order:
+/// 0: score_diff (rings captured)
+/// 1: row5_diff  (formed unclaimed 5-rows)
+/// 2: row4_diff  (maximal 4-runs)
+/// 3: row3_diff  (maximal 3-runs)
+/// 4: mobility_diff  (sum of legal ring destinations)
+/// 5: marker_diff
+pub const N_FEATURES: usize = 6;
+
+/// Linear eval weights, current-player-relative. First-pass guesses; the
+/// `tune` subcommand on `yinsh-tools` fits these from boardspace outcomes.
+pub const DEFAULT_WEIGHTS: [f32; N_FEATURES] = [
+    1000.0, // SCORE
+    500.0,  // ROW5
+    50.0,   // ROW4
+    5.0,    // ROW3
+    0.1,    // MOBILITY
+    0.5,    // MARKER
+];
 
 #[inline]
 fn score_of(board: &YinshBoard, player: Player) -> u8 {
@@ -102,46 +114,57 @@ fn count_markers(board: &YinshBoard, player: Player) -> usize {
     board.cells.iter().filter(|&&c| c == marker).count()
 }
 
-/// Evaluate `board` from `board.next_player`'s perspective. Positive = good
-/// for whoever is about to move. Terminal positions return ±`WIN_SCORE` (or 0
-/// for a draw).
-pub fn evaluate(board: &YinshBoard) -> f32 {
+/// Extract the linear feature vector for `board`, current-player-relative.
+/// Caller must check that `board.outcome == Ongoing` first — terminal
+/// positions are handled by `evaluate` / `evaluate_with_weights`.
+pub fn extract_features(board: &YinshBoard) -> [f32; N_FEATURES] {
     let me = board.next_player;
     let opp = me.opposite();
 
-    match board.outcome {
-        Outcome::WonBy(p) if p == me => return WIN_SCORE,
-        Outcome::WonBy(_) => return -WIN_SCORE,
-        Outcome::Draw => return 0.0,
-        Outcome::Ongoing => {}
-    }
-
     let score_diff = score_of(board, me) as f32 - score_of(board, opp) as f32;
-
     // Formed (unclaimed) 5-rows. Outside ClaimRow phase this is 0 — rows are
     // either claimed immediately or don't exist yet.
     let my_5 = board.find_rows(me).len() as f32;
     let opp_5 = board.find_rows(opp).len() as f32;
-
     let my_hist = run_length_histogram(board, me);
     let opp_hist = run_length_histogram(board, opp);
-    let my_4 = my_hist[4] as f32;
-    let opp_4 = opp_hist[4] as f32;
-    let my_3 = my_hist[3] as f32;
-    let opp_3 = opp_hist[3] as f32;
-
     let my_mob = ring_mobility(board, me) as f32;
     let opp_mob = ring_mobility(board, opp) as f32;
-
     let my_markers = count_markers(board, me) as f32;
     let opp_markers = count_markers(board, opp) as f32;
 
-    SCORE_W * score_diff
-        + ROW5_W * (my_5 - opp_5)
-        + ROW4_W * (my_4 - opp_4)
-        + ROW3_W * (my_3 - opp_3)
-        + MOBILITY_W * (my_mob - opp_mob)
-        + MARKER_W * (my_markers - opp_markers)
+    [
+        score_diff,
+        my_5 - opp_5,
+        my_hist[4] as f32 - opp_hist[4] as f32,
+        my_hist[3] as f32 - opp_hist[3] as f32,
+        my_mob - opp_mob,
+        my_markers - opp_markers,
+    ]
+}
+
+/// Evaluate `board` from `board.next_player`'s perspective using `weights`.
+/// Terminal positions return ±`WIN_SCORE` (or 0 for a draw) regardless of
+/// weights.
+pub fn evaluate_with_weights(board: &YinshBoard, weights: &[f32; N_FEATURES]) -> f32 {
+    match board.outcome {
+        Outcome::WonBy(p) if p == board.next_player => return WIN_SCORE,
+        Outcome::WonBy(_) => return -WIN_SCORE,
+        Outcome::Draw => return 0.0,
+        Outcome::Ongoing => {}
+    }
+    let f = extract_features(board);
+    let mut sum = 0.0;
+    for i in 0..N_FEATURES {
+        sum += weights[i] * f[i];
+    }
+    sum
+}
+
+/// Evaluate `board` from `board.next_player`'s perspective using the default
+/// weights. Positive = good for whoever is about to move.
+pub fn evaluate(board: &YinshBoard) -> f32 {
+    evaluate_with_weights(board, &DEFAULT_WEIGHTS)
 }
 
 // ---------------------------------------------------------------------------

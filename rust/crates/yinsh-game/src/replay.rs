@@ -86,14 +86,27 @@ fn simple_turn_to_move(turn: &Turn) -> Result<Option<YinshMove>, ReplayError> {
 }
 
 pub fn replay_game(record: &GameRecord) -> ReplayResult {
-    replay_game_inner(record, false)
+    replay_game_inner(record, false, &mut |_, _| {})
 }
 
 pub fn replay_game_verbose(record: &GameRecord) -> ReplayResult {
-    replay_game_inner(record, true)
+    replay_game_inner(record, true, &mut |_, _| {})
 }
 
-fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
+/// Replay `record`, calling `observer(&board, sgf_turn_idx)` immediately
+/// before each SGF turn is applied. Used by `tune` to sample positions.
+pub fn replay_game_observed<F: FnMut(&YinshBoard, usize)>(
+    record: &GameRecord,
+    mut observer: F,
+) -> ReplayResult {
+    replay_game_inner(record, false, &mut observer)
+}
+
+fn replay_game_inner(
+    record: &GameRecord,
+    verbose: bool,
+    observer: &mut dyn FnMut(&YinshBoard, usize),
+) -> ReplayResult {
     if !matches!(record.first_player_color, Color::White) {
         return ReplayResult {
             turns_played: 0,
@@ -111,6 +124,7 @@ fn replay_game_inner(record: &GameRecord, verbose: bool) -> ReplayResult {
         if verbose {
             println!("--- Turn {i} (P{player}): {turn:?}");
         }
+        observer(&board, i);
         // Pair RemoveRow with the next RemoveRing in the SGF stream; the engine
         // applies them as a single ClaimRow move.
         let (mv, consumed) = match turn {

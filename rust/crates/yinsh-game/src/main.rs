@@ -1,6 +1,9 @@
 mod process;
 mod random_play;
 mod replay;
+mod tune;
+
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
@@ -45,6 +48,33 @@ enum Command {
         #[arg(long)]
         skip_timeout_games: bool,
     },
+    /// Texel-tune the alphabeta eval weights from boardspace game outcomes
+    Tune {
+        /// Path to zip dir or file
+        #[arg(default_value = "games/yinsh/boardspace")]
+        path: String,
+        /// Override the cache CSV path (default: <path>/tune_positions.csv)
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        /// Re-extract positions even if the cache exists
+        #[arg(long)]
+        regen_cache: bool,
+        /// Probability of sampling each Normal-phase position [0..1]
+        #[arg(long, default_value_t = 0.5)]
+        sample_rate: f32,
+        /// Sigmoid scale: predicted_win = sigmoid(eval / k)
+        #[arg(long, default_value_t = 200.0)]
+        k: f32,
+        /// Adam learning rate
+        #[arg(long, default_value_t = 1.0)]
+        lr: f32,
+        /// Number of full-batch gradient steps
+        #[arg(long, default_value_t = 2000)]
+        epochs: usize,
+        /// Fraction of games held out for validation
+        #[arg(long, default_value_t = 0.1)]
+        val_frac: f32,
+    },
 }
 
 fn main() {
@@ -57,5 +87,17 @@ fn main() {
         Command::Process { path, skip_timeout_games } => {
             process::run_process(&path, skip_timeout_games)
         }
+        Command::Tune {
+            path, cache, regen_cache, sample_rate, k, lr, epochs, val_frac,
+        } => tune::run_tune(tune::TuneOptions {
+            games_path: path,
+            cache_path: cache,
+            regen_cache,
+            sample_rate,
+            k,
+            lr,
+            epochs,
+            val_frac,
+        }),
     }
 }
