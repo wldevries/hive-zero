@@ -493,6 +493,14 @@ pub fn play_battle_vs_bot_core(
     })
 }
 
+fn mean_std(sum: f64, sum_sq: f64, count: u64) -> (f32, f32) {
+    if count == 0 { return (0.0, 0.0); }
+    let n = count as f64;
+    let mean = sum / n;
+    let var = (sum_sq / n) - mean * mean;
+    (mean as f32, var.max(0.0).sqrt() as f32)
+}
+
 /// Result of self-play (pure Rust)
 #[derive(Clone, Debug)]
 pub struct SelfPlayResult {
@@ -519,6 +527,13 @@ pub struct SelfPlayResult {
     pub isolation_captures: u32,
     pub jump_captures: u32,
     pub sample_board_data: Vec<(String, String)>,
+
+    pub top1_visit_fraction_mean: f32,
+    pub top1_visit_fraction_std: f32,
+    pub search_depth_mean: f32,
+    pub search_depth_std: f32,
+    pub valid_moves_mean: f32,
+    pub valid_moves_std: f32,
 }
 
 /// Core self-play implementation factoring out business logic from Python bindings.
@@ -570,6 +585,16 @@ pub fn play_selfplay_core(
     let mut isolation_captures: u32 = 0;
     let mut jump_captures: u32 = 0;
     let mut sample_board_data: Vec<(String, String)> = Vec::new();
+
+    let mut session_top1_sum = 0f64;
+    let mut session_top1_sum_sq = 0f64;
+    let mut session_top1_count = 0u64;
+    let mut session_depth_sum = 0f64;
+    let mut session_depth_sum_sq = 0f64;
+    let mut session_depth_count = 0u64;
+    let mut session_moves_sum = 0f64;
+    let mut session_moves_sum_sq = 0f64;
+    let mut session_moves_count = 0u64;
 
     // Main loop
     while active.iter().any(|&a| a) {
@@ -677,6 +702,25 @@ pub fn play_selfplay_core(
             if game_sims.iter().zip(sim_caps.iter()).all(|(s, c)| *s >= *c) { break; }
         }
 
+        // Collect per-turn MCTS stats for full-search turns. We always drain
+        // `take_depth_stats` to reset the per-search counter regardless.
+        for (i, &gi) in mcts_games.iter().enumerate() {
+            let (ds, dss, dc) = searches[gi].take_depth_stats();
+            if is_full[i] {
+                let top1 = searches[gi].root_top1_visit_fraction() as f64;
+                session_top1_sum += top1;
+                session_top1_sum_sq += top1 * top1;
+                session_top1_count += 1;
+                session_depth_sum += ds;
+                session_depth_sum_sq += dss;
+                session_depth_count += dc;
+                let moves = searches[gi].root_child_count() as f64;
+                session_moves_sum += moves;
+                session_moves_sum_sq += moves * moves;
+                session_moves_count += 1;
+            }
+        }
+
         // Select and apply moves
         for (i, &gi) in mcts_games.iter().enumerate() {
             let dist = searches[gi].get_pruned_visit_distribution();
@@ -766,6 +810,13 @@ pub fn play_selfplay_core(
         }
     }
 
+    let (top1_visit_fraction_mean, top1_visit_fraction_std) =
+        mean_std(session_top1_sum, session_top1_sum_sq, session_top1_count);
+    let (search_depth_mean, search_depth_std) =
+        mean_std(session_depth_sum, session_depth_sum_sq, session_depth_count);
+    let (valid_moves_mean, valid_moves_std) =
+        mean_std(session_moves_sum, session_moves_sum_sq, session_moves_count);
+
     Ok(SelfPlayResult {
         board_data,
         reserve_data,
@@ -790,5 +841,11 @@ pub fn play_selfplay_core(
         isolation_captures,
         jump_captures,
         sample_board_data,
+        top1_visit_fraction_mean,
+        top1_visit_fraction_std,
+        search_depth_mean,
+        search_depth_std,
+        valid_moves_mean,
+        valid_moves_std,
     })
 }

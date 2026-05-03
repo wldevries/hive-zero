@@ -37,7 +37,9 @@ LOG_HEADER = (
     "loss,policy_loss,value_loss,"
     "place_policy_loss,capture_policy_loss,"
     "place_value_loss,capture_value_loss,"
-    "lr,duration_s,comment\n"
+    "lr,duration_s,"
+    "mcts_top1_mean,mcts_top1_std,mcts_depth_mean,mcts_depth_std,mcts_moves_mean,mcts_moves_std,"
+    "comment\n"
 )
 
 
@@ -262,6 +264,13 @@ class SelfPlayTrainer:
                     f"  combo={_wc(_CC, result.wins_combo)}"
                 )
 
+            ss = result.search_stats
+            print(
+                f"  MCTS: top-1 {ss.top1_mean:.2f}±{ss.top1_std:.2f}  "
+                f"depth {ss.depth_mean:.1f}±{ss.depth_std:.1f}  "
+                f"moves {ss.valid_moves_mean:.1f}±{ss.valid_moves_std:.1f}"
+            )
+
             if playout_cap.p > 0:
                 fs = result.full_search_turns
                 tt = result.total_turns
@@ -338,6 +347,9 @@ class SelfPlayTrainer:
                         f"{losses['place_policy_loss']:.6f},{losses['capture_policy_loss']:.6f},"
                         f"{losses['place_value_loss']:.6f},{losses['capture_value_loss']:.6f},"
                         f"{lr:.6f},{duration:.1f},"
+                        f"{ss.top1_mean:.4f},{ss.top1_std:.4f},"
+                        f"{ss.depth_mean:.4f},{ss.depth_std:.4f},"
+                        f"{ss.valid_moves_mean:.4f},{ss.valid_moves_std:.4f},"
                         f"{csv_comment(comment)}\n"
                     )
                 comment = ""

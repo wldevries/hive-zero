@@ -79,6 +79,17 @@ fn call_python_eval(
 // Result
 // ---------------------------------------------------------------------------
 
+#[pyclass(name = "ZertzSearchStats")]
+#[derive(Clone)]
+pub struct PyZertzSearchStats {
+    #[pyo3(get)] pub top1_mean: f32,
+    #[pyo3(get)] pub top1_std: f32,
+    #[pyo3(get)] pub depth_mean: f32,
+    #[pyo3(get)] pub depth_std: f32,
+    #[pyo3(get)] pub valid_moves_mean: f32,
+    #[pyo3(get)] pub valid_moves_std: f32,
+}
+
 #[pyclass(name = "ZertzSelfPlayResult")]
 pub struct PyZertzSelfPlayResult {
     board_data: Vec<f32>,
@@ -105,6 +116,12 @@ pub struct PyZertzSelfPlayResult {
     jump_captures: u32,
     /// Up to 3 sample boards: (label, board_string) pairs for display.
     sample_board_data: Vec<(String, String)>,
+    top1_visit_fraction_mean: f32,
+    top1_visit_fraction_std: f32,
+    search_depth_mean: f32,
+    search_depth_std: f32,
+    valid_moves_mean: f32,
+    valid_moves_std: f32,
 }
 
 #[pymethods]
@@ -158,6 +175,18 @@ impl PyZertzSelfPlayResult {
     #[getter] fn jump_captures(&self) -> u32 { self.jump_captures }
     /// Returns list of (label, board_string) for up to 3 decisive games.
     fn sample_boards(&self) -> Vec<(String, String)> { self.sample_board_data.clone() }
+
+    #[getter]
+    fn search_stats(&self) -> PyZertzSearchStats {
+        PyZertzSearchStats {
+            top1_mean: self.top1_visit_fraction_mean,
+            top1_std: self.top1_visit_fraction_std,
+            depth_mean: self.search_depth_mean,
+            depth_std: self.search_depth_std,
+            valid_moves_mean: self.valid_moves_mean,
+            valid_moves_std: self.valid_moves_std,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +364,12 @@ impl PyZertzSelfPlaySession {
             isolation_captures: r.isolation_captures,
             jump_captures: r.jump_captures,
             sample_board_data: r.sample_board_data,
+            top1_visit_fraction_mean: r.top1_visit_fraction_mean,
+            top1_visit_fraction_std: r.top1_visit_fraction_std,
+            search_depth_mean: r.search_depth_mean,
+            search_depth_std: r.search_depth_std,
+            valid_moves_mean: r.valid_moves_mean,
+            valid_moves_std: r.valid_moves_std,
         })
     }
 
@@ -603,6 +638,7 @@ fn zertz_d6_hex_permutations<'py>(py: Python<'py>) -> Vec<Bound<'py, PyArray1<i6
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyZertzSelfPlaySession>()?;
     m.add_class::<PyZertzSelfPlayResult>()?;
+    m.add_class::<PyZertzSearchStats>()?;
     m.add_class::<PyZertzBattleResult>()?;
     m.add_class::<PyZertzGame>()?;
     m.add("ZERTZ_POLICY_SIZE", NN_POLICY_SIZE)?;
