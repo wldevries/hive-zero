@@ -25,7 +25,7 @@ mod tests {
     /// Heuristic oracle: value from the current player's perspective.
     /// Only called for non-terminal nodes (MCTS handles terminal nodes internally).
     fn hive_oracle(game: &Game) -> f32 {
-        let (w, b) = game.heuristic_value();
+        let (w, b) = game.evaluate();
         match game.next_player() {
             Player::Player1 => w,
             Player::Player2 => b,

@@ -696,7 +696,7 @@ impl Game {
 
     /// Heuristic evaluation for unfinished games.
     /// Returns (white_score, black_score) in range [-1, 1].
-    pub fn heuristic_value(&self) -> (f32, f32) {
+    pub fn evaluate(&self) -> (f32, f32) {
         let w_danger  = self.queen_danger(PieceColor::White);
         let b_danger  = self.queen_danger(PieceColor::Black);
         let w_escape  = self.queen_escape(PieceColor::White);

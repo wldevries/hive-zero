@@ -1009,7 +1009,7 @@ pub fn play_selfplay_core(
                 GameState::DrawByRepetition => {
                     draws_repetition += 1;
                     let (white_score, black_score) = if use_heuristic {
-                        crate::alphabeta::heuristic_value_alphabeta(
+                        crate::alphabeta::evaluate_alphabeta(
                             &games[game_index],
                             HEURISTIC_VALUE_DEPTH,
                         )
@@ -1021,7 +1021,7 @@ pub fn play_selfplay_core(
                 GameState::Draw => {
                     draws += 1;
                     let (white_score, black_score) = if use_heuristic {
-                        crate::alphabeta::heuristic_value_alphabeta(
+                        crate::alphabeta::evaluate_alphabeta(
                             &games[game_index],
                             HEURISTIC_VALUE_DEPTH,
                         )
@@ -1034,7 +1034,7 @@ pub fn play_selfplay_core(
                     // InProgress: game hit move cap (timeout)
                     draws_timeout += 1;
                     let (white_score, black_score) = if use_heuristic {
-                        crate::alphabeta::heuristic_value_alphabeta(
+                        crate::alphabeta::evaluate_alphabeta(
                             &games[game_index],
                             HEURISTIC_VALUE_DEPTH,
                         )

@@ -56,11 +56,11 @@ impl TranspositionKey for Game {
 /// Distinguishes `DrawByRepetition` from a "real" draw (mutual queen surround)
 /// because the bot's role in self-play is to drive games to a decisive result
 /// — accepting repetition defeats that goal.
-pub fn heuristic_eval(game: &Game) -> f32 {
+pub fn evaluate(game: &Game) -> f32 {
     if game.state == GameState::DrawByRepetition {
         return REPETITION_PENALTY;
     }
-    let (white, black) = game.heuristic_value();
+    let (white, black) = game.evaluate();
     match game.turn_color {
         PieceColor::White => white,
         PieceColor::Black => black,
@@ -74,7 +74,7 @@ pub fn heuristic_eval(game: &Game) -> f32 {
 pub fn alphabeta_best_move(game: &Game, depth: u32) -> Move {
     let mut work = game.clone();
     let mut ctx = SearchContext::new(AlphaBetaParams::new(depth));
-    let mut eval = heuristic_eval;
+    let mut eval = evaluate;
     let (mv, _score) = alphabeta::alphabeta_best_move(&mut work, &mut eval, &mut ctx);
     mv.unwrap_or_else(Move::pass)
 }
@@ -86,14 +86,14 @@ pub fn alphabeta_best_move(game: &Game, depth: u32) -> Move {
 pub fn alphabeta_root_scores(game: &Game, depth: u32) -> Vec<(Move, f32)> {
     let mut work = game.clone();
     let mut ctx = SearchContext::new(AlphaBetaParams::new(depth));
-    let mut eval = heuristic_eval;
+    let mut eval = evaluate;
     alphabeta::alphabeta_root_scores(&mut work, &mut eval, &mut ctx)
 }
 
 /// Deepened static evaluation: run alphabeta to the given depth and return
 /// the best-line value as `(white_score, black_score)`, both in `[-1, 1]`.
 ///
-/// At depth 0 this matches `Game::heuristic_value()`. At depth ≥ 1 the score
+/// At depth 0 this matches `Game::evaluate()`. At depth ≥ 1 the score
 /// reflects the minimax outcome `depth` plies ahead with the same static
 /// heuristic at the leaves, so tactical patterns inside the horizon (e.g.
 /// a queen-surround threat one or two moves away) are baked into the score
@@ -107,13 +107,13 @@ pub fn alphabeta_root_scores(game: &Game, depth: u32) -> Vec<(Move, f32)> {
 /// Wins/losses found inside the search horizon collapse to `±1.0` after
 /// clamping, so the result stays in the same range as the static heuristic
 /// and remains a valid value-head training target.
-pub fn heuristic_value_alphabeta(game: &Game, depth: u32) -> (f32, f32) {
+pub fn evaluate_alphabeta(game: &Game, depth: u32) -> (f32, f32) {
     if game.state != GameState::InProgress {
-        return game.heuristic_value();
+        return game.evaluate();
     }
     let mut work = game.clone();
     let mut ctx = SearchContext::new(AlphaBetaParams::new(depth));
-    let mut eval = heuristic_eval;
+    let mut eval = evaluate;
     let (_mv, score) = alphabeta::alphabeta_best_move(&mut work, &mut eval, &mut ctx);
     let cur = score.clamp(-1.0, 1.0);
     match game.turn_color {
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn heuristic_value_alphabeta_depth0_matches_static() {
+    fn evaluate_alphabeta_depth0_matches_static() {
         // Depth 0: alphabeta short-circuits to eval(game) for InProgress
         // positions, so the deepened heuristic must match the static one.
         let mut game = Game::new();
@@ -199,14 +199,14 @@ mod tests {
             let mv = game.valid_moves()[0];
             game.play_move(&mv).unwrap();
         }
-        let (sw, sb) = game.heuristic_value();
-        let (dw, db) = heuristic_value_alphabeta(&game, 0);
+        let (sw, sb) = game.evaluate();
+        let (dw, db) = evaluate_alphabeta(&game, 0);
         assert!((sw - dw).abs() < 1e-6, "white score diverged: static={sw}, deep={dw}");
         assert!((sb - db).abs() < 1e-6, "black score diverged: static={sb}, deep={db}");
     }
 
     #[test]
-    fn heuristic_value_alphabeta_stays_in_range() {
+    fn evaluate_alphabeta_stays_in_range() {
         // Depth 3 should keep the result in [-1, 1] even when the search
         // discovers terminal lines (which would otherwise score ±WIN_SCORE).
         let mut game = Game::new();
@@ -214,7 +214,7 @@ mod tests {
             let mv = game.valid_moves()[0];
             game.play_move(&mv).unwrap();
         }
-        let (w, b) = heuristic_value_alphabeta(&game, 3);
+        let (w, b) = evaluate_alphabeta(&game, 3);
         assert!((-1.0..=1.0).contains(&w), "white score out of range: {w}");
         assert!((-1.0..=1.0).contains(&b), "black score out of range: {b}");
         // Zero-sum invariant: the two sides' scores must be exact negatives.
@@ -222,14 +222,14 @@ mod tests {
     }
 
     #[test]
-    fn heuristic_value_alphabeta_does_not_mutate_caller() {
+    fn evaluate_alphabeta_does_not_mutate_caller() {
         let mut canonical = Game::new();
         let opening = canonical.valid_moves()[0];
         canonical.play_move(&opening).unwrap();
         let before_hash = canonical.position_hash();
         let before_count = canonical.move_count;
 
-        let _ = heuristic_value_alphabeta(&canonical, 2);
+        let _ = evaluate_alphabeta(&canonical, 2);
 
         assert_eq!(canonical.position_hash(), before_hash, "canonical hash changed");
         assert_eq!(canonical.move_count, before_count, "canonical move_count changed");
@@ -249,7 +249,7 @@ mod tests {
             start.play_move(&mv).unwrap();
         }
 
-        let mut eval = heuristic_eval;
+        let mut eval = evaluate;
 
         let mut work_no_tt = start.clone();
         let mut ctx_no_tt = SearchContext::new(AlphaBetaParams::new(3));
@@ -305,7 +305,7 @@ mod tests {
             start.play_move(&mv).unwrap();
         }
 
-        let mut eval = heuristic_eval;
+        let mut eval = evaluate;
 
         let mut work_no_tt = start.clone();
         let mut ctx_no_tt = SearchContext::new(AlphaBetaParams::new(4));
@@ -354,7 +354,7 @@ mod tests {
             let mv = start.valid_moves()[0];
             start.play_move(&mv).unwrap();
         }
-        let mut eval = heuristic_eval;
+        let mut eval = evaluate;
 
         for depth in [2u32, 3, 4, 5] {
             let mut tt_only = start.clone();
@@ -394,7 +394,7 @@ mod tests {
             let mv = start.valid_moves()[0];
             start.play_move(&mv).unwrap();
         }
-        let mut eval = heuristic_eval;
+        let mut eval = evaluate;
 
         let mut work_off = start.clone();
         let mut ctx_off = SearchContext::new(AlphaBetaParams::new(3));
@@ -429,7 +429,7 @@ mod tests {
 
         let mut work = start.clone();
         let mut ctx = SearchContext::new(AlphaBetaParams::new(2));
-        let mut eval = heuristic_eval;
+        let mut eval = evaluate;
         let _ = alphabeta::alphabeta_best_move(&mut work, &mut eval, &mut ctx);
 
         assert_eq!(work.position_hash(), snapshot_hash,

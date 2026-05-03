@@ -324,8 +324,8 @@ impl PyGame {
 
     /// Heuristic value for unfinished games.
     /// Returns (white_score, black_score) based on queen pressure.
-    fn heuristic_value(&self) -> (f32, f32) {
-        self.game.heuristic_value()
+    fn evaluate(&self) -> (f32, f32) {
+        self.game.evaluate()
     }
 
     /// UHP GameString: "Base;State;Turn;move1;move2;..."
