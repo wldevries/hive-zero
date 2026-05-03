@@ -79,6 +79,15 @@ enum Command {
         /// Write fitted weights to this file (loadable via Tournament --weights-*)
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Skip games where either player's Elo is below this (0 = no filter)
+        #[arg(long, default_value_t = 0.0)]
+        min_player_elo: f32,
+        /// Path to player_elo.csv (default: <path>/player_elo.csv)
+        #[arg(long)]
+        player_elo_csv: Option<PathBuf>,
+        /// Allow negative fitted weights (default: clamp to ≥0)
+        #[arg(long)]
+        allow_negative_weights: bool,
     },
     /// Head-to-head alphabeta tournament between two weight sets
     Tournament {
@@ -118,6 +127,7 @@ fn main() {
         }
         Command::Tune {
             path, cache, regen_cache, sample_rate, k, lr, epochs, val_frac, output,
+            min_player_elo, player_elo_csv, allow_negative_weights,
         } => tune::run_tune(tune::TuneOptions {
             games_path: path,
             cache_path: cache,
@@ -128,6 +138,9 @@ fn main() {
             epochs,
             val_frac,
             output,
+            min_player_elo,
+            player_elo_csv,
+            clamp_nonneg: !allow_negative_weights,
         }),
         Command::Tournament {
             weights_a, weights_b, depth, games, random_opening_moves, max_moves, seed,

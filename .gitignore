@@ -12,6 +12,7 @@ checkpoints/
 *.sgf
 *.zip
 games/**/*.csv
+games/**/*.txt
 *_log.csv
 
 # Rust

@@ -22,7 +22,7 @@ use std::path::Path;
 use yinsh_game::alphabeta::N_FEATURES;
 
 const FEATURE_NAMES: [&str; N_FEATURES] = [
-    "SCORE", "ROW5", "ROW4", "ROW3", "MOBILITY", "MARKER",
+    "SCORE", "POTENTIAL5", "POTENTIAL4", "POTENTIAL3", "POTENTIAL2", "MOBILITY", "MARKER",
 ];
 
 pub fn save_weights(path: &Path, weights: &[f32; N_FEATURES]) -> std::io::Result<()> {

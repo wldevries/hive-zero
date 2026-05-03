@@ -21,7 +21,7 @@ use yinsh_game::sgf::{self, Color};
 use crate::replay;
 
 const FEATURE_NAMES: [&str; N_FEATURES] = [
-    "SCORE", "ROW5", "ROW4", "ROW3", "MOBILITY", "MARKER",
+    "SCORE", "POTENTIAL5", "POTENTIAL4", "POTENTIAL3", "POTENTIAL2", "MOBILITY", "MARKER",
 ];
 
 #[derive(Debug, Clone)]
@@ -43,6 +43,16 @@ pub struct TuneOptions {
     pub val_frac: f32,
     /// If set, write the fitted weights to this file in `weights::save_weights` format.
     pub output: Option<PathBuf>,
+    /// Skip games where either player's Elo (from `player_elo.csv`) is below this.
+    /// 0 disables the filter. Threshold is baked into the default cache filename.
+    pub min_player_elo: f32,
+    /// Override the path to `player_elo.csv` (default: <games_path>/player_elo.csv).
+    pub player_elo_csv: Option<PathBuf>,
+    /// Project weights to [0, ∞) after each Adam step. Every feature is
+    /// "more is better" by construction, so negative weights are pathological
+    /// for play (the engine actively avoids the feature) even when they
+    /// minimize MSE via collinear cancellation.
+    pub clamp_nonneg: bool,
 }
 
 pub fn run_tune(opts: TuneOptions) {
@@ -52,22 +62,48 @@ pub fn run_tune(opts: TuneOptions) {
         return;
     }
 
+    let dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(path).to_path_buf()
+    };
     let cache_path = opts.cache_path.clone().unwrap_or_else(|| {
-        let dir = if path.is_dir() {
-            path.to_path_buf()
+        if opts.min_player_elo > 0.0 {
+            dir.join(format!("tune_positions_min{}.csv", opts.min_player_elo as u32))
         } else {
-            path.parent().unwrap_or(path).to_path_buf()
-        };
-        dir.join("tune_positions.csv")
+            dir.join("tune_positions.csv")
+        }
     });
+
+    // Load the Elo filter set if requested. Empty HashMap = no filtering.
+    let elo_filter = if opts.min_player_elo > 0.0 {
+        let elo_csv = opts.player_elo_csv.clone()
+            .unwrap_or_else(|| dir.join("player_elo.csv"));
+        match load_player_elo(&elo_csv) {
+            Ok(map) => {
+                let n_above = map.values().filter(|&&e| e >= opts.min_player_elo).count();
+                println!(
+                    "Loaded {} players from {}, {} have Elo ≥ {:.0}",
+                    map.len(), elo_csv.display(), n_above, opts.min_player_elo,
+                );
+                map
+            }
+            Err(e) => {
+                eprintln!("Warning: could not load Elo CSV ({e}); skipping filter.");
+                std::collections::HashMap::new()
+            }
+        }
+    } else {
+        std::collections::HashMap::new()
+    };
 
     let positions = if cache_path.exists() && !opts.regen_cache {
         println!("Loading positions from cache: {}", cache_path.display());
         load_positions(&cache_path).expect("failed to load cache")
     } else {
-        println!("Extracting positions from {} (sample_rate={})...",
-            opts.games_path, opts.sample_rate);
-        let extracted = extract_all(path, opts.sample_rate);
+        println!("Extracting positions from {} (sample_rate={}, min_elo={})...",
+            opts.games_path, opts.sample_rate, opts.min_player_elo);
+        let extracted = extract_all(path, opts.sample_rate, &elo_filter, opts.min_player_elo);
         println!("Caching {} positions to {}", extracted.len(), cache_path.display());
         save_positions(&cache_path, &extracted).expect("failed to write cache");
         extracted
@@ -135,6 +171,9 @@ pub fn run_tune(opts: TuneOptions) {
             let m_hat = m[i] / bc1;
             let v_hat = v[i] / bc2;
             weights[i] -= opts.lr * m_hat / (v_hat.sqrt() + eps);
+            if opts.clamp_nonneg && weights[i] < 0.0 {
+                weights[i] = 0.0;
+            }
         }
         let log_now = epoch == 1
             || epoch == opts.epochs
@@ -182,12 +221,19 @@ pub fn run_tune(opts: TuneOptions) {
 // Extraction
 // ---------------------------------------------------------------------------
 
-fn extract_all(path: &Path, sample_rate: f32) -> Vec<LabeledPosition> {
+fn extract_all(
+    path: &Path,
+    sample_rate: f32,
+    elo_filter: &std::collections::HashMap<String, f32>,
+    min_elo: f32,
+) -> Vec<LabeledPosition> {
     let mut positions: Vec<LabeledPosition> = Vec::new();
     let mut next_game_id: u32 = 0;
     let mut total: u64 = 0;
     let mut used: u64 = 0;
+    let mut skipped_elo: u64 = 0;
     let mut rng = rand::rng();
+    let filter_active = !elo_filter.is_empty() && min_elo > 0.0;
 
     let mut process_zip = |zip_path: &Path| {
         let zip_name = zip_path.display().to_string();
@@ -200,8 +246,8 @@ fn extract_all(path: &Path, sample_rate: f32) -> Vec<LabeledPosition> {
             total += 1;
             if total % 2000 == 0 {
                 eprint!(
-                    "\r  {} games scanned, {} usable, {} positions...   ",
-                    total, used, positions.len()
+                    "\r  {} games scanned, {} usable, {} skipped (Elo), {} positions...   ",
+                    total, used, skipped_elo, positions.len()
                 );
             }
 
@@ -210,6 +256,19 @@ fn extract_all(path: &Path, sample_rate: f32) -> Vec<LabeledPosition> {
                 Err(_) => return,
             };
             if !matches!(record.first_player_color, Color::White) { return; }
+
+            // Elo filter: both players must be at or above the threshold.
+            // Players missing from the CSV (rare — usually only games that
+            // were undetermined and never updated) are treated as below
+            // threshold and skipped.
+            if filter_active {
+                let p0_elo = elo_filter.get(&record.player0).copied().unwrap_or(0.0);
+                let p1_elo = elo_filter.get(&record.player1).copied().unwrap_or(0.0);
+                if p0_elo < min_elo || p1_elo < min_elo {
+                    skipped_elo += 1;
+                    return;
+                }
+            }
 
             // First pass: replay the whole game to confirm it terminates and
             // determine the engine-verified outcome.
@@ -311,28 +370,62 @@ fn save_positions(path: &Path, positions: &[LabeledPosition]) -> std::io::Result
     let mut f = BufWriter::new(std::fs::File::create(path)?);
     writeln!(
         f,
-        "game_id,score_diff,row5_diff,row4_diff,row3_diff,mobility_diff,marker_diff,label"
+        "game_id,score_diff,p5_diff,p4_diff,p3_diff,p2_diff,mobility_diff,marker_diff,label"
     )?;
     for p in positions {
         writeln!(
-            f, "{},{},{},{},{},{},{},{}",
+            f, "{},{},{},{},{},{},{},{},{}",
             p.game_id,
-            p.features[0], p.features[1], p.features[2],
-            p.features[3], p.features[4], p.features[5],
+            p.features[0], p.features[1], p.features[2], p.features[3],
+            p.features[4], p.features[5], p.features[6],
             p.label,
         )?;
     }
     Ok(())
 }
 
+fn load_player_elo(path: &Path) -> std::io::Result<std::collections::HashMap<String, f32>> {
+    let f = BufReader::new(std::fs::File::open(path)?);
+    let mut map = std::collections::HashMap::new();
+    for (i, line) in f.lines().enumerate() {
+        if i == 0 { continue; } // header
+        let line = line?;
+        // Split on commas. Player names may be CSV-escaped (quoted with
+        // embedded "" for inner quotes); keep it simple and only handle the
+        // unquoted case — boardspace player names are alphanumeric so this
+        // covers ~all rows.
+        let parts: Vec<&str> = line.splitn(3, ',').collect();
+        if parts.len() < 2 { continue; }
+        let name = parts[0].trim().trim_matches('"').to_string();
+        let elo: f32 = match parts[1].trim().parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        map.insert(name, elo);
+    }
+    Ok(map)
+}
+
 fn load_positions(path: &Path) -> std::io::Result<Vec<LabeledPosition>> {
     let f = BufReader::new(std::fs::File::open(path)?);
     let mut positions = Vec::new();
+    let expected_cols = 1 + N_FEATURES + 1; // game_id + features + label
+    let mut wrong_cols_seen = false;
     for (i, line) in f.lines().enumerate() {
         if i == 0 { continue; } // header
         let line = line?;
         let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() != 8 { continue; }
+        if parts.len() != expected_cols {
+            if !wrong_cols_seen {
+                eprintln!(
+                    "warning: cache row {} has {} columns, expected {}; \
+                     cache likely from a different feature set — re-run with --regen-cache",
+                    i, parts.len(), expected_cols,
+                );
+                wrong_cols_seen = true;
+            }
+            continue;
+        }
         let game_id = parts[0].parse().unwrap_or(0);
         let mut features = [0.0f32; N_FEATURES];
         let mut ok = true;
@@ -343,7 +436,7 @@ fn load_positions(path: &Path) -> std::io::Result<Vec<LabeledPosition>> {
             }
         }
         if !ok { continue; }
-        let label = match parts[7].parse::<f32>() {
+        let label = match parts[1 + N_FEATURES].parse::<f32>() {
             Ok(x) => x,
             Err(_) => continue,
         };

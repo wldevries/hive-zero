@@ -19,22 +19,31 @@ use crate::board::{Cell, YinshBoard, YinshMove};
 use crate::hex::{BOARD_SIZE, ROW_DIRS, cell_index_i8, index_to_cell, is_valid_i8};
 
 /// Number of linear features in the eval. Feature order:
-/// 0: score_diff (rings captured)
-/// 1: row5_diff  (formed unclaimed 5-rows)
-/// 2: row4_diff  (maximal 4-runs)
-/// 3: row3_diff  (maximal 3-runs)
-/// 4: mobility_diff  (sum of legal ring destinations)
-/// 5: marker_diff
-pub const N_FEATURES: usize = 6;
+/// 0: score_diff      (rings captured)
+/// 1: potential5_diff (5-cell windows containing all 5 of my markers — formed 5-rows)
+/// 2: potential4_diff (5-cell windows with exactly 4 of my markers)
+/// 3: potential3_diff (5-cell windows with exactly 3 of my markers)
+/// 4: potential2_diff (5-cell windows with exactly 2 of my markers)
+/// 5: mobility_diff   (sum of legal ring destinations)
+/// 6: marker_diff
+///
+/// POTENTIAL_N counts overlap deliberately: a solid 4-in-a-row with both
+/// flanks empty appears in 2 POTENTIAL4 windows, while a split-4 like
+/// `xxxox` appears in only 1 — so the more tactically valuable shapes
+/// score higher automatically. Ring-blocking is ignored (a ring inside a
+/// window doesn't disqualify it); we may add that as a separate feature
+/// later if it matters.
+pub const N_FEATURES: usize = 7;
 
 /// Linear eval weights, current-player-relative. First-pass guesses; the
 /// `tune` subcommand on `yinsh-tools` fits these from boardspace outcomes.
 pub const DEFAULT_WEIGHTS: [f32; N_FEATURES] = [
     1000.0, // SCORE
-    500.0,  // ROW5
-    50.0,   // ROW4
-    5.0,    // ROW3
-    0.1,    // MOBILITY
+    500.0,  // POTENTIAL5
+    10.0,   // POTENTIAL4
+    1.0,    // POTENTIAL3
+    0.1,    // POTENTIAL2
+    1.0,    // MOBILITY (per ring; range ~0..20)
     0.5,    // MARKER
 ];
 
@@ -62,40 +71,53 @@ fn ring_of(player: Player) -> Cell {
     }
 }
 
-/// Histogram of maximal contiguous runs of `player`'s markers along the three
-/// row directions. `hist[k]` (for `k = 1..=5`) counts runs of exactly that
-/// length; `hist[5]` collects 5 or longer (5+ shouldn't occur in practice
-/// because rule G triggers a row claim immediately, but the clamp is safe).
-fn run_length_histogram(board: &YinshBoard, player: Player) -> [usize; 6] {
-    let marker = marker_of(player);
-    let mut hist = [0usize; 6];
+/// Per-window histograms for both players in a single pass over the board.
+/// `out.0[k]` counts windows containing exactly k of `me`'s markers;
+/// `out.1[k]` does the same for `opp`. Each window is scanned once and both
+/// counts are tallied in lockstep — twice as fast as calling the
+/// single-player version twice.
+///
+/// A 4-in-a-row with both flanks on-board appears in 2 windows of `hist[4]`;
+/// a split-four like `xxxox` appears in 1. Solid shapes therefore naturally
+/// outscore split ones, and shapes in the middle of the board outscore
+/// edge-pinned shapes (more overlapping windows fit).
+fn potential_histograms_both(
+    board: &YinshBoard,
+    me: Player,
+    opp: Player,
+) -> ([usize; 6], [usize; 6]) {
+    let me_marker = marker_of(me);
+    let opp_marker = marker_of(opp);
+    let mut my_hist = [0usize; 6];
+    let mut opp_hist = [0usize; 6];
 
     for &(dc, dr) in &ROW_DIRS {
         for idx in 0..BOARD_SIZE {
-            if board.cells[idx] != marker {
-                continue;
-            }
-            // Only count from the start of a maximal run: previous cell in
-            // this direction is off-board or not our marker.
             let (c, r) = index_to_cell(idx);
-            let pc = c as i8 - dc;
-            let pr = r as i8 - dr;
-            if is_valid_i8(pc, pr) && board.cells[cell_index_i8(pc, pr)] == marker {
-                continue;
+            let mut my_count = 0usize;
+            let mut opp_count = 0usize;
+            let mut on_board = true;
+            for k in 0..5i8 {
+                let cc = c as i8 + k * dc;
+                let rr = r as i8 + k * dr;
+                if !is_valid_i8(cc, rr) {
+                    on_board = false;
+                    break;
+                }
+                let cell = board.cells[cell_index_i8(cc, rr)];
+                if cell == me_marker {
+                    my_count += 1;
+                } else if cell == opp_marker {
+                    opp_count += 1;
+                }
             }
-            // Walk forward to find the run length.
-            let mut len = 0usize;
-            let mut cc = c as i8;
-            let mut rr = r as i8;
-            while is_valid_i8(cc, rr) && board.cells[cell_index_i8(cc, rr)] == marker {
-                len += 1;
-                cc += dc;
-                rr += dr;
+            if on_board {
+                my_hist[my_count] += 1;
+                opp_hist[opp_count] += 1;
             }
-            hist[len.min(5)] += 1;
         }
     }
-    hist
+    (my_hist, opp_hist)
 }
 
 /// Sum of legal ring destinations across all of `player`'s rings on the board.
@@ -114,6 +136,11 @@ fn count_markers(board: &YinshBoard, player: Player) -> usize {
     board.cells.iter().filter(|&&c| c == marker).count()
 }
 
+fn count_rings(board: &YinshBoard, player: Player) -> usize {
+    let ring = ring_of(player);
+    board.cells.iter().filter(|&&c| c == ring).count()
+}
+
 /// Extract the linear feature vector for `board`, current-player-relative.
 /// Caller must check that `board.outcome == Ongoing` first — terminal
 /// positions are handled by `evaluate` / `evaluate_with_weights`.
@@ -122,22 +149,24 @@ pub fn extract_features(board: &YinshBoard) -> [f32; N_FEATURES] {
     let opp = me.opposite();
 
     let score_diff = score_of(board, me) as f32 - score_of(board, opp) as f32;
-    // Formed (unclaimed) 5-rows. Outside ClaimRow phase this is 0 — rows are
-    // either claimed immediately or don't exist yet.
-    let my_5 = board.find_rows(me).len() as f32;
-    let opp_5 = board.find_rows(opp).len() as f32;
-    let my_hist = run_length_histogram(board, me);
-    let opp_hist = run_length_histogram(board, opp);
-    let my_mob = ring_mobility(board, me) as f32;
-    let opp_mob = ring_mobility(board, opp) as f32;
+    let (my_hist, opp_hist) = potential_histograms_both(board, me, opp);
+    // Mobility-per-ring rather than raw mobility: capturing a 5-row removes
+    // a ring (and its destinations from the total) without any drop in the
+    // remaining rings' quality. The per-ring metric stays comparable across
+    // game phases. max(1) avoids div-by-zero for empty boards / Setup phase.
+    let my_rings = count_rings(board, me).max(1) as f32;
+    let opp_rings = count_rings(board, opp).max(1) as f32;
+    let my_mob = ring_mobility(board, me) as f32 / my_rings;
+    let opp_mob = ring_mobility(board, opp) as f32 / opp_rings;
     let my_markers = count_markers(board, me) as f32;
     let opp_markers = count_markers(board, opp) as f32;
 
     [
         score_diff,
-        my_5 - opp_5,
+        my_hist[5] as f32 - opp_hist[5] as f32,
         my_hist[4] as f32 - opp_hist[4] as f32,
         my_hist[3] as f32 - opp_hist[3] as f32,
+        my_hist[2] as f32 - opp_hist[2] as f32,
         my_mob - opp_mob,
         my_markers - opp_markers,
     ]
@@ -335,17 +364,34 @@ mod tests {
     }
 
     #[test]
-    fn run_length_histogram_counts_runs() {
+    fn potential_histogram_counts_overlapping_windows() {
         let mut board = YinshBoard::new();
-        // Build a horizontal run of 4 white markers along the (0, 1) direction
-        // starting at E5 — cells E5, E6, E7, E8.
+        // 4 white markers in a row at (4, 4..7) along the (0, 1) direction.
+        // Both flanks (rows 3 and 8) are on-board for column 4, so the 4-run
+        // sits inside two distinct 5-windows: rows [3..7] and rows [4..8].
         for k in 0..4u8 {
             board.cells[cell_index(4, 4 + k)] = Cell::WhiteMarker;
         }
-        let hist = run_length_histogram(&board, Player::Player1);
-        assert_eq!(hist[4], 1, "expected exactly one run of 4: {:?}", hist);
-        assert_eq!(hist[3], 0);
-        assert_eq!(hist[5], 0);
+        let (my_hist, opp_hist) =
+            potential_histograms_both(&board, Player::Player1, Player::Player2);
+        assert_eq!(my_hist[4], 2, "solid-4 in mid-board sits in 2 windows: {my_hist:?}");
+        assert_eq!(my_hist[5], 0, "no 5-row formed");
+        assert_eq!(opp_hist[4], 0, "opponent has no markers");
+    }
+
+    #[test]
+    fn potential_histogram_counts_split_pattern() {
+        let mut board = YinshBoard::new();
+        // Split pattern x.x.x at (4, 3), (4, 5), (4, 7) — 3 markers within a
+        // single 5-cell window starting at row 3.
+        board.cells[cell_index(4, 3)] = Cell::WhiteMarker;
+        board.cells[cell_index(4, 5)] = Cell::WhiteMarker;
+        board.cells[cell_index(4, 7)] = Cell::WhiteMarker;
+        let (my_hist, _opp_hist) =
+            potential_histograms_both(&board, Player::Player1, Player::Player2);
+        assert!(my_hist[3] >= 1, "x.x.x should yield at least one P3 window: {my_hist:?}");
+        assert_eq!(my_hist[5], 0);
+        assert_eq!(my_hist[4], 0);
     }
 
     #[test]
