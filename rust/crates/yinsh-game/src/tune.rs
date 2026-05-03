@@ -41,6 +41,8 @@ pub struct TuneOptions {
     pub lr: f32,
     pub epochs: usize,
     pub val_frac: f32,
+    /// If set, write the fitted weights to this file in `weights::save_weights` format.
+    pub output: Option<PathBuf>,
 }
 
 pub fn run_tune(opts: TuneOptions) {
@@ -167,6 +169,13 @@ pub fn run_tune(opts: TuneOptions) {
         println!("    {:>12.4}, // {}", weights[i], FEATURE_NAMES[i]);
     }
     println!("];");
+
+    if let Some(out) = &opts.output {
+        match crate::weights::save_weights(out, &weights) {
+            Ok(()) => println!("\nWrote fitted weights to {}", out.display()),
+            Err(e) => eprintln!("\nFailed to write {}: {e}", out.display()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

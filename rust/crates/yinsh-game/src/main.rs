@@ -1,7 +1,9 @@
 mod process;
 mod random_play;
 mod replay;
+mod tournament;
 mod tune;
+mod weights;
 
 use std::path::PathBuf;
 
@@ -74,6 +76,33 @@ enum Command {
         /// Fraction of games held out for validation
         #[arg(long, default_value_t = 0.1)]
         val_frac: f32,
+        /// Write fitted weights to this file (loadable via Tournament --weights-*)
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Head-to-head alphabeta tournament between two weight sets
+    Tournament {
+        /// Engine A weights file (omit for built-in DEFAULT_WEIGHTS)
+        #[arg(long)]
+        weights_a: Option<PathBuf>,
+        /// Engine B weights file (omit for built-in DEFAULT_WEIGHTS)
+        #[arg(long)]
+        weights_b: Option<PathBuf>,
+        /// Alphabeta search depth (same for both engines)
+        #[arg(long, default_value_t = 3)]
+        depth: u32,
+        /// Total games to play (rounded up to an even number for pairing)
+        #[arg(long, default_value_t = 40)]
+        games: u32,
+        /// Random first N moves before alphabeta takes over (10 = full Setup)
+        #[arg(long, default_value_t = 12)]
+        random_opening_moves: u32,
+        /// Hard cap on moves per game; treated as a draw if hit
+        #[arg(long, default_value_t = 500)]
+        max_moves: u32,
+        /// Base RNG seed (paired games share it; pair k uses seed+k)
+        #[arg(long, default_value_t = 0xCAFE)]
+        seed: u64,
     },
 }
 
@@ -88,7 +117,7 @@ fn main() {
             process::run_process(&path, skip_timeout_games)
         }
         Command::Tune {
-            path, cache, regen_cache, sample_rate, k, lr, epochs, val_frac,
+            path, cache, regen_cache, sample_rate, k, lr, epochs, val_frac, output,
         } => tune::run_tune(tune::TuneOptions {
             games_path: path,
             cache_path: cache,
@@ -98,6 +127,18 @@ fn main() {
             lr,
             epochs,
             val_frac,
+            output,
+        }),
+        Command::Tournament {
+            weights_a, weights_b, depth, games, random_opening_moves, max_moves, seed,
+        } => tournament::run_tournament(tournament::TournamentOptions {
+            weights_a,
+            weights_b,
+            depth,
+            games,
+            random_opening_moves,
+            max_moves,
+            seed,
         }),
     }
 }

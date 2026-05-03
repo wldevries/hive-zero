@@ -222,10 +222,21 @@ impl MoveOrdering for YinshMove {
 /// depth (or `Pass` if the position has no legal moves). Operates on a clone
 /// — the caller's board is never mutated.
 pub fn alphabeta_best_move(board: &YinshBoard, depth: u32) -> YinshMove {
+    alphabeta_best_move_with_weights(board, depth, &DEFAULT_WEIGHTS)
+}
+
+/// Like `alphabeta_best_move`, but evaluates positions using the supplied
+/// linear weight vector instead of `DEFAULT_WEIGHTS`. Used by the tournament
+/// harness to A/B-test fitted weights against the defaults.
+pub fn alphabeta_best_move_with_weights(
+    board: &YinshBoard,
+    depth: u32,
+    weights: &[f32; N_FEATURES],
+) -> YinshMove {
     let mut work = board.clone();
     work.history.clear();
     let mut ctx = SearchContext::new(AlphaBetaParams::new(depth));
-    let mut eval = evaluate;
+    let mut eval = |b: &YinshBoard| evaluate_with_weights(b, weights);
     let (mv, _score) = alphabeta::alphabeta_best_move(&mut work, &mut eval, &mut ctx);
     mv.unwrap_or(YinshMove::Pass)
 }
