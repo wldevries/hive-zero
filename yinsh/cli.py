@@ -93,11 +93,22 @@ def main():
     # battle
     b = sub.add_parser("battle", help="Pit two models against each other")
     b.add_argument("model1", type=str)
-    b.add_argument("model2", type=str)
+    b.add_argument(
+        "model2",
+        type=str,
+        help="Path to second model checkpoint, or the literal 'alphabeta' to play "
+             "against the heuristic alpha-beta bot",
+    )
     b.add_argument("--games", type=int, default=20)
     b.add_argument("--simulations", type=int, default=None)
     b.add_argument("--device", type=str, default="cuda")
     b.add_argument("--play-batch-sims", type=int, default=8)
+    b.add_argument(
+        "--bot-depth",
+        type=int,
+        default=3,
+        help="Alpha-beta search depth when model2 is 'alphabeta' (default: 3)",
+    )
 
     # play
     p = sub.add_parser("play", help="REPL: list valid moves and play interactively")
@@ -168,6 +179,7 @@ def main():
             simulations=args.simulations,
             device=args.device,
             play_batch_size=args.play_batch_sims,
+            bot_depth=args.bot_depth,
         )
     elif args.command == "play":
         _run_play(args)
