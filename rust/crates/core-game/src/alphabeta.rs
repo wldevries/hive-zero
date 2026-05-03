@@ -18,6 +18,7 @@
 //!   so it never collides with terminal magnitudes.
 
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use crate::game::{Game, Outcome, Undoable};
 
@@ -36,20 +37,40 @@ impl AlphaBetaParams {
     }
 }
 
-/// Trait for the move type to expose a stable history-table index. Used by
-/// the history heuristic in the search driver: every β-cutoff bumps
-/// `history[mv.history_index()]` by `depth²`, and subsequent move-ordering
-/// sorts by that value so empirically-good moves are tried earlier.
+/// Trait for the move type to feed the driver's move-ordering machinery.
 ///
-/// Implementations should return `None` for moves that should not be tracked
-/// (typically the pass move). `HISTORY_SIZE` must be strictly greater than
-/// the largest index any `history_index` call can return.
-pub trait MoveOrdering {
+/// Generic over the game type `G` so that game-specific implementations can
+/// look at the current board state when computing `priority`. The default
+/// `priority` returns 0 (no preference), so games with no static tactical
+/// signal can fall back entirely to the killer + history tiebreakers.
+///
+/// Sort precedence inside the driver (smaller key tried earlier):
+///   1. `priority(game)` — game-specific static signal (e.g. Zertz's
+///      "this placement exposes opp to a forced capture" classifier).
+///   2. Killer slots at this ply — within-priority-bucket ordering for
+///      moves that produced a β-cutoff at this exact ply across siblings.
+///   3. Negated history score — accumulated β-cutoff bonus across the
+///      whole tree, indexed by `history_index`.
+///
+/// `HISTORY_SIZE` must be strictly greater than the largest index any
+/// `history_index` call can return; the driver indexes into a flat
+/// `Vec<i32>` of that size. `history_index` returns `None` for moves that
+/// should not influence history ordering (typically pass).
+pub trait MoveOrdering<G: ?Sized>: Sized {
     /// Stable index for this move into the per-search history table, or
     /// `None` if the move should not influence ordering (e.g. pass).
     fn history_index(&self) -> Option<usize>;
+
     /// Total slots required for the history table.
     const HISTORY_SIZE: usize;
+
+    /// Game-specific static priority, evaluated once per move per node sort.
+    /// Smaller values are tried earlier. Default: 0 (delegate fully to the
+    /// killer + history tiebreakers). Implementations should be cheap —
+    /// O(few cell reads) per call — since they run inside the inner sort.
+    fn priority(&self, _game: &G) -> i32 {
+        0
+    }
 }
 
 /// Trait for games that support transposition table caching: provide a
@@ -156,7 +177,14 @@ impl<M: Copy> TranspositionTable<M> {
 
 /// Mutable per-search state. Carries params, node counts, the transposition
 /// table, and the killer/history move-ordering tables.
-pub struct SearchContext<M: Copy> {
+///
+/// Generic over both the move type `M` and the game type `G`. `G` only
+/// appears in the `MoveOrdering<G>` bound that gates `HISTORY_SIZE`, so a
+/// `PhantomData<fn() -> *const G>` field anchors it without affecting
+/// auto-traits or layout. Type inference resolves `G` at every
+/// `SearchContext::new` call site since the context is invariably handed
+/// off to `negamax` / `alphabeta_*` next, which constrain both `M` and `G`.
+pub struct SearchContext<M: Copy, G: ?Sized> {
     pub params: AlphaBetaParams,
     pub nodes_visited: u64,
     pub tt: TranspositionTable<M>,
@@ -178,16 +206,17 @@ pub struct SearchContext<M: Copy> {
     /// are tried first at sibling nodes at the same ply.
     pub killers: Vec<[Option<M>; 2]>,
     /// History heuristic: `history[mv.history_index()] += depth²` on every
-    /// β-cutoff. Used as a tie-breaker after the TT move and killers.
+    /// β-cutoff. Used as a tie-breaker after the priority and killers.
     pub history: Vec<i32>,
     /// Times a killer slot match was found and lifted in move ordering.
     pub killer_hits: u64,
     /// When false, killer + history ordering is bypassed (TT-only mode).
     /// Useful for benchmarks that isolate the new heuristics' contribution.
     pub ordering_enabled: bool,
+    _phantom: PhantomData<fn() -> *const G>,
 }
 
-impl<M: Copy + MoveOrdering> SearchContext<M> {
+impl<M: Copy + MoveOrdering<G>, G: ?Sized> SearchContext<M, G> {
     pub fn new(params: AlphaBetaParams) -> Self {
         Self {
             params,
@@ -197,9 +226,10 @@ impl<M: Copy + MoveOrdering> SearchContext<M> {
             tt_order_hits: 0,
             tt_enabled: true,
             killers: Vec::new(),
-            history: vec![0i32; M::HISTORY_SIZE],
+            history: vec![0i32; <M as MoveOrdering<G>>::HISTORY_SIZE],
             killer_hits: 0,
             ordering_enabled: true,
+            _phantom: PhantomData,
         }
     }
 }
@@ -229,11 +259,11 @@ fn negamax<G, F>(
     mut alpha: f32,
     beta: f32,
     eval: &mut F,
-    ctx: &mut SearchContext<G::Move>,
+    ctx: &mut SearchContext<G::Move, G>,
 ) -> f32
 where
     G: Game + Undoable + TranspositionKey,
-    G::Move: PartialEq + MoveOrdering,
+    G::Move: PartialEq + MoveOrdering<G>,
     F: FnMut(&G) -> f32,
 {
     ctx.nodes_visited += 1;
@@ -302,24 +332,32 @@ where
         }
     }
 
-    // Killers + history ordering for everything after the TT move. Killer
-    // slots fire when a sibling at this exact ply has caused a β-cutoff
-    // with the same move; otherwise we fall back to history (cumulative
-    // cutoff bonus across the whole tree). `sort_by_key` is ascending, so
-    // smaller keys are tried earlier — we map "good" moves to small keys.
+    // Three-tier ordering for everything after the TT move (smaller key first):
+    //   1. `priority(game)` — game-specific static signal. For games that
+    //      don't override this it returns 0, so all moves stay in the same
+    //      priority bucket and the killer/history order takes over.
+    //   2. Killer tier (0 for slot 0, 1 for slot 1, 2 for everyone else) —
+    //      within-priority-bucket preference for moves that produced a
+    //      β-cutoff at this exact ply across siblings.
+    //   3. Negated history score — accumulated β-cutoff bonus across the
+    //      whole tree. Tiebreaker after both above.
+    // Tuple sort handles lexicographic comparison naturally.
     if ctx.ordering_enabled && sort_start < moves.len() {
         let killers = ctx.killers.get(ply as usize).copied().unwrap_or([None, None]);
         moves[sort_start..].sort_by_key(|mv| {
-            if Some(*mv) == killers[0] {
-                i64::MIN
+            let prio = mv.priority(game);
+            let killer_tier = if Some(*mv) == killers[0] {
+                0i32
             } else if Some(*mv) == killers[1] {
-                i64::MIN + 1
+                1
             } else {
-                match mv.history_index() {
-                    Some(idx) => -(ctx.history[idx] as i64),
-                    None => 0,
-                }
-            }
+                2
+            };
+            let hist = match mv.history_index() {
+                Some(idx) => -(ctx.history[idx] as i64),
+                None => 0,
+            };
+            (prio, killer_tier, hist)
         });
         if Some(moves[sort_start]) == killers[0] || Some(moves[sort_start]) == killers[1] {
             ctx.killer_hits += 1;
@@ -422,11 +460,11 @@ where
 pub fn alphabeta_best_move<G, F>(
     game: &mut G,
     eval: &mut F,
-    ctx: &mut SearchContext<G::Move>,
+    ctx: &mut SearchContext<G::Move, G>,
 ) -> (Option<G::Move>, f32)
 where
     G: Game + Undoable + TranspositionKey,
-    G::Move: PartialEq + MoveOrdering,
+    G::Move: PartialEq + MoveOrdering<G>,
     F: FnMut(&G) -> f32,
 {
     match game.outcome() {
@@ -461,9 +499,13 @@ where
             }
         }
         if ctx.ordering_enabled && moves.len() > 1 {
-            moves[1..].sort_by_key(|mv| match mv.history_index() {
-                Some(idx) => -(ctx.history[idx] as i64),
-                None => 0,
+            moves[1..].sort_by_key(|mv| {
+                let prio = mv.priority(game);
+                let hist = match mv.history_index() {
+                    Some(idx) => -(ctx.history[idx] as i64),
+                    None => 0,
+                };
+                (prio, hist)
             });
         }
 
@@ -516,11 +558,11 @@ where
 pub fn alphabeta_root_scores<G, F>(
     game: &mut G,
     eval: &mut F,
-    ctx: &mut SearchContext<G::Move>,
+    ctx: &mut SearchContext<G::Move, G>,
 ) -> Vec<(G::Move, f32)>
 where
     G: Game + Undoable + TranspositionKey,
-    G::Move: PartialEq + MoveOrdering,
+    G::Move: PartialEq + MoveOrdering<G>,
     F: FnMut(&G) -> f32,
 {
     match game.outcome() {
@@ -550,9 +592,13 @@ where
             }
         }
         if ctx.ordering_enabled && moves.len() > 1 {
-            moves[1..].sort_by_key(|mv| match mv.history_index() {
-                Some(idx) => -(ctx.history[idx] as i64),
-                None => 0,
+            moves[1..].sort_by_key(|mv| {
+                let prio = mv.priority(game);
+                let hist = match mv.history_index() {
+                    Some(idx) => -(ctx.history[idx] as i64),
+                    None => 0,
+                };
+                (prio, hist)
             });
         }
 
@@ -587,9 +633,13 @@ where
         }
     }
     if ctx.ordering_enabled && moves.len() > 1 {
-        moves[1..].sort_by_key(|mv| match mv.history_index() {
-            Some(idx) => -(ctx.history[idx] as i64),
-            None => 0,
+        moves[1..].sort_by_key(|mv| {
+            let prio = mv.priority(game);
+            let hist = match mv.history_index() {
+                Some(idx) => -(ctx.history[idx] as i64),
+                None => 0,
+            };
+            (prio, hist)
         });
     }
 
@@ -687,11 +737,12 @@ mod tests {
         }
     }
 
-    impl MoveOrdering for u8 {
+    impl MoveOrdering<CountdownGame> for u8 {
         const HISTORY_SIZE: usize = 4; // moves are 1..=3, with 0 == pass
         fn history_index(&self) -> Option<usize> {
             if *self == 0 { None } else { Some(*self as usize) }
         }
+        // priority defaults to 0 — countdown has no static signal worth using.
     }
 
     #[test]

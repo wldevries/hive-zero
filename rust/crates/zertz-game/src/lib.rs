@@ -1,3 +1,4 @@
+pub mod alphabeta;
 pub mod board_encoding;
 pub mod hex;
 pub mod move_encoding;

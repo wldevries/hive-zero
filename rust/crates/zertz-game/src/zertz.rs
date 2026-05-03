@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex};
+use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex, Undoable};
 
 use crate::hex::{
     self, hex_add, hex_neighbors, hex_to_index, index_to_hex, is_valid, Hex, DIRECTIONS,
@@ -326,6 +326,28 @@ pub struct ZertzBoard {
     /// Mid-capture state: set when a capture chain is in progress.
     /// The same player continues moving until no more hops are available.
     mid_capture: Option<MidCaptureState>,
+    /// Undo stack: pushed by `apply_move` before mutation, popped + restored
+    /// by `undo`. Empty for boards built via `clone_light` (MCTS hot path)
+    /// since MCTS replays from root rather than undoing.
+    pub apply_history: Vec<ZertzUndo>,
+}
+
+/// Snapshot of all `ZertzBoard` state needed to revert one `apply_move` step.
+/// `repetition_key` records the position hash that was inserted into the
+/// repetition `history` HashMap during this move (or `None` if this move did
+/// not bump the repetition counter — e.g. mid-capture continuations).
+#[derive(Clone, Debug)]
+pub struct ZertzUndo {
+    rings: [Ring; BOARD_SIZE],
+    supply: [u8; 3],
+    captures: [[u8; 3]; 2],
+    next_player: Player,
+    outcome: Outcome,
+    board_full: bool,
+    jump_captures: [[u8; 3]; 2],
+    isolation_captures: [[u8; 3]; 2],
+    mid_capture: Option<MidCaptureState>,
+    repetition_key: Option<u64>,
 }
 
 impl ZertzBoard {
@@ -336,6 +358,30 @@ impl ZertzBoard {
         self.captures.hash(&mut h);
         self.next_player.hash(&mut h);
         h.finish()
+    }
+
+    /// Hash key for transposition-table use. Like `position_key` plus the
+    /// fields that distinguish tactically-equivalent states from
+    /// search's perspective: `mid_capture` (legal moves differ) and
+    /// `outcome` (terminal states must not collide with ongoing ones).
+    /// Repetition history is intentionally excluded — alphabeta does not
+    /// observe the path through the search subtree, so two visits with the
+    /// same board produce the same score regardless of history.
+    pub fn tt_key(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.rings.hash(&mut h);
+        self.supply.hash(&mut h);
+        self.captures.hash(&mut h);
+        self.next_player.hash(&mut h);
+        self.mid_capture.hash(&mut h);
+        self.outcome.hash(&mut h);
+        h.finish()
+    }
+}
+
+impl Undoable for ZertzBoard {
+    fn undo(&mut self) {
+        ZertzBoard::undo(self);
     }
 }
 
@@ -374,6 +420,7 @@ impl Default for ZertzBoard {
             isolation_captures: [[0; 3]; 2],
             board_full: false,
             mid_capture: None,
+            apply_history: Vec::new(),
         };
         let key = board.position_key();
         board.history.insert(key, 1);
@@ -717,6 +764,7 @@ impl ZertzBoard {
             jump_captures: [[0; 3]; 2],
             isolation_captures: [[0; 3]; 2],
             mid_capture: self.mid_capture,
+            apply_history: Vec::new(),
         }
     }
 
@@ -818,12 +866,73 @@ impl ZertzBoard {
         Ok(())
     }
 
-    /// Core move execution: applies the move with legality checks, updates history.
-    /// Use play_mcts / apply_move_no_history for the MCTS hot path (no checks).
+    fn snapshot(&self) -> ZertzUndo {
+        ZertzUndo {
+            rings: self.rings,
+            supply: self.supply,
+            captures: self.captures,
+            next_player: self.next_player,
+            outcome: self.outcome,
+            board_full: self.board_full,
+            jump_captures: self.jump_captures,
+            isolation_captures: self.isolation_captures,
+            mid_capture: self.mid_capture,
+            repetition_key: None,
+        }
+    }
+
+    fn restore(&mut self, u: ZertzUndo) {
+        self.rings = u.rings;
+        self.supply = u.supply;
+        self.captures = u.captures;
+        self.next_player = u.next_player;
+        self.outcome = u.outcome;
+        self.board_full = u.board_full;
+        self.jump_captures = u.jump_captures;
+        self.isolation_captures = u.isolation_captures;
+        self.mid_capture = u.mid_capture;
+        if let Some(key) = u.repetition_key {
+            if let Some(count) = self.history.get_mut(&key) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.history.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// Reverse the most recent `apply_move` (including pass and capture hops).
+    /// Panics if the undo stack is empty — only `apply_move` pushes snapshots,
+    /// so undo is balanced 1:1 against `apply_move` calls. `apply_move_no_history`
+    /// (MCTS hot path) does not push snapshots and therefore cannot be undone.
+    pub fn undo(&mut self) {
+        let u = self
+            .apply_history
+            .pop()
+            .expect("undo with empty apply_history");
+        self.restore(u);
+    }
+
+    /// Core move execution: applies the move with legality checks, updates history,
+    /// and pushes an undo snapshot so the move can be reversed via `undo()`.
+    /// Use play_mcts / apply_move_no_history for the MCTS hot path (no checks,
+    /// no snapshot — MCTS replays from the root rather than undoing).
     fn apply_move(&mut self, mv: ZertzMove) -> Result<(), String> {
         if self.outcome != Outcome::Ongoing {
             return Err("game is already over".to_string());
         }
+        // Push the undo frame up front and pop it back if the move is rejected.
+        // Each guard below validates *before* mutating, so the popped frame is
+        // semantically equivalent to never having pushed in the first place.
+        self.apply_history.push(self.snapshot());
+        let result = self.apply_move_inner(mv);
+        if result.is_err() {
+            self.apply_history.pop();
+        }
+        result
+    }
+
+    fn apply_move_inner(&mut self, mv: ZertzMove) -> Result<(), String> {
         match mv {
             ZertzMove::Place { color, place_at, remove } => {
                 if self.mid_capture.is_some() {
@@ -932,6 +1041,11 @@ impl ZertzBoard {
             *count += 1;
             if *count >= 2 {
                 self.outcome = Outcome::Draw;
+            }
+            // Record which key we bumped so `undo` can decrement (and remove
+            // the entry if its count drops to zero).
+            if let Some(top) = self.apply_history.last_mut() {
+                top.repetition_key = Some(key);
             }
         }
         Ok(())

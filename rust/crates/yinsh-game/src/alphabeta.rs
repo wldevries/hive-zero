@@ -228,7 +228,7 @@ const CLAIM_BASE: usize = MOVE_BASE + MOVE_SLOTS;
 const CLAIM_SLOTS: usize = BOARD_SIZE * 3 * BOARD_SIZE;
 const TOTAL_HISTORY_SLOTS: usize = CLAIM_BASE + CLAIM_SLOTS;
 
-impl MoveOrdering for YinshMove {
+impl MoveOrdering<YinshBoard> for YinshMove {
     const HISTORY_SIZE: usize = TOTAL_HISTORY_SLOTS;
 
     fn history_index(&self) -> Option<usize> {
@@ -241,6 +241,8 @@ impl MoveOrdering for YinshMove {
             YinshMove::Pass => None,
         }
     }
+    // priority defaults to 0 — Yinsh's 5-cell-window eval already encodes
+    // the tactical patterns alphabeta would otherwise need static help with.
 }
 
 // ---------------------------------------------------------------------------

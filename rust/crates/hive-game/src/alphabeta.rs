@@ -20,7 +20,7 @@ impl Undoable for Game {
     }
 }
 
-impl MoveOrdering for Move {
+impl MoveOrdering<Game> for Move {
     // 22 distinct piece linear indices (white 0..10, black 11..21) times the
     // grid area give every (piece, destination) pair its own slot. Pass moves
     // and any out-of-range destination map to None and are not tracked.
@@ -32,6 +32,9 @@ impl MoveOrdering for Move {
         let (row, col) = hex_to_grid(to)?;
         Some(piece.linear_index() * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col)
     }
+    // priority defaults to 0 — Hive eval already encodes queen-danger /
+    // queen-escape tactics, so the recursion finds them naturally. Worth
+    // revisiting if Hive search ever becomes a measured bottleneck.
 }
 
 impl TranspositionKey for Game {
