@@ -272,6 +272,227 @@ pub fn play_battle_core(
     Ok(BattleResult { wins_model1, wins_model2, draws, wins_white, wins_grey, wins_black, wins_combo, game_lengths })
 }
 
+/// Battle the NN model (MCTS) against the heuristic alpha-beta bot, in
+/// parallel across `num_games` games. At each ply, active games are
+/// partitioned by whose turn it is:
+///
+/// - **Model-to-move** games batch their MCTS leaf evaluations through a
+///   single `eval_fn` call (same shape as `play_battle_core` — leaves
+///   across games are concatenated, and `play_batch_size` controls how
+///   many leaf-collection rounds run before each NN call).
+/// - **Bot-to-move** games are resolved synchronously via
+///   `alphabeta::alphabeta_best_move`, which does not need the NN.
+///
+/// Half the games have the model as P1, the other half as P2, so the
+/// `wins_model1` field counts NN wins regardless of color. The model's
+/// MCTS tree is rerooted after every move (including bot moves) so the
+/// next model-turn round can warm-start.
+///
+/// `progress_fn` ticks once per ply round and reports
+/// `(finished_games, total_games, active_games, total_moves)`.
+pub fn play_battle_vs_bot_core(
+    num_games: usize,
+    simulations: usize,
+    c_puct: f32,
+    play_batch_size: usize,
+    bot_depth: u32,
+    eval_fn: EvalFn,
+    progress_fn: Option<ProgressFn>,
+) -> Result<BattleResult, String> {
+    let half = num_games / 2;
+    // Model is P1 for the first half, P2 for the second half. This
+    // pairing cancels color advantage out of the model's score.
+    let model_is_p1 = |gi: usize| gi < half;
+
+    let mut boards: Vec<ZertzBoard> = (0..num_games).map(|_| ZertzBoard::default()).collect();
+    let arena_capacity = simulations + 64;
+    let mut searches: Vec<MctsSearch<ZertzBoard>> = (0..num_games)
+        .map(|_| {
+            let mut s = MctsSearch::new(arena_capacity);
+            s.params.cpuct_strategy = CpuctStrategy::Constant { c_puct };
+            s.params.max_children = simulations;
+            s
+        })
+        .collect();
+    let mut active = vec![true; num_games];
+    let mut move_counts = vec![0u32; num_games];
+    let mut finished_count = 0u32;
+    // Search trees are warm only after a successful reroot. Bot moves
+    // also reroot, so consecutive bot turns (mid-capture) keep the tree
+    // valid for the next model turn.
+    let mut search_warm: Vec<bool> = vec![false; num_games];
+
+    let mut total_moves = 0u32;
+    let mut wins_model1 = 0u32;
+    let mut wins_model2 = 0u32;
+    let mut draws = 0u32;
+    let mut wins_white = 0u32;
+    let mut wins_grey = 0u32;
+    let mut wins_black = 0u32;
+    let mut wins_combo = 0u32;
+    let mut game_lengths: Vec<u32> = Vec::new();
+
+    while active.iter().any(|&a| a) {
+        // Partition active games by who's to move this ply.
+        let mut mcts_games: Vec<usize> = Vec::new();
+        let mut bot_games: Vec<usize> = Vec::new();
+        for gi in 0..num_games {
+            if !active[gi] { continue; }
+            let model_to_move = (boards[gi].next_player() == Player::Player1) == model_is_p1(gi);
+            if model_to_move {
+                mcts_games.push(gi);
+            } else {
+                bot_games.push(gi);
+            }
+        }
+
+        // Bot moves first — synchronous and cheap. Result list is built
+        // up before any board mutation so the partition can't shift mid-ply.
+        let mut chosen_moves: Vec<(usize, ZertzMove)> = Vec::with_capacity(num_games);
+        for &gi in &bot_games {
+            let mv = crate::alphabeta::alphabeta_best_move(&boards[gi], bot_depth);
+            chosen_moves.push((gi, mv));
+        }
+
+        // Model moves: batched MCTS across mcts_games (single eval_fn).
+        if !mcts_games.is_empty() {
+            let n = mcts_games.len();
+
+            // Cold init for any game whose tree isn't warm. Warm games
+            // already have an expanded root with priors from the
+            // previous reroot.
+            let cold: Vec<usize> = (0..n).filter(|&i| !search_warm[mcts_games[i]]).collect();
+            if !cold.is_empty() {
+                let nc = cold.len();
+                let mut flat_boards = vec![0f32; nc * BOARD_FLAT];
+                let mut flat_reserves = vec![0f32; nc * RESERVE_SIZE];
+                for (k, &ci) in cold.iter().enumerate() {
+                    let gi = mcts_games[ci];
+                    encode_board(
+                        &boards[gi],
+                        &mut flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT],
+                        &mut flat_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE],
+                    );
+                }
+                let (init_policy, _) = eval_fn(&flat_boards, &flat_reserves, nc)?;
+                for (k, &ci) in cold.iter().enumerate() {
+                    let gi = mcts_games[ci];
+                    searches[gi].init(
+                        &boards[gi],
+                        &init_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE],
+                    );
+                }
+            }
+
+            // Simulation rounds: select leaves across games, batch-eval, expand.
+            let mut game_sims = vec![0usize; n];
+            loop {
+                let mut leaf_ids: Vec<NodeId> = Vec::new();
+                let mut leaf_game_idx: Vec<usize> = Vec::new();
+                for _round in 0..play_batch_size {
+                    let mut any = false;
+                    for (i, _) in mcts_games.iter().enumerate() {
+                        if game_sims[i] >= simulations { continue; }
+                        let gi = mcts_games[i];
+                        let leaves = searches[gi].select_leaves(1);
+                        let count = leaves.len();
+                        if count > 0 { any = true; }
+                        for leaf in leaves { leaf_ids.push(leaf); leaf_game_idx.push(i); }
+                        game_sims[i] += count;
+                    }
+                    if !any { break; }
+                }
+                if leaf_ids.is_empty() { break; }
+
+                let nl = leaf_ids.len();
+                let mut leaf_boards_flat = vec![0f32; nl * BOARD_FLAT];
+                let mut leaf_reserves_flat = vec![0f32; nl * RESERVE_SIZE];
+                for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
+                    let gi = mcts_games[i];
+                    let (board_enc, reserve_enc) = searches[gi].encode_leaf(leaf);
+                    leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
+                    leaf_reserves_flat[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
+                }
+
+                let (leaf_policy, leaf_values) =
+                    eval_fn(&leaf_boards_flat, &leaf_reserves_flat, nl)?;
+
+                let mut per_game_policies: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n];
+                let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
+                for (k, &i) in leaf_game_idx.iter().enumerate() {
+                    per_game_policies[i].push(
+                        leaf_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE].to_vec(),
+                    );
+                    per_game_values[i].push(leaf_values[k]);
+                }
+                for (i, _) in mcts_games.iter().enumerate() {
+                    if per_game_policies[i].is_empty() { continue; }
+                    let gi = mcts_games[i];
+                    searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i], &[]);
+                }
+                if game_sims.iter().all(|&s| s >= simulations) { break; }
+            }
+
+            // Pick best move per game by visit count.
+            for &gi in &mcts_games {
+                let dist = searches[gi].get_pruned_visit_distribution();
+                let mv = if dist.is_empty() {
+                    ZertzMove::Pass
+                } else {
+                    dist.iter()
+                        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                        .unwrap()
+                        .0
+                };
+                chosen_moves.push((gi, mv));
+            }
+        }
+
+        // Apply all moves and update game state.
+        for (gi, mv) in chosen_moves {
+            boards[gi].play(mv).expect("battle selected illegal move");
+            move_counts[gi] += 1;
+            total_moves += 1;
+
+            if boards[gi].outcome() != Outcome::Ongoing {
+                active[gi] = false;
+                finished_count += 1;
+                game_lengths.push(move_counts[gi]);
+                search_warm[gi] = false;
+                match boards[gi].outcome() {
+                    Outcome::WonBy(winner) => {
+                        let model_won = model_is_p1(gi) == (winner == Player::Player1);
+                        if model_won { wins_model1 += 1; } else { wins_model2 += 1; }
+                        match classify_win(&boards[gi], winner) {
+                            WinType::FourWhite => wins_white += 1,
+                            WinType::FiveGrey => wins_grey += 1,
+                            WinType::SixBlack => wins_black += 1,
+                            WinType::ThreeEach => wins_combo += 1,
+                            WinType::Draw => {}
+                        }
+                    }
+                    _ => { draws += 1; }
+                }
+            } else {
+                // Reroot the model's tree to the move that was actually played
+                // (model or bot) so the next model-turn round can warm-start.
+                search_warm[gi] = searches[gi].reroot(mv);
+            }
+        }
+
+        if let Some(pfn) = &progress_fn {
+            let active_count = active.iter().filter(|&&a| a).count() as u32;
+            pfn(finished_count, num_games as u32, active_count, total_moves);
+        }
+    }
+
+    Ok(BattleResult {
+        wins_model1, wins_model2, draws,
+        wins_white, wins_grey, wins_black, wins_combo,
+        game_lengths,
+    })
+}
+
 /// Result of self-play (pure Rust)
 #[derive(Clone, Debug)]
 pub struct SelfPlayResult {

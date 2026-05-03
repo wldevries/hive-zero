@@ -11,7 +11,7 @@ use zertz_game::notation::{move_to_str, str_to_move};
 use zertz_game::zertz::{classify_win, WinType, ZertzBoard};
 use core_game::game::{Game, Outcome, Player};
 use crate::inference::ZertzInference;
-use zertz_game::search::{best_move_core, play_battle_core, play_selfplay_core};
+use zertz_game::search::{best_move_core, play_battle_core, play_battle_vs_bot_core, play_selfplay_core};
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 
@@ -374,6 +374,56 @@ impl PyZertzSelfPlaySession {
             core_eval2,
             progress_core,
         ).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+        Ok(PyZertzBattleResult {
+            wins_model1: r.wins_model1,
+            wins_model2: r.wins_model2,
+            draws: r.draws,
+            wins_white: r.wins_white,
+            wins_grey: r.wins_grey,
+            wins_black: r.wins_black,
+            wins_combo: r.wins_combo,
+            game_lengths: r.game_lengths,
+        })
+    }
+
+    /// Battle the model against the heuristic alpha-beta bot in parallel.
+    /// Each ply, model-turn games batch their MCTS leaves through `eval_fn`
+    /// while bot-turn games resolve synchronously via alphabeta. Half the
+    /// games have the model as P1, half as P2 — `wins_model1` counts the
+    /// model's wins regardless of color.
+    #[pyo3(signature = (eval_fn, bot_depth, progress_fn=None))]
+    fn play_battle_vs_bot(
+        &self,
+        _py: Python,
+        eval_fn: Py<PyAny>,
+        bot_depth: u32,
+        progress_fn: Option<Py<PyAny>>,
+    ) -> PyResult<PyZertzBattleResult> {
+        let core_eval = Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
+            call_python_eval(&eval_fn, boards, reserves, n)
+        });
+
+        let progress_core = progress_fn.map(|pfn| {
+            let pfn: Py<PyAny> = pfn;
+            Box::new(move |finished: u32, total: u32, active: u32, total_moves: u32| {
+                Python::attach(|py| {
+                    pfn.bind(py).call1((finished, total, active, total_moves)).ok();
+                    py.check_signals().ok();
+                });
+            }) as Box<dyn Fn(u32, u32, u32, u32) + Send + Sync>
+        });
+
+        let r = play_battle_vs_bot_core(
+            self.num_games,
+            self.simulations,
+            self.c_puct,
+            self.play_batch_size,
+            bot_depth,
+            core_eval,
+            progress_core,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
         Ok(PyZertzBattleResult {
             wins_model1: r.wins_model1,

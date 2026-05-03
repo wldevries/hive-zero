@@ -71,6 +71,7 @@ def run_battle(
             num_games=num_games,
             simulations=simulations,
             device=device,
+            play_batch_size=play_batch_size,
             bot_depth=bot_depth,
         )
 
@@ -204,19 +205,18 @@ def _run_battle_vs_bot(
     num_games: int,
     simulations: int | None,
     device: str,
+    play_batch_size: int,
     bot_depth: int,
 ):
-    """Sequential model-vs-alphabeta loop. The model side runs MCTS via
-    ``ZertzGame.best_move`` (one Python eval callback per inference batch);
-    the bot side calls ``ZertzGame.best_move_alphabeta(depth)``. Games are
-    paired: half have the model as P1, half have the bot as P1, so a single
-    side's color preference can't bias the score.
-
-    No cross-game batching here (unlike ``play_battle``) — for evaluation
-    runs at a few dozen games the sequential overhead is the right tradeoff
-    against not having to thread alphabeta through the Rust battle session.
+    """Run the model (NN+MCTS) against the alpha-beta bot in parallel via
+    ``ZertzSelfPlaySession.play_battle_vs_bot``. Each ply, the Rust core
+    partitions active games by whose turn it is: model-turn games batch
+    their MCTS leaves through one ``eval_fn`` call (controlled by
+    ``play_batch_size`` like the model-vs-model path); bot-turn games are
+    resolved synchronously via alphabeta. Progress ticks per ply round.
+    Pairing (model as P1 vs P2) is handled inside the session.
     """
-    import engine_zero
+    from engine_zero import ZertzSelfPlaySession
 
     model, ckpt = load_checkpoint(model1_path)
     meta = ckpt.get("metadata", {})
@@ -235,54 +235,42 @@ def _run_battle_vs_bot(
     print(f"  Games: {num_games}  Simulations: {sims}  Bot depth: {bot_depth}")
     print(f"{'='*60}")
 
-    # Half the games run with the model as P1, the other half with the bot
-    # as P1. For odd counts the model gets the extra game as P1.
-    model_is_p1 = [True] * ((num_games + 1) // 2) + [False] * (num_games // 2)
+    session = ZertzSelfPlaySession(
+        num_games=num_games,
+        simulations=sims,
+        temp_threshold=0,
+        playout_cap_p=0.0,
+        fast_cap=sims,
+        play_batch_size=play_batch_size,
+    )
 
-    stats = _BattleStats()
-    pbar = tqdm(total=num_games, unit="game", desc="  Battle", leave=False)
+    pbar = tqdm(total=65, unit="turn", desc="  Battle", leave=False)
+    turn = [0]
+
+    def progress_fn(finished, total, active, total_moves):
+        turn[0] += 1
+        advance = turn[0] - pbar.n
+        if advance > 0:
+            pbar.update(advance)
+        if turn[0] >= pbar.total:
+            pbar.total = turn[0] + 10
+            pbar.refresh()
+        pbar.set_postfix(done=f"{finished}/{total}")
+
     start = time.time()
-    for game_idx, m_first in enumerate(model_is_p1):
-        game = engine_zero.ZertzGame()
-        moves = 0
-        while game.outcome() == "ongoing":
-            current = game.next_player()  # 0 == P1, 1 == P2
-            model_to_move = (current == 0) == m_first
-            if model_to_move:
-                mv = game.best_move(eval_fn, simulations=sims)
-            else:
-                mv = game.best_move_alphabeta(bot_depth)
-            game.play(mv)
-            moves += 1
-
-        outcome = game.outcome()
-        stats.game_lengths.append(moves)
-        if outcome == "draw":
-            stats.draws += 1
-        else:
-            p1_won = outcome == "p1"
-            model_won = p1_won == m_first
-            if model_won:
-                stats.wins_model1 += 1
-            else:
-                stats.wins_model2 += 1
-            wt = game.win_type()
-            if wt == "white":
-                stats.wins_white += 1
-            elif wt == "grey":
-                stats.wins_grey += 1
-            elif wt == "black":
-                stats.wins_black += 1
-            elif wt == "combo":
-                stats.wins_combo += 1
-
-        pbar.update(1)
-        pbar.set_postfix(
-            w=stats.wins_model1,
-            l=stats.wins_model2,
-            d=stats.draws,
-        )
-    pbar.close()
+    result = session.play_battle_vs_bot(eval_fn, bot_depth, progress_fn)
     elapsed = time.time() - start
+    pbar.update(pbar.total - pbar.n)
+    pbar.close()
 
+    stats = _BattleStats(
+        wins_model1=result.wins_model1,
+        wins_model2=result.wins_model2,
+        draws=result.draws,
+        wins_white=result.wins_white,
+        wins_grey=result.wins_grey,
+        wins_black=result.wins_black,
+        wins_combo=result.wins_combo,
+        game_lengths=list(result.game_lengths),
+    )
     _print_battle_results(name1, name2, stats, elapsed)
