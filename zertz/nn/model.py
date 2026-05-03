@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from shared.nn.gpba import GlobalPoolBias
 from shared.nn.resblock import ResBlock
+from shared.nn.seresblock import SEResBlock
 
 # From Rust board encoding
 NUM_CHANNELS = 6
@@ -44,11 +45,12 @@ class ZertzNet(nn.Module):
     context (supply, captures) through all residual blocks.
 
     The trunk is a sequence of named layer types controlled by trunk_spec:
-        "res"  — ResBlock (standard 2-conv residual)
-        "gpba" — GlobalPoolBias (KataGo-style global context injection)
+        "res"   — ResBlock (standard 2-conv residual)
+        "seres" — SEResBlock (residual with Squeeze-and-Excitation channel gating)
+        "gpba"  — GlobalPoolBias (KataGo-style global context injection)
 
     Each spec entry has a "type" field and an optional "count" (default 1).
-    Example: [{"type": "res", "count": 6}, {"type": "gpba"}, {"type": "res", "count": 2}]
+    Example: [{"type": "seres", "count": 6}, {"type": "gpba"}, {"type": "seres", "count": 2}]
 
     Policy heads are conv1x1 over the trunk (no flatten/FC).
     Rust MCTS scores each capture as cap_dir[direction][source_pos].
@@ -72,6 +74,8 @@ class ZertzNet(nn.Module):
             for _ in range(count):
                 if layer_type == "res":
                     self.trunk.append(ResBlock(channels))
+                elif layer_type == "seres":
+                    self.trunk.append(SEResBlock(channels))
                 elif layer_type == "gpba":
                     self.trunk.append(GlobalPoolBias(channels))
                 else:
