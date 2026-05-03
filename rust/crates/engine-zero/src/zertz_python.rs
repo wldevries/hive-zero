@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use zertz_game::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
 use zertz_game::move_encoding::{NN_POLICY_SIZE, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
 use zertz_game::notation::{move_to_str, str_to_move};
-use zertz_game::zertz::ZertzBoard;
+use zertz_game::zertz::{classify_win, WinType, ZertzBoard};
 use core_game::game::{Game, Outcome, Player};
 use crate::inference::ZertzInference;
 use zertz_game::search::{best_move_core, play_battle_core, play_selfplay_core};
@@ -464,6 +464,32 @@ impl PyZertzGame {
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         py.check_signals()?;
         Ok(move_to_str(best))
+    }
+
+    /// Heuristic-only alpha-beta search to `depth` plies. No NN required.
+    /// Returns the chosen move as a notation string.
+    #[pyo3(signature = (depth=3))]
+    fn best_move_alphabeta(&self, depth: u32) -> PyResult<String> {
+        let mv = zertz_game::alphabeta::alphabeta_best_move(&self.board, depth);
+        Ok(move_to_str(mv))
+    }
+
+    /// Win classification for the current outcome — one of "white", "grey",
+    /// "black", "combo" if a player has won, or `None` if the game is
+    /// ongoing or drawn. Mirrors `WinType` produced by the self-play /
+    /// battle loops so battle scripts can report the same color split.
+    fn win_type(&self) -> Option<&'static str> {
+        let winner = match self.board.outcome() {
+            Outcome::WonBy(p) => p,
+            _ => return None,
+        };
+        Some(match classify_win(&self.board, winner) {
+            WinType::FourWhite => "white",
+            WinType::FiveGrey => "grey",
+            WinType::SixBlack => "black",
+            WinType::ThreeEach => "combo",
+            WinType::Draw => "draw",
+        })
     }
 }
 

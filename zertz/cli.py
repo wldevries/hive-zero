@@ -102,11 +102,22 @@ def main():
     # Battle mode
     battle_parser = subparsers.add_parser("battle", help="Pit two models against each other")
     battle_parser.add_argument("model1", type=str, help="Path to first model checkpoint")
-    battle_parser.add_argument("model2", type=str, help="Path to second model checkpoint")
+    battle_parser.add_argument(
+        "model2",
+        type=str,
+        help="Path to second model checkpoint, or the literal 'alphabeta' to play "
+             "against the heuristic alpha-beta bot",
+    )
     battle_parser.add_argument("--games", type=int, default=100, help="Number of games to play (default: 100)")
     battle_parser.add_argument("--simulations", type=int, default=None, help="Simulations per move (default: from checkpoint metadata or 800)")
     battle_parser.add_argument("--device", type=str, default="cuda")
     battle_parser.add_argument("--play-batch-sims", type=int, default=2)
+    battle_parser.add_argument(
+        "--bot-depth",
+        type=int,
+        default=3,
+        help="Alpha-beta search depth when model2 is 'alphabeta' (default: 3)",
+    )
 
     args = parser.parse_args()
 
@@ -170,6 +181,7 @@ def main():
             simulations=args.simulations,
             device=args.device,
             play_batch_size=args.play_batch_sims,
+            bot_depth=args.bot_depth,
         )
     else:
         parser.print_help()

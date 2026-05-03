@@ -1,9 +1,15 @@
-"""Battle mode: pit two Zertz models against each other."""
+"""Battle mode: pit two Zertz models against each other (or a model vs the
+heuristic alpha-beta bot).
+
+Pass ``model2_path="alphabeta"`` (with ``bot_depth=N``) to run the model's NN
+MCTS against the alphabeta bot in a sequential per-game loop. Two real model
+paths route through the fast batched ``ZertzSelfPlaySession.play_battle``."""
 
 from __future__ import annotations
 
 import statistics
 import time
+from dataclasses import dataclass, field
 
 import colorama
 import numpy as np
@@ -20,6 +26,18 @@ _cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
 _cm = lambda v: f"{colorama.Fore.MAGENTA}{_BRIGHT}{v}{_RESET}"
 
 from ..nn.model import load_checkpoint
+
+
+@dataclass
+class _BattleStats:
+    wins_model1: int = 0
+    wins_model2: int = 0
+    draws: int = 0
+    wins_white: int = 0
+    wins_grey: int = 0
+    wins_black: int = 0
+    wins_combo: int = 0
+    game_lengths: list[int] = field(default_factory=list)
 
 
 def _make_eval_fn(model, device):
@@ -45,7 +63,17 @@ def run_battle(
     simulations: int | None = None,
     device: str = "cuda",
     play_batch_size: int = 2,
+    bot_depth: int = 3,
 ):
+    if model2_path == "alphabeta":
+        return _run_battle_vs_bot(
+            model1_path=model1_path,
+            num_games=num_games,
+            simulations=simulations,
+            device=device,
+            bot_depth=bot_depth,
+        )
+
     from engine_zero import ZertzSelfPlaySession
 
     model1, ckpt1 = load_checkpoint(model1_path)
@@ -103,13 +131,30 @@ def run_battle(
     pbar.update(pbar.total - pbar.n)
     pbar.close()
 
-    w1 = result.wins_model1
-    w2 = result.wins_model2
-    d  = result.draws
+    stats = _BattleStats(
+        wins_model1=result.wins_model1,
+        wins_model2=result.wins_model2,
+        draws=result.draws,
+        wins_white=result.wins_white,
+        wins_grey=result.wins_grey,
+        wins_black=result.wins_black,
+        wins_combo=result.wins_combo,
+        game_lengths=list(result.game_lengths),
+    )
+    _print_battle_results(name1, name2, stats, elapsed)
+
+
+def _print_battle_results(
+    name1: str,
+    name2: str,
+    stats: _BattleStats,
+    elapsed: float,
+) -> None:
+    w1, w2, d = stats.wins_model1, stats.wins_model2, stats.draws
     total = w1 + w2 + d
     score1 = (w1 + 0.5 * d) / total if total > 0 else 0.5
 
-    lengths = result.game_lengths
+    lengths = stats.game_lengths
     avg_len = sum(lengths) / len(lengths) if lengths else 0
     med_len = int(statistics.median(lengths)) if lengths else 0
     min_len = min(lengths) if lengths else 0
@@ -135,10 +180,10 @@ def run_battle(
     if decisive > 0:
         print(f"  Win conditions (of {decisive} decisive games):")
         for label, color, count in [
-            ("white", _CW, result.wins_white),
-            ("grey",  _CG, result.wins_grey),
-            ("black", _CB, result.wins_black),
-            ("combo", _CC, result.wins_combo),
+            ("white", _CW, stats.wins_white),
+            ("grey",  _CG, stats.wins_grey),
+            ("black", _CB, stats.wins_black),
+            ("combo", _CC, stats.wins_combo),
         ]:
             pct = count / decisive * 100
             print(f"    {color}{label}{_RESET}: {count} ({pct:.0f}%)")
@@ -152,3 +197,92 @@ def run_battle(
     else:
         print(f"\n  Result: {_cy('Too close to call')}")
     print()
+
+
+def _run_battle_vs_bot(
+    model1_path: str,
+    num_games: int,
+    simulations: int | None,
+    device: str,
+    bot_depth: int,
+):
+    """Sequential model-vs-alphabeta loop. The model side runs MCTS via
+    ``ZertzGame.best_move`` (one Python eval callback per inference batch);
+    the bot side calls ``ZertzGame.best_move_alphabeta(depth)``. Games are
+    paired: half have the model as P1, half have the bot as P1, so a single
+    side's color preference can't bias the score.
+
+    No cross-game batching here (unlike ``play_battle``) — for evaluation
+    runs at a few dozen games the sequential overhead is the right tradeoff
+    against not having to thread alphabeta through the Rust battle session.
+    """
+    import engine_zero
+
+    model, ckpt = load_checkpoint(model1_path)
+    meta = ckpt.get("metadata", {})
+    iter_n = ckpt.get("generation", "?")
+    sims = simulations if simulations is not None else meta.get("simulations", 800)
+
+    model.to(device).eval()
+    eval_fn = _make_eval_fn(model, device)
+
+    name1 = f"{model1_path} (iter {iter_n})"
+    name2 = f"alphabeta depth={bot_depth}"
+
+    print(f"\n{'='*60}")
+    print(f"  Battle: {_cc(name1)}")
+    print(f"      vs: {_cm(name2)}")
+    print(f"  Games: {num_games}  Simulations: {sims}  Bot depth: {bot_depth}")
+    print(f"{'='*60}")
+
+    # Half the games run with the model as P1, the other half with the bot
+    # as P1. For odd counts the model gets the extra game as P1.
+    model_is_p1 = [True] * ((num_games + 1) // 2) + [False] * (num_games // 2)
+
+    stats = _BattleStats()
+    pbar = tqdm(total=num_games, unit="game", desc="  Battle", leave=False)
+    start = time.time()
+    for game_idx, m_first in enumerate(model_is_p1):
+        game = engine_zero.ZertzGame()
+        moves = 0
+        while game.outcome() == "ongoing":
+            current = game.next_player()  # 0 == P1, 1 == P2
+            model_to_move = (current == 0) == m_first
+            if model_to_move:
+                mv = game.best_move(eval_fn, simulations=sims)
+            else:
+                mv = game.best_move_alphabeta(bot_depth)
+            game.play(mv)
+            moves += 1
+
+        outcome = game.outcome()
+        stats.game_lengths.append(moves)
+        if outcome == "draw":
+            stats.draws += 1
+        else:
+            p1_won = outcome == "p1"
+            model_won = p1_won == m_first
+            if model_won:
+                stats.wins_model1 += 1
+            else:
+                stats.wins_model2 += 1
+            wt = game.win_type()
+            if wt == "white":
+                stats.wins_white += 1
+            elif wt == "grey":
+                stats.wins_grey += 1
+            elif wt == "black":
+                stats.wins_black += 1
+            elif wt == "combo":
+                stats.wins_combo += 1
+
+        pbar.update(1)
+        pbar.set_postfix(
+            w=stats.wins_model1,
+            l=stats.wins_model2,
+            d=stats.draws,
+        )
+    pbar.close()
+    elapsed = time.time() - start
+
+    _print_battle_results(name1, name2, stats, elapsed)
