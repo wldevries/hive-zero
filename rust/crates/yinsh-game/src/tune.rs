@@ -217,9 +217,11 @@ fn extract_all(path: &Path, sample_rate: f32) -> Vec<LabeledPosition> {
             next_game_id += 1;
             used += 1;
 
-            // Second pass: sample Normal-phase positions during replay.
+            // Second pass: sample Normal- and ClaimRow-phase positions
+            // during replay. ClaimRow is the only phase where find_rows() > 0,
+            // so excluding it leaves the ROW5 weight untunable.
             let _ = replay::replay_game_observed(&record, |board, _i| {
-                if board.phase != Phase::Normal { return; }
+                if matches!(board.phase, Phase::Setup) { return; }
                 if rng.random::<f32>() > sample_rate { return; }
                 let features = extract_features(board);
                 let label = match board.next_player {
