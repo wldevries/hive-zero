@@ -6,7 +6,7 @@ use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex};
 use core_game::symmetry::UnitSymmetry;
 
 use crate::hex::{
-    BOARD_SIZE, COL_ENDS, COL_STARTS, DIRECTIONS, GRID_SIZE, ROW_DIRS, cell_index, cell_index_i8,
+    BOARD_SIZE, COL_STARTS, DIRECTIONS, GRID_SIZE, ROW_DIRS, cell_index, cell_index_i8,
     index_to_cell, is_valid, is_valid_i8,
 };
 use crate::zobrist;

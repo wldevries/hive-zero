@@ -1,3 +1,4 @@
+mod process;
 mod random_play;
 mod replay;
 
@@ -35,6 +36,15 @@ enum Command {
         #[arg(default_value = "games/yinsh/boardspace")]
         path: String,
     },
+    /// Replay all games, compute Elo, write game_outcomes.csv + player_elo.csv
+    Process {
+        /// Path to zip dir or file
+        #[arg(default_value = "games/yinsh/boardspace")]
+        path: String,
+        /// Skip games whose RE field indicates a timeout
+        #[arg(long)]
+        skip_timeout_games: bool,
+    },
 }
 
 fn main() {
@@ -44,5 +54,8 @@ fn main() {
         Command::Debug { zip_path, sgf_name } => replay::run_debug(&zip_path, &sgf_name),
         Command::Random { moves } => random_play::run_random_game(moves),
         Command::Stats { path } => replay::run_stats(&path),
+        Command::Process { path, skip_timeout_games } => {
+            process::run_process(&path, skip_timeout_games)
+        }
     }
 }
