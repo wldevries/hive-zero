@@ -1,6 +1,10 @@
+use std::time::Duration;
+
 use rand::RngExt;
 use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
 use crate::zertz::{ZertzBoard, ZertzMove, classify_win, WinType};
@@ -280,8 +284,10 @@ pub fn play_battle_core(
 ///   single `eval_fn` call (same shape as `play_battle_core` — leaves
 ///   across games are concatenated, and `play_batch_size` controls how
 ///   many leaf-collection rounds run before each NN call).
-/// - **Bot-to-move** games are resolved synchronously via
-///   `alphabeta::alphabeta_best_move`, which does not need the NN.
+/// - **Bot-to-move** games are resolved via
+///   `alphabeta::alphabeta_best_move_with_budget`, run **in parallel via
+///   rayon** since each call is independent. `bot_time_budget` is a
+///   per-call wall-clock cap; `None` means depth-only.
 ///
 /// Half the games have the model as P1, the other half as P2, so the
 /// `wins_model1` field counts NN wins regardless of color. The model's
@@ -296,6 +302,7 @@ pub fn play_battle_vs_bot_core(
     c_puct: f32,
     play_batch_size: usize,
     bot_depth: u32,
+    bot_time_budget: Option<Duration>,
     eval_fn: EvalFn,
     progress_fn: Option<ProgressFn>,
 ) -> Result<BattleResult, String> {
@@ -346,13 +353,42 @@ pub fn play_battle_vs_bot_core(
             }
         }
 
-        // Bot moves first — synchronous and cheap. Result list is built
-        // up before any board mutation so the partition can't shift mid-ply.
+        // Bot moves: each alphabeta call is fully independent (own
+        // `SearchContext`, own TT, reads `boards[gi]` immutably), so on
+        // native builds we run them in parallel via rayon. With ~20
+        // bot-turn games at depth 3 this is the only practical way to
+        // keep the per-ply wall-clock under control on a multi-core box.
+        // The wasm crate disables the `parallel` feature (rayon doesn't
+        // compile on wasm32) and falls back to a sequential loop, which
+        // is fine because wasm doesn't run battle-vs-bot anyway. Result
+        // list is built up before any board mutation so the partition
+        // can't shift mid-ply.
+        #[cfg(feature = "parallel")]
+        let bot_chosen: Vec<(usize, ZertzMove)> = bot_games
+            .par_iter()
+            .map(|&gi| {
+                let mv = crate::alphabeta::alphabeta_best_move_with_budget(
+                    &boards[gi],
+                    bot_depth,
+                    bot_time_budget,
+                );
+                (gi, mv)
+            })
+            .collect();
+        #[cfg(not(feature = "parallel"))]
+        let bot_chosen: Vec<(usize, ZertzMove)> = bot_games
+            .iter()
+            .map(|&gi| {
+                let mv = crate::alphabeta::alphabeta_best_move_with_budget(
+                    &boards[gi],
+                    bot_depth,
+                    bot_time_budget,
+                );
+                (gi, mv)
+            })
+            .collect();
         let mut chosen_moves: Vec<(usize, ZertzMove)> = Vec::with_capacity(num_games);
-        for &gi in &bot_games {
-            let mv = crate::alphabeta::alphabeta_best_move(&boards[gi], bot_depth);
-            chosen_moves.push((gi, mv));
-        }
+        chosen_moves.extend(bot_chosen);
 
         // Model moves: batched MCTS across mcts_games (single eval_fn).
         if !mcts_games.is_empty() {

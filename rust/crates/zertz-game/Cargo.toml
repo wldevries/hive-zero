@@ -5,15 +5,20 @@ edition = "2024"
 
 [features]
 # "replay" gates the zip-based boardspace game loader (C deps: bzip2, lzma, zstd).
-# Enabled by default so the zertz-tools binary works as usual.
-# Consumers that only need the library (e.g. zertz-wasm) can disable it.
-default = ["replay"]
+# "parallel" gates rayon — needed for parallel bot alphabeta in battle mode.
+# Both are enabled by default so the zertz-tools binary and engine-zero build
+# work as usual. Consumers that only need the library (e.g. zertz-wasm, where
+# rayon doesn't compile on wasm32-unknown-unknown) can disable them with
+# default-features = false.
+default = ["replay", "parallel"]
 replay = ["dep:zip", "core-game/zip-sgf"]
+parallel = ["dep:rayon"]
 
 [dependencies]
 core-game = { path = "../core-game", default-features = false }
 rand = { workspace = true }
 rand_distr = { workspace = true }
+rayon = { workspace = true, optional = true }
 zip = { version = "2", optional = true }
 clap = { workspace = true }
 

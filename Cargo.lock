@@ -1723,6 +1723,7 @@ dependencies = [
  "core-game",
  "rand",
  "rand_distr",
+ "rayon",
  "zip",
 ]
 

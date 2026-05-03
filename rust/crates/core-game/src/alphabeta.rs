@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::time::{Duration, Instant};
 
 use crate::game::{Game, Outcome, Undoable};
 
@@ -26,14 +27,31 @@ use crate::game::{Game, Outcome, Undoable};
 /// heuristic eval so that win-finding always dominates positional scoring.
 pub const WIN_SCORE: f32 = 1_000_000.0;
 
+/// How often (in nodes) `negamax` polls the deadline. Must be a power of two
+/// so the check compiles to a cheap bit-and. 1024 keeps the overhead well
+/// under 1% of node cost while still aborting within ~milliseconds of the
+/// deadline.
+const DEADLINE_POLL_MASK: u64 = 1023;
+
 #[derive(Clone, Copy, Debug)]
 pub struct AlphaBetaParams {
     pub max_depth: u32,
+    /// Wall-clock budget for the entire search. When `Some`, iterative
+    /// deepening polls the deadline inside `negamax` and aborts the
+    /// in-flight iteration the moment it expires; the caller falls back
+    /// to the deepest *fully-completed* iteration's best move.
+    pub time_budget: Option<Duration>,
 }
 
 impl AlphaBetaParams {
     pub fn new(max_depth: u32) -> Self {
-        Self { max_depth }
+        Self { max_depth, time_budget: None }
+    }
+
+    /// Builder-style setter for the wall-clock budget.
+    pub fn with_time_budget(mut self, budget: Option<Duration>) -> Self {
+        self.time_budget = budget;
+        self
     }
 }
 
@@ -213,6 +231,13 @@ pub struct SearchContext<M: Copy, G: ?Sized> {
     /// When false, killer + history ordering is bypassed (TT-only mode).
     /// Useful for benchmarks that isolate the new heuristics' contribution.
     pub ordering_enabled: bool,
+    /// Wall-clock deadline for the search, derived from `params.time_budget`.
+    /// `None` means no deadline.
+    pub deadline: Option<Instant>,
+    /// Set by `negamax` once the deadline has been crossed. Once true, every
+    /// recursive call short-circuits with `0.0` (the value is meaningless;
+    /// the iterative-deepening driver discards the partial iteration).
+    pub aborted: bool,
     _phantom: PhantomData<fn() -> *const G>,
 }
 
@@ -229,8 +254,16 @@ impl<M: Copy + MoveOrdering<G>, G: ?Sized> SearchContext<M, G> {
             history: vec![0i32; <M as MoveOrdering<G>>::HISTORY_SIZE],
             killer_hits: 0,
             ordering_enabled: true,
+            deadline: None,
+            aborted: false,
             _phantom: PhantomData,
         }
+    }
+
+    /// Whether the search has been signalled to abort (deadline elapsed).
+    #[inline]
+    pub fn is_aborted(&self) -> bool {
+        self.aborted
     }
 }
 
@@ -267,6 +300,22 @@ where
     F: FnMut(&G) -> f32,
 {
     ctx.nodes_visited += 1;
+
+    // Deadline poll: cheap bitmask + an `Instant::now()` every 1024 nodes.
+    // Once aborted, every recursive call returns immediately so the in-flight
+    // iteration unwinds without further work; the iterative-deepening driver
+    // discards the partial result and falls back to the previous depth.
+    if ctx.aborted {
+        return 0.0;
+    }
+    if (ctx.nodes_visited & DEADLINE_POLL_MASK) == 0 {
+        if let Some(deadline) = ctx.deadline {
+            if Instant::now() >= deadline {
+                ctx.aborted = true;
+                return 0.0;
+            }
+        }
+    }
 
     match game.outcome() {
         Outcome::WonBy(winner) => return won_score(game, winner),
@@ -483,6 +532,14 @@ where
         return (Some(moves[0]), eval(game));
     }
 
+    // Set the deadline for this whole search. Done here (not in `new`) so a
+    // single `SearchContext` could in principle be reused across calls, but
+    // in practice each call constructs its own.
+    if let Some(budget) = ctx.params.time_budget {
+        ctx.deadline = Some(Instant::now() + budget);
+    }
+    ctx.aborted = false;
+
     let mut best_move = moves[0];
     let mut best_score = f32::NEG_INFINITY;
 
@@ -492,6 +549,12 @@ where
     // alpha tightening that prunes the rest of the root moves much faster.
     // The remaining root moves are sorted by descending history so the
     // strongest-looking alternatives narrow alpha next, before the long tail.
+    //
+    // When a `time_budget` is set, `negamax` flips `ctx.aborted` once the
+    // deadline elapses. We discard the partial iteration's `iter_best_move`
+    // and return the deepest fully-completed iteration's result. Depth 1 is
+    // cheap enough to always finish on any realistic budget; deeper
+    // iterations are best-effort.
     for depth in 1..=max_depth {
         if let Some(idx) = moves.iter().position(|m| *m == best_move) {
             if idx != 0 {
@@ -524,6 +587,10 @@ where
             };
             game.undo();
 
+            if ctx.aborted {
+                break;
+            }
+
             if score > iter_best_score {
                 iter_best_score = score;
                 iter_best_move = *mv;
@@ -531,6 +598,13 @@ where
             if score > alpha {
                 alpha = score;
             }
+        }
+
+        if ctx.aborted {
+            // Discard partial iteration: keep the best move from the deepest
+            // fully-completed depth (or, on the first iteration, the
+            // pre-search default of moves[0]).
+            break;
         }
 
         best_move = iter_best_move;

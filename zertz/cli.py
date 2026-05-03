@@ -118,6 +118,15 @@ def main():
         default=3,
         help="Alpha-beta search depth when model2 is 'alphabeta' (default: 3)",
     )
+    battle_parser.add_argument(
+        "--bot-time-ms",
+        type=int,
+        default=None,
+        help="Per-move wall-clock budget for the alphabeta bot in milliseconds. "
+             "Iterative deepening polls the deadline and falls back to the "
+             "deepest fully-completed iteration. --bot-depth still caps the "
+             "search; whichever expires first wins. Default: no time cap.",
+    )
 
     args = parser.parse_args()
 
@@ -182,6 +191,7 @@ def main():
             device=args.device,
             play_batch_size=args.play_batch_sims,
             bot_depth=args.bot_depth,
+            bot_time_ms=args.bot_time_ms,
         )
     else:
         parser.print_help()

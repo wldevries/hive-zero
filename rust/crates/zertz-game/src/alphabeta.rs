@@ -10,6 +10,8 @@
 //! delegate to the core driver and inherit iterative deepening, transposition
 //! table, killer moves, and history ordering.
 
+use std::time::Duration;
+
 use core_game::alphabeta::{
     self, AlphaBetaParams, MoveOrdering, SearchContext, TranspositionKey, WIN_SCORE,
 };
@@ -391,7 +393,20 @@ impl MoveOrdering<ZertzBoard> for ZertzMove {
 /// given depth (or `Pass` if no legal moves). Operates on a clone — the
 /// caller's board is never mutated.
 pub fn alphabeta_best_move(board: &ZertzBoard, depth: u32) -> ZertzMove {
-    alphabeta_best_move_with_weights(board, depth, &DEFAULT_WEIGHTS)
+    alphabeta_best_move_with_budget(board, depth, None)
+}
+
+/// Like `alphabeta_best_move`, but caps the search by wall-clock time.
+/// `depth` is still a hard upper bound; whichever expires first wins.
+/// On a deadline abort the function returns the best move from the
+/// deepest fully-completed iteration (always at least depth 1 in
+/// practice — depth 1 on Zertz is cheap).
+pub fn alphabeta_best_move_with_budget(
+    board: &ZertzBoard,
+    depth: u32,
+    time_budget: Option<Duration>,
+) -> ZertzMove {
+    alphabeta_best_move_with_weights_and_budget(board, depth, &DEFAULT_WEIGHTS, time_budget)
 }
 
 /// Like `alphabeta_best_move`, but evaluates positions using a supplied
@@ -402,9 +417,21 @@ pub fn alphabeta_best_move_with_weights(
     depth: u32,
     weights: &[f32; N_FEATURES],
 ) -> ZertzMove {
+    alphabeta_best_move_with_weights_and_budget(board, depth, weights, None)
+}
+
+/// Combines `with_weights` and `with_budget`. The two flags are orthogonal
+/// — pass `None` for the budget to disable the wall-clock cap.
+pub fn alphabeta_best_move_with_weights_and_budget(
+    board: &ZertzBoard,
+    depth: u32,
+    weights: &[f32; N_FEATURES],
+    time_budget: Option<Duration>,
+) -> ZertzMove {
     let mut work = board.clone();
     work.apply_history.clear();
-    let mut ctx = SearchContext::new(AlphaBetaParams::new(depth));
+    let params = AlphaBetaParams::new(depth).with_time_budget(time_budget);
+    let mut ctx = SearchContext::new(params);
     let mut eval = |b: &ZertzBoard| evaluate_with_weights(b, weights);
     let (mv, _score) = alphabeta::alphabeta_best_move(&mut work, &mut eval, &mut ctx);
     mv.unwrap_or(ZertzMove::Pass)

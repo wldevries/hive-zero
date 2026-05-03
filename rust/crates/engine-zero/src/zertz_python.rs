@@ -424,16 +424,23 @@ impl PyZertzSelfPlaySession {
 
     /// Battle the model against the heuristic alpha-beta bot in parallel.
     /// Each ply, model-turn games batch their MCTS leaves through `eval_fn`
-    /// while bot-turn games resolve synchronously via alphabeta. Half the
-    /// games have the model as P1, half as P2 — `wins_model1` counts the
-    /// model's wins regardless of color.
-    #[pyo3(signature = (eval_fn, bot_depth, progress_fn=None))]
+    /// while bot-turn games resolve via alphabeta in parallel across rayon
+    /// workers. Half the games have the model as P1, half as P2 —
+    /// `wins_model1` counts the model's wins regardless of color.
+    ///
+    /// `bot_time_ms` is an optional per-call wall-clock budget for each
+    /// alphabeta search (0 or None = depth-only). When set, iterative
+    /// deepening polls the deadline inside the search and falls back to
+    /// the deepest fully-completed iteration if the budget expires
+    /// mid-iteration. `bot_depth` is still a hard upper bound.
+    #[pyo3(signature = (eval_fn, bot_depth, progress_fn=None, bot_time_ms=None))]
     fn play_battle_vs_bot(
         &self,
         _py: Python,
         eval_fn: Py<PyAny>,
         bot_depth: u32,
         progress_fn: Option<Py<PyAny>>,
+        bot_time_ms: Option<u64>,
     ) -> PyResult<PyZertzBattleResult> {
         let core_eval = Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
             call_python_eval(&eval_fn, boards, reserves, n)
@@ -449,12 +456,17 @@ impl PyZertzSelfPlaySession {
             }) as Box<dyn Fn(u32, u32, u32, u32) + Send + Sync>
         });
 
+        let bot_time_budget = bot_time_ms
+            .filter(|&ms| ms > 0)
+            .map(std::time::Duration::from_millis);
+
         let r = play_battle_vs_bot_core(
             self.num_games,
             self.simulations,
             self.c_puct,
             self.play_batch_size,
             bot_depth,
+            bot_time_budget,
             core_eval,
             progress_core,
         )

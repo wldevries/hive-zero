@@ -64,6 +64,7 @@ def run_battle(
     device: str = "cuda",
     play_batch_size: int = 2,
     bot_depth: int = 3,
+    bot_time_ms: int | None = None,
 ):
     if model2_path == "alphabeta":
         return _run_battle_vs_bot(
@@ -73,6 +74,7 @@ def run_battle(
             device=device,
             play_batch_size=play_batch_size,
             bot_depth=bot_depth,
+            bot_time_ms=bot_time_ms,
         )
 
     from engine_zero import ZertzSelfPlaySession
@@ -207,14 +209,18 @@ def _run_battle_vs_bot(
     device: str,
     play_batch_size: int,
     bot_depth: int,
+    bot_time_ms: int | None,
 ):
     """Run the model (NN+MCTS) against the alpha-beta bot in parallel via
     ``ZertzSelfPlaySession.play_battle_vs_bot``. Each ply, the Rust core
     partitions active games by whose turn it is: model-turn games batch
     their MCTS leaves through one ``eval_fn`` call (controlled by
     ``play_batch_size`` like the model-vs-model path); bot-turn games are
-    resolved synchronously via alphabeta. Progress ticks per ply round.
-    Pairing (model as P1 vs P2) is handled inside the session.
+    resolved via alphabeta running in parallel across rayon workers. With
+    ``bot_time_ms`` set, each alphabeta call also caps wall-clock time and
+    falls back to the deepest fully-completed iteration if it expires.
+    Progress ticks per ply round. Pairing (model as P1 vs P2) is handled
+    inside the session.
     """
     from engine_zero import ZertzSelfPlaySession
 
@@ -227,12 +233,16 @@ def _run_battle_vs_bot(
     eval_fn = _make_eval_fn(model, device)
 
     name1 = f"{model1_path} (iter {iter_n})"
-    name2 = f"alphabeta depth={bot_depth}"
+    bot_label = f"alphabeta depth={bot_depth}"
+    if bot_time_ms is not None and bot_time_ms > 0:
+        bot_label += f" time<={bot_time_ms}ms"
+    name2 = bot_label
 
     print(f"\n{'='*60}")
     print(f"  Battle: {_cc(name1)}")
     print(f"      vs: {_cm(name2)}")
-    print(f"  Games: {num_games}  Simulations: {sims}  Bot depth: {bot_depth}")
+    budget_str = f"  Bot time: {bot_time_ms}ms" if bot_time_ms else ""
+    print(f"  Games: {num_games}  Simulations: {sims}  Bot depth: {bot_depth}{budget_str}")
     print(f"{'='*60}")
 
     session = ZertzSelfPlaySession(
@@ -258,7 +268,12 @@ def _run_battle_vs_bot(
         pbar.set_postfix(done=f"{finished}/{total}")
 
     start = time.time()
-    result = session.play_battle_vs_bot(eval_fn, bot_depth, progress_fn)
+    result = session.play_battle_vs_bot(
+        eval_fn,
+        bot_depth,
+        progress_fn,
+        bot_time_ms=bot_time_ms,
+    )
     elapsed = time.time() - start
     pbar.update(pbar.total - pbar.n)
     pbar.close()
