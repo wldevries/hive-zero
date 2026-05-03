@@ -102,9 +102,14 @@ def main():
     # play
     p = sub.add_parser("play", help="REPL: list valid moves and play interactively")
     p.add_argument("--model", type=str, default=None,
-                   help="Optional checkpoint; if omitted no AI is used")
+                   help="Optional checkpoint; if omitted no AI is used (unless --bot alphabeta)")
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--simulations", type=int, default=400)
+    p.add_argument("--bot", type=str, default=None, choices=["nn", "alphabeta"],
+                   help="Bot to use for 'ai' command. Defaults to 'nn' if --model is given, "
+                        "else 'alphabeta'.")
+    p.add_argument("--depth", type=int, default=3,
+                   help="Search depth for --bot alphabeta (default: 3)")
 
     args = parser.parse_args()
 
@@ -172,11 +177,15 @@ def main():
 
 def _run_play(args):
     """Minimal interactive REPL: list legal moves, accept user input, optionally
-    let the AI suggest a move via MCTS."""
+    let an AI suggest a move via MCTS or alpha-beta."""
     from engine_zero import YinshGame
 
-    model = None
-    if args.model:
+    bot = args.bot or ("nn" if args.model else "alphabeta")
+
+    eval_fn = None
+    if bot == "nn":
+        if not args.model:
+            raise SystemExit("--bot nn requires --model")
         import numpy as np
         import torch
         import torch.nn.functional as F
@@ -193,8 +202,9 @@ def _run_play(args):
                 policy, wdl_logits = model(board, reserve)
             wdl = F.softmax(wdl_logits, dim=1)
             return policy.float().cpu().numpy(), wdl.float().cpu().numpy()
-    else:
-        eval_fn = None
+
+    bot_label = f"alphabeta depth={args.depth}" if bot == "alphabeta" else f"NN MCTS sims={args.simulations}"
+    print(f"AI: {bot_label}")
 
     game = YinshGame()
     while game.outcome() == "ongoing":
@@ -208,13 +218,15 @@ def _run_play(args):
             print(f"  {i:2d}: {m}")
         if len(moves) > 30:
             print(f"  ... ({len(moves) - 30} more)")
-        suffix = " (or 'ai' for MCTS suggestion)" if eval_fn else ""
-        choice = input(f"Move index, notation, 'q' to quit{suffix}: ").strip()
+        choice = input("Move index, notation, 'ai' for AI move, 'q' to quit: ").strip()
         if choice in ("q", "quit", "exit"):
             return
-        if choice == "ai" and eval_fn is not None:
-            best = game.best_move(eval_fn, args.simulations, 1.5)
-            print(f"  AI suggests: {best}")
+        if choice == "ai":
+            if bot == "alphabeta":
+                best = game.best_move_alphabeta(args.depth)
+            else:
+                best = game.best_move(eval_fn, args.simulations, 1.5)
+            print(f"  AI plays: {best}")
             game.play(best)
             continue
         if choice.isdigit() and 0 <= int(choice) < len(moves):

@@ -1,3 +1,4 @@
+pub mod alphabeta;
 pub mod hex;
 pub mod board;
 pub mod board_encoding;

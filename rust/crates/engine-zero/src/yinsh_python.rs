@@ -530,6 +530,25 @@ impl PyYinshGame {
         py.check_signals()?;
         Ok(move_to_str(&best))
     }
+
+    /// Heuristic-only alpha-beta search to `depth` plies. No NN required.
+    /// Returns the chosen move as a notation string.
+    #[pyo3(signature = (depth=3))]
+    fn best_move_alphabeta(&self, depth: u32) -> PyResult<String> {
+        let mv = yinsh_game::alphabeta::alphabeta_best_move(&self.board, depth);
+        Ok(move_to_str(&mv))
+    }
+
+    /// Return `[(move_str, score), ...]` for every legal root move at the
+    /// given depth. Useful for inspecting what the bot is thinking about.
+    #[pyo3(signature = (depth=2))]
+    fn alphabeta_root_scores(&self, depth: u32) -> PyResult<Vec<(String, f32)>> {
+        let scores = yinsh_game::alphabeta::alphabeta_root_scores(&self.board, depth);
+        Ok(scores
+            .into_iter()
+            .map(|(mv, s)| (move_to_str(&mv), s))
+            .collect())
+    }
 }
 
 // ---------------------------------------------------------------------------

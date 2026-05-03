@@ -244,3 +244,47 @@ def test_smoke_battle(engine_zero):
     result = session.play_battle(make_eval(m1), make_eval(m2))
     total = result.wins_model1 + result.wins_model2 + result.draws
     assert total == 2
+
+
+# ---------------------------------------------------------------------------
+# Alpha-beta minimax bot
+# ---------------------------------------------------------------------------
+
+
+def test_alphabeta_returns_legal_move_in_setup(engine_zero):
+    g = engine_zero.YinshGame()
+    mv = g.best_move_alphabeta(2)
+    assert mv in g.valid_moves()
+
+
+def test_alphabeta_returns_legal_move_in_normal(engine_zero):
+    g = engine_zero.YinshGame()
+    # Play 10 setup moves (place all rings) → enter Normal phase.
+    for _ in range(10):
+        g.play(g.valid_moves()[0])
+    assert g.phase() == "normal"
+    mv = g.best_move_alphabeta(2)
+    assert mv in g.valid_moves()
+
+
+def test_alphabeta_does_not_mutate_caller(engine_zero):
+    g = engine_zero.YinshGame()
+    g.play(g.valid_moves()[0])
+    moves_before = g.valid_moves()
+    phase_before = g.phase()
+    player_before = g.current_player()
+    _ = g.best_move_alphabeta(2)
+    assert g.valid_moves() == moves_before
+    assert g.phase() == phase_before
+    assert g.current_player() == player_before
+
+
+def test_alphabeta_root_scores_one_per_move(engine_zero):
+    g = engine_zero.YinshGame()
+    for _ in range(10):
+        g.play(g.valid_moves()[0])
+    legal = g.valid_moves()
+    scores = g.alphabeta_root_scores(1)
+    assert len(scores) == len(legal)
+    score_moves = [m for (m, _) in scores]
+    assert sorted(score_moves) == sorted(legal)
