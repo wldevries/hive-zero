@@ -282,10 +282,24 @@ class YinshDataset(Dataset):
 
 
 def _policy_ce(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Per-sample CE: -sum(p * log_softmax(logits)). Targets sum to ~1 already."""
+    """Per-sample CE over legal moves only.
+
+    Of the 7139 policy logits, ~30 correspond to legal moves at any state and
+    the rest are unreachable. We mask illegal cells to ~-inf before softmax so
+    the partition function sums only over legals — the network gets zero
+    gradient on illegal logits and is free to emit garbage there. The Rust
+    MCTS path (`expand_with_policy`) likewise reads logits only at legal-move
+    indices and softmaxes over those, so training and inference stay aligned.
+
+    The legal mask is derived from `target > 0`: every legal move's encoding
+    receives nonzero visit probability (including ClaimRow's `Sum(a, b)` 50/50
+    split, which writes to both factor cells).
+    """
+    legal = (target > 0).to(logits.dtype)
+    masked_logits = logits + (legal - 1.0) * 1e9
     t_sum = target.sum(dim=1, keepdim=True).clamp(min=1e-8)
     t_norm = target / t_sum
-    return -(t_norm * torch.log_softmax(logits, dim=1)).sum(dim=1)
+    return -(t_norm * torch.log_softmax(masked_logits, dim=1)).sum(dim=1)
 
 
 def _scalar_to_wdl(v: torch.Tensor) -> torch.Tensor:
