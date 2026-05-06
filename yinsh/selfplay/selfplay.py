@@ -322,6 +322,7 @@ class SelfPlayTrainer:
                     games_per_gen,
                     opening_book,
                     boardspace_frac,
+                    opening.min,
                     opening.max,
                 )
                 if opening_book
@@ -496,23 +497,27 @@ def _make_opening_sequences(
     num_games: int,
     book: list[list[str]],
     boardspace_frac: float,
-    opening_moves: int,
+    opening_moves_min: int,
+    opening_moves_max: int,
 ) -> list[list[str]]:
     """Generate per-game opening sequences from the book.
 
-    `boardspace_frac` of games get a prefix of exactly `opening_moves` moves
-    sampled from a random human game; the rest get an empty list (Rust falls
-    back to `random_opening_moves` for those games). Games shorter than
-    `opening_moves` are excluded from the eligible pool.
+    `boardspace_frac` of games get a prefix sampled from a random human game;
+    the rest get an empty list (Rust falls back to `random_opening_moves` for
+    those games). The prefix length is sampled uniformly per game from
+    `[opening_moves_min, opening_moves_max]`. Games shorter than
+    `opening_moves_min` are excluded from the eligible pool; if the sampled
+    length exceeds a chosen game's length, the full game is used.
     """
     import random as _random
 
-    eligible = [g for g in book if len(g) >= opening_moves]
+    eligible = [g for g in book if len(g) >= opening_moves_min]
     sequences: list[list[str]] = []
     for _ in range(num_games):
         if eligible and _random.random() < boardspace_frac:
             game_moves = _random.choice(eligible)
-            sequences.append(game_moves[:opening_moves])
+            n = _random.randint(opening_moves_min, opening_moves_max)
+            sequences.append(game_moves[:n])
         else:
             sequences.append([])
     return sequences
