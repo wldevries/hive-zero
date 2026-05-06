@@ -365,7 +365,10 @@ def main():
         default=20,
         help="Minimum games played for ELO to count (default: 20)",
     )
-    pretrain_parser.add_argument("--model", default="model.pt")
+    pretrain_parser.add_argument(
+        "--name", type=str, default="hive",
+        help="Model name; checkpoint stored at models/{name}/{name}.pt",
+    )
     pretrain_parser.add_argument("--device", default="cuda")
     pretrain_parser.add_argument(
         "--model-config",
@@ -536,8 +539,10 @@ def main():
         lr, weight_decay, warmup_steps = _resolve_optimizer_defaults(
             args.optimizer, args.lr, args.weight_decay, args.lr_warmup_steps,
         )
+        model_path = os.path.join("models", args.name, f"{args.name}.pt")
+        os.makedirs(os.path.dirname(model_path), exist_ok=True)
         pretrainer = Pretrainer(
-            model_path=args.model,
+            model_path=model_path,
             device=_resolve_device(args.device),
             model_config=_load_model_config(args.model_config),
             lr=lr,

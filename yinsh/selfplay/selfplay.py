@@ -194,6 +194,7 @@ class SelfPlayTrainer:
         opening_boardspace_dir: Optional[str] = None,
         boardspace_frac: float = 1.0,
         opening_min_elo: float = 1600.0,
+        draw_keep_frac: float = 1.0,
     ):
         from engine_zero import YinshSelfPlaySession
 
@@ -383,22 +384,43 @@ class SelfPlayTrainer:
             boards, reserves, policies, values, value_only, phase_flags = (
                 result.training_data()
             )
+            boards = np.asarray(boards)
+            reserves = np.asarray(reserves)
+            policies = np.asarray(policies)
+            values = np.asarray(values)
+            value_only = list(value_only)
+            phase_flags = list(phase_flags)
+
+            n_dropped = 0
+            if draw_keep_frac < 1.0 and len(values) > 0:
+                is_draw = (values == 0.0)
+                keep = ~is_draw | (np.random.rand(len(values)) < draw_keep_frac)
+                n_dropped = int(len(values) - keep.sum())
+                if n_dropped > 0:
+                    boards = boards[keep]
+                    reserves = reserves[keep]
+                    policies = policies[keep]
+                    values = values[keep]
+                    value_only = [v for v, k in zip(value_only, keep) if k]
+                    phase_flags = [p for p, k in zip(phase_flags, keep) if k]
+
             dataset.add_batch(
-                board_tensors=np.array(boards),
-                reserve_vectors=np.array(reserves),
-                policy_targets=np.array(policies),
-                value_targets=np.array(values),
-                value_only=list(value_only),
-                phase_flags=list(phase_flags),
+                board_tensors=boards,
+                reserve_vectors=reserves,
+                policy_targets=policies,
+                value_targets=values,
+                value_only=value_only,
+                phase_flags=phase_flags,
                 generation=generation,
             )
             buf_time = time.time() - buf_start
 
             n_vo = sum(1 for v in value_only if v)
             pos_per_s = result.num_samples / play_time if play_time > 0 else 0
+            drop_str = f", dropped={n_dropped} draws" if n_dropped > 0 else ""
             print(
                 f"  {games_per_gen} games: {result.num_samples} new positions "
-                f"({n_vo} value-only) "
+                f"({n_vo} value-only){drop_str} "
                 f"(play={play_time:.1f}s, buf={buf_time:.2f}s, {pos_per_s:.0f} pos/s), "
                 f"buffer: {len(dataset)}"
             )

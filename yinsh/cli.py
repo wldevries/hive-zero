@@ -75,6 +75,11 @@ def main():
     t.add_argument("--draw-contempt", type=float, default=0.0,
                    help="Draw contempt: MCTS value = W - L - contempt * D. "
                         "Positive = avoid draws (default: 0.0)")
+    t.add_argument("--draw-keep-frac", type=float, default=1.0,
+                   help="Probability of keeping each position from a drawn game in the "
+                        "replay buffer. 1.0 = keep all (default), lower values subsample "
+                        "draws to counter draw-collapse of the value head. Decisive-game "
+                        "positions are always kept.")
     t.add_argument("--asymmetric-contempt", action="store_true", default=False,
                    help="Apply --draw-contempt asymmetrically: each self-play game "
                         "randomly designates one side as the contempt side; the other "
@@ -120,7 +125,8 @@ def main():
                     help="Minimum ELO for both players (default: 1600)")
     pt.add_argument("--min-games", type=int, default=20,
                     help="Minimum games played for ELO to count (default: 20)")
-    pt.add_argument("--model", default="yinsh.pt")
+    pt.add_argument("--name", type=str, default="yinsh",
+                    help="Model name; checkpoint stored at models/{name}/{name}.pt")
     pt.add_argument("--device", default="cuda")
     pt.add_argument("--model-config", type=str, default=None,
                     help="Path to JSON model config (default: configs/yinsh/medium.json). "
@@ -238,6 +244,7 @@ def main():
             opening_boardspace_dir=args.opening_boardspace_dir,
             boardspace_frac=args.boardspace_frac,
             opening_min_elo=args.opening_min_elo,
+            draw_keep_frac=args.draw_keep_frac,
         )
     elif args.command == "pretrain":
         from yinsh.supervised.pretrain import (
@@ -263,8 +270,10 @@ def main():
         lr, weight_decay, warmup_steps = _resolve_optimizer_defaults(
             args.optimizer, args.lr, args.weight_decay, args.lr_warmup_steps,
         )
+        model_path = os.path.join("models", args.name, f"{args.name}.pt")
+        os.makedirs(os.path.dirname(model_path), exist_ok=True)
         pretrainer = Pretrainer(
-            model_path=args.model,
+            model_path=model_path,
             device=args.device,
             model_config=_load_model_config(args.model_config),
             lr=lr,
