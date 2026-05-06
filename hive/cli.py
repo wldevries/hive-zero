@@ -288,6 +288,17 @@ def main():
              "Positive = avoid draws, negative = seek draws (default: 0.0)",
     )
     train_parser.add_argument(
+        "--asymmetric-contempt",
+        action="store_true",
+        default=False,
+        help="Apply --draw-contempt asymmetrically: each self-play game randomly "
+             "designates one side as the contempt side; the other side searches with "
+             "contempt 0. Within MCTS the bias is applied per-node based on whose turn "
+             "it is, so the contempt side correctly models opponent as playing "
+             "without draw aversion. Intended to break draw lock-in by producing "
+             "decisive outcomes from genuinely asymmetric play (default: off).",
+    )
+    train_parser.add_argument(
         "--augment-symmetry",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -607,6 +618,7 @@ def main():
             dir_epsilon=args.dir_epsilon,
             forced_playouts=args.forced_playouts,
             draw_contempt=args.draw_contempt,
+            asymmetric_contempt=args.asymmetric_contempt,
             play_batch_size=args.play_batch_sims,
             temperature=args.temperature,
             temp_threshold=args.temp_threshold,

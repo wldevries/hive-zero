@@ -17,6 +17,11 @@ pub struct MctsConfig {
     pub dir_epsilon: f32,
     pub forced_playouts: bool,
     pub draw_contempt: f32,
+    /// When true, each self-play game randomly designates one side as the
+    /// "contempt side"; `draw_contempt` only applies on that side's turns,
+    /// while the other side searches with contempt 0. When false, contempt
+    /// is applied symmetrically on every turn (the historical default).
+    pub asymmetric_contempt: bool,
     /// Number of leaves collected across games per inference batch.
     pub play_batch_size: usize,
     /// Visit-count temperature applied for the first `temp_threshold` plies.

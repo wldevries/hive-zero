@@ -74,6 +74,13 @@ def main():
     t.add_argument("--draw-contempt", type=float, default=0.0,
                    help="Draw contempt: MCTS value = W - L - contempt * D. "
                         "Positive = avoid draws (default: 0.0)")
+    t.add_argument("--asymmetric-contempt", action="store_true", default=False,
+                   help="Apply --draw-contempt asymmetrically: each self-play game "
+                        "randomly designates one side as the contempt side; the other "
+                        "side searches with contempt 0. Per-node UCB scoring keys on "
+                        "whose turn it is so the contempt side correctly models opponent "
+                        "as playing without draw aversion. Intended to break draw "
+                        "lock-in by producing decisive outcomes (default: off).")
     t.add_argument("--show-timing", action="store_true",
                    help="Print per-phase wall-clock breakdown (select / encode / "
                         "eval / expand) and ORT eval subphase times each gen.")
@@ -190,6 +197,7 @@ def main():
             dir_epsilon=args.dir_epsilon,
             forced_playouts=args.forced_playouts,
             draw_contempt=args.draw_contempt,
+            asymmetric_contempt=args.asymmetric_contempt,
             play_batch_size=args.play_batch_sims,
             temperature=args.temperature,
             temp_threshold=args.temp_threshold,

@@ -253,6 +253,7 @@ impl PyZertzSelfPlaySession {
         fast_cap = 20,
         forced_playouts = false,
         draw_contempt = 0.0,
+        asymmetric_contempt = false,
     ))]
     fn new(
         num_games: usize,
@@ -267,7 +268,12 @@ impl PyZertzSelfPlaySession {
         fast_cap: usize,
         forced_playouts: bool,
         draw_contempt: f32,
+        // Accepted for kwarg compatibility with the shared MctsConfig — Zertz
+        // does not currently use asymmetric contempt (no draw-convergence
+        // problem because games are finite by construction).
+        asymmetric_contempt: bool,
     ) -> Self {
+        let _ = asymmetric_contempt;
         PyZertzSelfPlaySession {
             num_games, simulations, temperature, temp_threshold,
             c_puct, dir_alpha, dir_epsilon, play_batch_size, playout_cap_p, fast_cap,
@@ -324,6 +330,7 @@ impl PyZertzSelfPlaySession {
             dir_epsilon: self.dir_epsilon,
             forced_playouts: self.forced_playouts,
             draw_contempt: self.draw_contempt,
+            asymmetric_contempt: false,
             play_batch_size: self.play_batch_size,
             temperature: self.temperature,
             temp_threshold: self.temp_threshold,

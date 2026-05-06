@@ -468,6 +468,7 @@ impl PySelfPlaySession {
         grid_size = 23,
         fixed_batch_size = None,
         draw_contempt = 0.0,
+        asymmetric_contempt = false,
         bot_frac = 0.0,
         bot_depth = 2,
     ))]
@@ -495,6 +496,7 @@ impl PySelfPlaySession {
         grid_size: usize,
         fixed_batch_size: Option<usize>,
         draw_contempt: f32,
+        asymmetric_contempt: bool,
         bot_frac: f32,
         bot_depth: u32,
     ) -> Self {
@@ -510,6 +512,7 @@ impl PySelfPlaySession {
                         dir_epsilon,
                         forced_playouts,
                         draw_contempt,
+                        asymmetric_contempt,
                         play_batch_size,
                         temperature,
                         temp_threshold,

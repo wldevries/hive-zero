@@ -458,6 +458,7 @@ class SelfPlayTrainer:
             "play_batch_size": mcts.play_batch_size,
             "augment_symmetry": augment_symmetry,
             "draw_contempt": mcts.draw_contempt,
+            "asymmetric_contempt": mcts.asymmetric_contempt,
         }
 
         # Training log (CSV, truncated on fresh start)

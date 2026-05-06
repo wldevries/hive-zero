@@ -667,6 +667,22 @@ pub fn play_selfplay_core(
     let mut searches: Vec<MctsSearch<YinshBoard>> = (0..num_games)
         .map(|_| make_search(mcts.simulations, mcts.c_puct, mcts.draw_contempt, mcts.forced_playouts))
         .collect();
+
+    // Per-game asymmetric contempt assignment. When enabled each game randomly
+    // picks one side as the contempt side and bakes that into its SearchParams,
+    // so the MCTS UCB only applies `draw_contempt` at nodes where the contempt
+    // side chose the move. Yinsh's `searches[gi].params` is not re-cloned during
+    // the run, so setting it once here is sufficient.
+    if mcts.asymmetric_contempt {
+        let mut crng = rand::rng();
+        for s in searches.iter_mut() {
+            s.params.contempt_side = Some(if crng.random::<bool>() {
+                Player::Player1
+            } else {
+                Player::Player2
+            });
+        }
+    }
     let mut active = vec![true; num_games];
     let mut move_counts = vec![0u32; num_games];
     let mut histories: Vec<Vec<TurnRecord>> = (0..num_games).map(|_| Vec::new()).collect();

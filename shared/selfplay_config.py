@@ -24,6 +24,7 @@ class MctsConfig:
     dir_epsilon: float = 0.25
     forced_playouts: bool = False
     draw_contempt: float = 0.0
+    asymmetric_contempt: bool = False
     play_batch_size: int = 8
     temperature: float = 1.0
     temp_threshold: int = 20

@@ -271,6 +271,7 @@ pub fn play_selfplay_core(
         dir_epsilon,
         forced_playouts,
         draw_contempt,
+        asymmetric_contempt,
         play_batch_size: leaf_batch_size,
         temperature,
         temp_threshold,
@@ -288,13 +289,43 @@ pub fn play_selfplay_core(
     );
     search_params.draw_contempt = draw_contempt;
 
+    // Per-game asymmetric contempt assignment: when enabled, each game randomly
+    // designates one side as the contempt side and bakes that into the per-game
+    // SearchParams. The MCTS UCB selection then applies `draw_contempt` only at
+    // nodes where the contempt side chose the move (see `effective_contempt`),
+    // so the contempt side's tree correctly models opponent as playing without
+    // draw aversion. When asymmetric is disabled, all per-game params share the
+    // common (symmetric) contempt — historical behavior.
+    let contempt_sides: Vec<Option<PieceColor>> = if asymmetric_contempt {
+        let mut rng = rand::rng();
+        (0..num_games)
+            .map(|_| {
+                Some(if rng.random::<bool>() {
+                    PieceColor::White
+                } else {
+                    PieceColor::Black
+                })
+            })
+            .collect()
+    } else {
+        vec![None; num_games]
+    };
+    let per_game_params: Vec<SearchParams> = contempt_sides
+        .iter()
+        .map(|side| {
+            let mut p = search_params.clone();
+            p.contempt_side = side.map(Game::color_to_player);
+            p
+        })
+        .collect();
+
     let mut games: Vec<Game> = (0..num_games)
         .map(|_| Game::new_tournament_with_grid_size(grid_size))
         .collect();
     let mut searches: Vec<MctsSearch<Game>> = (0..num_games)
-        .map(|_| {
+        .map(|gi| {
             let mut search = MctsSearch::<Game>::new(100_000);
-            search.params = search_params.clone();
+            search.params = per_game_params[gi].clone();
             search
         })
         .collect();
@@ -641,7 +672,9 @@ pub fn play_selfplay_core(
             for (batch_i, &fi) in fresh.iter().enumerate() {
                 let game_index = mcts_games[fi];
                 let policy = &init_policies[batch_i * policy_size..(batch_i + 1) * policy_size];
-                searches[game_index].params = search_params.clone();
+                // Use per-game params so the asymmetric `contempt_side` is
+                // preserved across cold re-inits (e.g. after a pass).
+                searches[game_index].params = per_game_params[game_index].clone();
                 searches[game_index].init(&games[game_index], policy);
             }
         }

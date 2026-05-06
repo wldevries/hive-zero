@@ -175,6 +175,7 @@ class SelfPlayTrainer:
             "play_batch_size": mcts.play_batch_size,
             "augment_symmetry": augment_symmetry,
             "draw_contempt": mcts.draw_contempt,
+            "asymmetric_contempt": mcts.asymmetric_contempt,
             "random_opening_moves": (opening.min, opening.max) if opening.max != opening.min else opening.min,
             "forced_playouts": mcts.forced_playouts,
         }

@@ -39,11 +39,17 @@ pub struct SearchParams {
     /// Draw contempt: scalar value = W - L - contempt * D.
     /// Terminal draws return -contempt. Default 0.0 (draws are neutral at 0).
     pub draw_contempt: f32,
+    /// Asymmetric contempt: when `Some(player)`, `draw_contempt` is applied
+    /// only at nodes where that player chose the move (i.e. the parent's
+    /// `turn_player == player`); the opponent's nodes use contempt 0. When
+    /// `None`, `draw_contempt` is applied symmetrically at every node — the
+    /// historical behavior. See `effective_contempt`.
+    pub contempt_side: Option<Player>,
 }
 
 impl SearchParams {
     pub fn new(cpuct_strategy: CpuctStrategy, forced_exploration: ForcedExploration, root_noise: RootNoise) -> Self {
-        Self { cpuct_strategy, forced_exploration, root_noise, max_children: usize::MAX, draw_contempt: 0.0 }
+        Self { cpuct_strategy, forced_exploration, root_noise, max_children: usize::MAX, draw_contempt: 0.0, contempt_side: None }
     }
 
     pub fn inference(cpuct_strategy: CpuctStrategy) -> Self {
@@ -53,6 +59,7 @@ impl SearchParams {
             root_noise: RootNoise::None,
             max_children: usize::MAX,
             draw_contempt: 0.0,
+            contempt_side: None,
         }
     }
 }
@@ -65,7 +72,23 @@ impl Default for SearchParams {
             root_noise: RootNoise::None,
             max_children: usize::MAX,
             draw_contempt: 0.0,
+            contempt_side: None,
         }
+    }
+}
+
+/// Effective contempt scalar to apply when scoring children chosen by
+/// `parent_player`. Asymmetric mode returns 0 for the side that is not the
+/// designated contempt side, so that side's MCTS subtree models the
+/// contempted player's responses without any draw-aversion bias — and vice
+/// versa, the contempted side's tree correctly models the opponent as
+/// playing straight Q without contempt.
+#[inline]
+fn effective_contempt(params: &SearchParams, parent_player: Player) -> f32 {
+    match params.contempt_side {
+        None => params.draw_contempt,
+        Some(side) if side == parent_player => params.draw_contempt,
+        Some(_) => 0.0,
     }
 }
 
@@ -81,10 +104,14 @@ fn dir_epsilon(params: &SearchParams) -> f32 {
 /// UCB score for child selection.
 /// `node.value(contempt)` is from the parent's player's perspective, so it is
 /// added directly without sign adjustment. See docs/mcts_value_convention.md.
-fn ucb_score<M: Copy>(node: &MctsNode<M>, parent_visits: u32, params: &SearchParams) -> f32 {
+/// `parent_player` is the player whose turn it is at the parent node; the
+/// effective contempt depends on whether that player is the asymmetric
+/// contempt side (see `effective_contempt`).
+fn ucb_score<M: Copy>(node: &MctsNode<M>, parent_player: Player, parent_visits: u32, params: &SearchParams) -> f32 {
     let c_puct = calculate_cpuct(params, parent_visits);
     let eps = dir_epsilon(params);
-    calculate_ucb_score(node, c_puct, parent_visits, eps, params.draw_contempt)
+    let contempt = effective_contempt(params, parent_player);
+    calculate_ucb_score(node, c_puct, parent_visits, eps, contempt)
 }
 
 #[inline]
@@ -124,7 +151,7 @@ fn best_child<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params: &SearchPar
     let node = arena.get(node_id);
     let parent_visits = node.visit_count;
     let c_puct = calculate_cpuct(params, parent_visits);
-    let contempt = params.draw_contempt;
+    let contempt = effective_contempt(params, node.turn_player);
     let mut best_id = node.first_child.expect("no children");
     let mut best_score = calculate_ucb_score(arena.get(best_id), c_puct, parent_visits, eps, contempt);
 
@@ -176,15 +203,16 @@ fn select_leaf<M: Copy>(arena: &NodeArena<M>, root: NodeId, params: &SearchParam
 fn best_child_with_forced<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params: &SearchParams, eps: f32, k: f32) -> NodeId {
     let node = arena.get(node_id);
     let parent_visits = node.visit_count;
+    let parent_player = node.turn_player;
     let n_total = parent_visits as f32;
 
     let mut best_id = node.first_child.expect("no children");
-    let mut best_score = child_score_with_forced(arena.get(best_id), parent_visits, n_total, params, eps, k);
+    let mut best_score = child_score_with_forced(arena.get(best_id), parent_player, parent_visits, n_total, params, eps, k);
 
     let mut current = arena.get(best_id).next_sibling;
     while let Some(child_id) = current {
         let child = arena.get(child_id);
-        let score = child_score_with_forced(child, parent_visits, n_total, params, eps, k);
+        let score = child_score_with_forced(child, parent_player, parent_visits, n_total, params, eps, k);
         if score > best_score {
             best_score = score;
             best_id = child_id;
@@ -197,8 +225,8 @@ fn best_child_with_forced<M: Copy>(arena: &NodeArena<M>, node_id: NodeId, params
 
 /// Score for a root child with forced playout logic.
 /// If the child has been visited but is below its forced minimum, return infinity.
-fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_visits: u32, n_total: f32, params: &SearchParams, eps: f32, k: f32) -> f32 {
-    let mut score = ucb_score(child, parent_visits, params);
+fn child_score_with_forced<M: Copy>(child: &MctsNode<M>, parent_player: Player, parent_visits: u32, n_total: f32, params: &SearchParams, eps: f32, k: f32) -> f32 {
+    let mut score = ucb_score(child, parent_player, parent_visits, params);
     if child.visit_count > 0 {
         let n_forced = (k * (child.prior(eps) * n_total).sqrt()) as u32;
         if child.visit_count < n_forced {
@@ -633,8 +661,11 @@ impl<G: GameEngine> MctsSearch<G> {
 
     /// Get the best move by visit count.
     pub fn best_move(&self) -> Option<G::Move> {
-        let contempt = self.params.draw_contempt;
         let root = self.arena.get(self.root);
+        // Children of root are evaluated from root's turn-player's perspective,
+        // so the effective contempt depends on whether root.turn_player is the
+        // designated contempt side.
+        let contempt = effective_contempt(&self.params, root.turn_player);
         let mut best_visits = 0u32;
         let mut best_value = f32::NEG_INFINITY;
         let mut best_move = None;
@@ -696,7 +727,9 @@ impl<G: GameEngine> MctsSearch<G> {
 
         // Collect children: (move, raw_visits, prior, value)
         let eps = dir_epsilon(&self.params);
-        let contempt = self.params.draw_contempt;
+        // Root's children are evaluated from root.turn_player's perspective,
+        // so use that side's effective contempt.
+        let contempt = effective_contempt(&self.params, root.turn_player);
         struct ChildInfo<M: Copy> {
             mv: M,
             visits: u32,
@@ -831,10 +864,25 @@ impl<G: GameEngine> MctsSearch<G> {
     }
 
     /// Mean value estimate at the root, from the root player's own perspective.
-    /// Negated because the root has no parent and its value_sum accumulates
-    /// from the "opposite" frame. See docs/mcts_value_convention.md.
+    /// `value_sum` accumulates in the "opposite" (phantom-parent) frame so the
+    /// W−L component is negated to recover root's own perspective; `draw_sum`
+    /// is symmetric (same magnitude for both players) and so the contempt
+    /// term is subtracted, not added. See docs/mcts_value_convention.md.
+    ///
+    /// With asymmetric contempt the contempt scalar applied here is the one
+    /// for the root player — i.e. the root player's own draw aversion shapes
+    /// the value they expect to realise.
     pub fn root_value(&self) -> f32 {
-        -self.arena.get(self.root).value(self.params.draw_contempt)
+        let root = self.arena.get(self.root);
+        let n = root.visit_count;
+        if n == 0 {
+            return 0.0;
+        }
+        let n = n as f32;
+        let raw_wl = -root.value_sum / n;
+        let avg_draw = root.draw_sum / n;
+        let contempt = effective_contempt(&self.params, root.turn_player);
+        raw_wl - contempt * avg_draw
     }
 
     /// Encode a game state for NN evaluation.
