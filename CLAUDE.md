@@ -75,7 +75,7 @@ rust/crates/
 - **1 epoch** per iteration (avoids overfitting on stale replay buffer data)
 - **Playout cap randomization**: per-turn random fast/full search (KataGo-style), fast turns train value only
 - **Symmetry augmentation**: D6 hex symmetries (12 transforms), on by default; disable with `--no-augment-symmetry`.
-- **Replay buffer**: in-memory only, not persisted to disk. Lost on process exit. Pretrain and selfplay run as separate processes so the buffer is always empty at the start of selfplay.
+- **Replay buffer**: persisted to `replay.h5` (HDF5) alongside the model checkpoint, so it survives process restarts. Pretrain and selfplay run as separate processes; selfplay starts from whatever `replay.h5` exists in the model directory (empty on a fresh run).
 - **Fast-cap turns**: no Dirichlet noise, play strongest move, added to buffer with value-only training (policy loss masked)
 - **Heuristic value** for unfinished games: multi-component positional score combining queen danger (exponential lookup from boardspace weights), queen escape routes, attack pressure (own pieces near enemy queen weighted by 1/distance), total legal move count, shutout penalty (zero legal moves), pinned piece fraction, drop destination count, and piece mobility. All computed as relative (white − black) and clamped to [−1, 1].
 - **Auxiliary heads**: Six sigmoid outputs from a dedicated pathway off the trunk (conv1x1→FC64→FC6), predicting per-position metrics for both current and opponent player. Trained with MSE, always active (not masked). Provides gradient signal on every position even in drawn games.
