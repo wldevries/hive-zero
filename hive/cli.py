@@ -424,6 +424,14 @@ def main():
         default=["Dumbot"],
         help="Players to exclude from training data (default: Dumbot)",
     )
+    pretrain_parser.add_argument(
+        "--val-frac",
+        type=float,
+        default=0.1,
+        help="Fraction of games held out as validation set (deterministic by sgf_name hash). "
+             "After each chunk, val loss is logged and the best-by-val checkpoint is saved as "
+             "<model>.best.pt. Set 0 to disable.",
+    )
 
     # Battle: model vs model (parallel) or model vs Mzinga (sequential)
     battle_parser = subparsers.add_parser(
@@ -535,6 +543,7 @@ def main():
             epochs_per_chunk=args.epochs_per_chunk,
             checkpoint_dir=args.checkpoint_dir,
             verbose_samples=args.verbose_samples,
+            val_frac=args.val_frac,
             augment_symmetry=args.augment_symmetry,
         )
 

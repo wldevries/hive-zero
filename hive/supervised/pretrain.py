@@ -76,10 +76,10 @@ def parse_uhp_move(
     if not parts:
         raise ValueError("empty move string")
 
-    # Normalize piece name to UHP form used by the Rust engine (e.g. wQ1 → wQ).
+    # Normalize piece name to UHP form used by the Rust engine (e.g. wQ1 -> wQ).
     piece_str = _normalize_piece(parts[0])
 
-    # Build piece-name → (q, r) map covering ALL pieces, including those buried
+    # Build piece-name -> (q, r) map covering ALL pieces, including those buried
     # under beetle stacks (all_top_pieces only returns the top of each stack).
     piece_pos: dict[str, tuple[int, int]] = {}
     for (q, r), _ in game.all_top_pieces():
@@ -103,9 +103,9 @@ def parse_uhp_move(
     elif pos_str[-1] in ("-", "/", "\\"):
         suffix = pos_str[-1]
         ref_str = pos_str[:-1]
-    # else: no direction → beetle climbing on top of ref piece
+    # else: no direction -> beetle climbing on top of ref piece
 
-    # Normalize reference piece name to UHP form (e.g. wQ1 → wQ).
+    # Normalize reference piece name to UHP form (e.g. wQ1 -> wQ).
     ref_str = _normalize_piece(ref_str)
 
     ref_pos = piece_pos.get(ref_str)
@@ -420,6 +420,7 @@ class Pretrainer:
         checkpoint_dir: str = "checkpoints",
         verbose_samples: bool = False,
         augment_symmetry: bool = True,
+        val_frac: float = 0.1,
     ) -> None:
         """Pre-train the model.
 
@@ -434,6 +435,7 @@ class Pretrainer:
             checkpoint_dir: Directory for per-epoch checkpoints.
             augment_symmetry: Apply D6 hex symmetry augmentation (12x) during training.
         """
+        from shared.val_split import split_train_val
         os.makedirs(checkpoint_dir, exist_ok=True)
 
         model_name = os.path.splitext(os.path.basename(self.model_path))[0]
@@ -447,20 +449,24 @@ class Pretrainer:
             with open(log_path, "a") as f:
                 f.write(LOG_HEADER)
 
-        total_games = len(games)
-        print(f"Dataset: {total_games} games | buffer: {buffer_size} | "
-              f"epochs: {num_epochs} | SGD epochs/chunk: {epochs_per_chunk} | "
-              f"symmetry_aug: {augment_symmetry}")
+        train_games, val_games = split_train_val(games, val_frac, sgf_name_index=1)
+        total_games = len(train_games)
+        print(f"Dataset: {total_games} train + {len(val_games)} val games | "
+              f"buffer: {buffer_size} | epochs: {num_epochs} | "
+              f"SGD epochs/chunk: {epochs_per_chunk} | symmetry_aug: {augment_symmetry}")
 
         from ..nn.training import HiveDataset
+        val_dataset = self._build_val_dataset(val_games, zip_index, verbose_samples)
         dataset = HiveDataset(max_size=buffer_size, grid_size=self.grid_size)
         dataset.augment_symmetry = augment_symmetry
         chunk_idx = 0
         total_positions = 0
         total_errors = 0
+        best_val_total = float("inf")
+        best_path = self.model_path.rsplit(".", 1)[0] + ".best.pt"
 
         for epoch in range(1, num_epochs + 1):
-            random.shuffle(games)
+            random.shuffle(train_games)
             positions_this_epoch = 0
             errors_this_epoch = 0
 
@@ -469,7 +475,7 @@ class Pretrainer:
             losses: dict = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
 
             games_done = 0
-            for zip_file, sgf_name, result in games:
+            for zip_file, sgf_name, result in train_games:
                 games_done += 1
                 zip_path = zip_index.get(zip_file)
 
@@ -524,6 +530,25 @@ class Pretrainer:
                         chunk_positions = dataset._size
                         dataset.clear()
 
+                        val_losses: dict | None = None
+                        if val_dataset is not None and len(val_dataset) > 0:
+                            val_losses = self.trainer.validate(val_dataset, batch_size=batch_size)
+                            vt = f"{val_losses['total_loss']:.4f}"
+                            vp = f"{val_losses['policy_loss']:.4f}"
+                            vv = f"{val_losses['value_loss']:.4f}"
+                            print(
+                                f"  chunk={_cc(chunk_idx)} VAL "
+                                f"loss={_cr(vt)} (policy={_cy(vp)} value={_cy(vv)})"
+                            )
+                            if val_losses["total_loss"] < best_val_total:
+                                best_val_total = val_losses["total_loss"]
+                                self._save_checkpoint(
+                                    self.model, best_path, epoch,
+                                    {**val_losses, "val_best": True},
+                                    optimizer=self.trainer.optimizer,
+                                )
+                                print(f"  new best val={best_val_total:.4f} -> {best_path}")
+
                         lr = self.trainer._current_lr
                         tl = f"{losses['total_loss']:.4f}"
                         pl = f"{losses['policy_loss']:.4f}"
@@ -534,13 +559,16 @@ class Pretrainer:
                             f"loss={_cr(tl)} (policy={_cy(pl)} value={_cy(vl)}) "
                             f"lr={lr} [{chunk_elapsed:.1f}s]"
                         )
+                        val_pol = val_losses["policy_loss"] if val_losses else 0.0
+                        val_val = val_losses["value_loss"] if val_losses else 0.0
+                        val_tot = val_losses["total_loss"] if val_losses else 0.0
                         with open(log_path, "a") as log:
                             log.write(
                                 f"{chunk_idx},pretrain,0,0,0,0,0,{total_positions},{chunk_positions},"
                                 f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
                                 f"{losses['value_loss']:.6f},{losses.get('qd_loss', 0):.6f},"
                                 f"{lr:.8f},{chunk_elapsed:.1f},"
-                                f"epoch={epoch},"
+                                f"epoch={epoch} val={val_tot:.6f}/{val_pol:.6f}/{val_val:.6f},"
                                 f"{losses.get('qe_loss', 0):.6f},{losses.get('mob_loss', 0):.6f}\n"
                             )
 
@@ -565,13 +593,56 @@ class Pretrainer:
             ckpt_path = os.path.join(checkpoint_dir, f"{model_name}_epoch{epoch}.pt")
             self._save_checkpoint(self.model, ckpt_path, epoch, epoch_losses,
                                   optimizer=self.trainer.optimizer)
-            print(f"  Model saved → {self.model_path}  |  Checkpoint → {ckpt_path}")
+            print(f"  Model saved -> {self.model_path}  |  Checkpoint -> {ckpt_path}")
 
         print(
             f"\nPre-training complete. "
             f"Total positions: {total_positions}. "
             f"Total errors: {total_errors}. "
-            f"Model saved → {self.model_path}"
+            f"Model saved -> {self.model_path}"
         )
+
+    def _build_val_dataset(
+        self,
+        val_games: list[tuple[str, str, str]],
+        zip_index: dict[str, str],
+        verbose_samples: bool,
+    ):
+        """Build an in-memory val HiveDataset from `val_games`. Returns None if empty."""
+        from ..nn.training import HiveDataset
+        if not val_games:
+            return None
+        print(f"  Loading val set ({len(val_games)} games)...")
+        load_start = time.time()
+        # First pass: collect samples to know the size; then add to dataset.
+        all_samples: list[tuple] = []
+        for zip_file, sgf_name, result in val_games:
+            zip_path = zip_index.get(zip_file)
+            if zip_path is None:
+                continue
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    content = zf.read(sgf_name).decode("iso-8859-1")
+                samples = game_to_samples(
+                    content, result,
+                    verbose=verbose_samples, game_name=sgf_name,
+                    grid_size=self.grid_size,
+                )
+            except Exception:
+                samples = []
+            all_samples.extend(samples)
+        if not all_samples:
+            return None
+        ds = HiveDataset(max_size=max(len(all_samples), 1024), grid_size=self.grid_size)
+        ds.augment_symmetry = False  # val should be deterministic
+        for (board, reserve, place_idx, place_probs,
+             mv_src, mv_dst, mv_probs_per, value) in all_samples:
+            ds.add_sample(board, reserve,
+                          place_idx, place_probs,
+                          mv_src, mv_dst, mv_probs_per,
+                          float(value))
+        elapsed = time.time() - load_start
+        print(f"  Val set: {len(all_samples)} positions [{elapsed:.1f}s]")
+        return ds
 
 

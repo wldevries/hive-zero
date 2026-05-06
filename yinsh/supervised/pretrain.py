@@ -306,14 +306,19 @@ class Pretrainer:
         verbose_samples: bool = False,
         augment_symmetry: bool = True,
         value_loss_scale: float = 1.0,
+        val_frac: float = 0.1,
     ) -> None:
         """Pre-train the YINSH model.
 
         Args mirror Hive's `Pretrainer.run`. The training buffer is the same
         `YinshDataset` used by self-play, so per-position aug + the on-disk
-        replay buffer code paths are reused unchanged.
+        replay buffer code paths are reused unchanged. With `val_frac > 0`,
+        ~val_frac of games are held out by stable hash; held-out loss is
+        evaluated after each chunk and the best-by-val-loss checkpoint is
+        saved alongside the per-epoch checkpoints as `<model>.best.pt`.
         """
         from yinsh.nn.training import YinshDataset
+        from shared.val_split import split_train_val
 
         os.makedirs(checkpoint_dir, exist_ok=True)
         model_name = os.path.splitext(os.path.basename(self.model_path))[0]
@@ -322,21 +327,26 @@ class Pretrainer:
             with open(log_path, "w") as f:
                 f.write(LOG_HEADER)
 
-        total_games = len(games)
+        train_games, val_games = split_train_val(games, val_frac, sgf_name_index=1)
+        total_games = len(train_games)
         print(
-            f"Dataset: {total_games} games | buffer: {buffer_size} | "
-            f"epochs: {num_epochs} | epochs/chunk: {epochs_per_chunk} | "
-            f"symmetry_aug: {augment_symmetry}"
+            f"Dataset: {total_games} train + {len(val_games)} val games | "
+            f"buffer: {buffer_size} | epochs: {num_epochs} | "
+            f"epochs/chunk: {epochs_per_chunk} | symmetry_aug: {augment_symmetry}"
         )
+
+        val_dataset = self._build_val_dataset(val_games, zip_index, verbose_samples)
 
         dataset = YinshDataset(max_size=buffer_size)
         dataset.augment_symmetry = augment_symmetry
         chunk_idx = 0
         total_positions = 0
         total_errors = 0
+        best_val_total = float("inf")
+        best_path = self.model_path.rsplit(".", 1)[0] + ".best.pt"
 
         for epoch in range(1, num_epochs + 1):
-            random.shuffle(games)
+            random.shuffle(train_games)
             positions_this_epoch = 0
             errors_this_epoch = 0
 
@@ -347,7 +357,7 @@ class Pretrainer:
             games_done = 0
             chunk_buf: list[tuple] = []  # accumulate (b, r, p, v, phase) tuples
 
-            for zip_file, sgf_name, result, _p0, _p1 in games:
+            for zip_file, sgf_name, result, _p0, _p1 in train_games:
                 games_done += 1
                 zip_path = zip_index.get(zip_file)
                 if zip_path is None:
@@ -403,7 +413,31 @@ class Pretrainer:
                     chunk_elapsed = time.time() - chunk_start
                     dataset.clear()
 
+                    val_losses: dict | None = None
+                    if val_dataset is not None and len(val_dataset) > 0:
+                        val_losses = self.trainer.validate(
+                            val_dataset, batch_size=batch_size, value_loss_scale=value_loss_scale,
+                        )
+                        vt = f"{val_losses['total_loss']:.4f}"
+                        vp = f"{val_losses['policy_loss']:.4f}"
+                        vv = f"{val_losses['value_loss']:.4f}"
+                        print(
+                            f"  chunk={_cc(chunk_idx)} VAL "
+                            f"loss={_cr(vt)} (pol={_cy(vp)} val={_cy(vv)})"
+                        )
+                        if val_losses["total_loss"] < best_val_total:
+                            best_val_total = val_losses["total_loss"]
+                            self._save_checkpoint(
+                                self.model, best_path, epoch,
+                                {**val_losses, "val_best": True},
+                                optimizer=self.trainer.optimizer,
+                            )
+                            print(f"  new best val={best_val_total:.4f} -> {best_path}")
+
                     lr = self.trainer._current_lr
+                    val_pol = val_losses["policy_loss"] if val_losses else 0.0
+                    val_val = val_losses["value_loss"] if val_losses else 0.0
+                    val_tot = val_losses["total_loss"] if val_losses else 0.0
                     with open(log_path, "a") as log:
                         log.write(
                             # gen,epoch,simulations,games,positions,buffer,
@@ -412,14 +446,14 @@ class Pretrainer:
                             # loss,policy_loss,value_loss,
                             # lr,duration_s,
                             # mcts_top1_mean,mcts_top1_std,mcts_depth_mean,mcts_depth_std,mcts_moves_mean,mcts_moves_std,
-                            # comment
+                            # comment (val=val_loss/policy/value to keep train + val correlated in the same row)
                             f"{chunk_idx},pretrain,0,{games_done},{total_positions},{chunk_positions},"
                             f"0,0,0,0,"
                             f"0,0,0,0,"
                             f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
                             f"{lr:.8f},{chunk_elapsed:.1f},"
                             f"0,0,0,0,0,0,"
-                            f"epoch={epoch}\n"
+                            f"epoch={epoch} val={val_tot:.6f}/{val_pol:.6f}/{val_val:.6f}\n"
                         )
 
             total_errors += errors_this_epoch
@@ -456,6 +490,42 @@ class Pretrainer:
             f"Total errors: {total_errors}. "
             f"Model saved -> {self.model_path}"
         )
+
+    def _build_val_dataset(
+        self,
+        val_games: list[tuple[str, str, str, str, str]],
+        zip_index: dict[str, str],
+        verbose_samples: bool,
+    ):
+        """Build an in-memory val YinshDataset from `val_games`. Returns None if empty."""
+        from yinsh.nn.training import YinshDataset
+        if not val_games:
+            return None
+        print(f"  Loading val set ({len(val_games)} games)...")
+        all_samples: list[tuple] = []
+        load_start = time.time()
+        for zip_file, sgf_name, result, _p0, _p1 in val_games:
+            zip_path = zip_index.get(zip_file)
+            if zip_path is None:
+                continue
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    content = zf.read(sgf_name).decode("iso-8859-1")
+                samples = game_to_samples(
+                    content, result, verbose=verbose_samples, game_name=sgf_name,
+                )
+            except Exception:
+                samples = []
+            all_samples.extend(samples)
+        if not all_samples:
+            return None
+        # Size dataset to fit; never auto-clears, never grows further.
+        ds = YinshDataset(max_size=max(len(all_samples), 1024))
+        ds.augment_symmetry = False  # val should be deterministic
+        self._push_to_dataset(ds, all_samples, generation=0)
+        elapsed = time.time() - load_start
+        print(f"  Val set: {len(all_samples)} positions [{elapsed:.1f}s]")
+        return ds
 
     @staticmethod
     def _push_to_dataset(dataset, samples: list[tuple], generation: int) -> None:

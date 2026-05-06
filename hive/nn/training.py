@@ -418,101 +418,101 @@ class Trainer:
     def _current_lr(self) -> float:
         return self.optimizer.param_groups[0]['lr']
 
+    def _compute_batch_losses(self, batch, value_loss_scale: float, aux_loss_scale: float):
+        """Compute per-batch loss tensors. Shared by train_epoch and validate."""
+        (board, reserve, p_idx, p_prob, n_p,
+         m_src, m_dst, m_prob, n_m,
+         value_target, vo_mask, po_mask, aux_target) = batch
+
+        device = self.device
+        device_type = self.device.type
+        D = self.model.bilinear_dim
+
+        board = board.to(device)
+        reserve = reserve.to(device)
+        p_idx = p_idx.to(device)
+        p_prob = p_prob.to(device)
+        n_p = n_p.to(device)
+        m_src = m_src.to(device)
+        m_dst = m_dst.to(device)
+        m_prob = m_prob.to(device)
+        n_m = n_m.to(device)
+        value_target = value_target.to(device).unsqueeze(1)
+        vo_mask = vo_mask.to(device)
+        po_mask = po_mask.to(device)
+        aux_target = aux_target.to(device)
+
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+            policy_logits, wdl_logits, aux = self._compiled(board, reserve)
+
+        B = board.size(0)
+        gs = board.size(-1)
+        gs2 = gs * gs
+        place_end = NUM_PLACE_CHANNELS * gs2
+
+        place_logits_flat = policy_logits[:, :place_end]
+        q = policy_logits[:, place_end:place_end + D * gs2].view(B, gs2, D)
+        k = policy_logits[:, place_end + D * gs2:].view(B, gs2, D)
+
+        p_gather = torch.gather(place_logits_flat, 1, p_idx)
+
+        src_exp = m_src.unsqueeze(-1).expand(-1, -1, D)
+        dst_exp = m_dst.unsqueeze(-1).expand(-1, -1, D)
+        q_g = torch.gather(q, 1, src_exp)
+        k_g = torch.gather(k, 1, dst_exp)
+        m_logits = (q_g * k_g).sum(-1) / math.sqrt(D)
+
+        combined_logits = torch.cat([p_gather, m_logits], dim=1)
+        combined_probs = torch.cat([p_prob, m_prob], dim=1)
+
+        p_mask = (torch.arange(MAX_PLACEMENTS, device=device).unsqueeze(0)
+                  < n_p.unsqueeze(1).long())
+        m_mask = (torch.arange(MAX_MOVE_PAIRS, device=device).unsqueeze(0)
+                  < n_m.unsqueeze(1).long())
+        c_mask = torch.cat([p_mask, m_mask], dim=1)
+
+        combined_logits = combined_logits.masked_fill(~c_mask, float('-inf'))
+        log_probs = torch.log_softmax(combined_logits, dim=1)
+        log_probs = log_probs.masked_fill(~c_mask, 0.0)  # avoid 0 * -inf = NaN
+
+        per_sample_policy = -(combined_probs * log_probs).sum(dim=1)
+        has_target = ((n_p + n_m) > 0)
+        per_sample_policy = per_sample_policy * has_target.float()
+
+        policy_weight = (~vo_mask).float()
+        policy_loss = (per_sample_policy * policy_weight).mean()
+
+        wdl_target = _scalar_to_wdl(value_target.squeeze(1))
+        log_wdl = torch.log_softmax(wdl_logits.float(), dim=1)
+        per_sample_value = -(wdl_target * log_wdl).sum(dim=1)
+        value_weight = (~po_mask).float()
+        value_loss = (per_sample_value * value_weight).mean()
+
+        aux_mse = (aux - aux_target) ** 2
+        qd_loss = aux_mse[:, 0:2].mean()
+        qe_loss = aux_mse[:, 2:4].mean()
+        mob_loss = aux_mse[:, 4:6].mean()
+        aux_loss = qd_loss + qe_loss + mob_loss
+
+        total = policy_loss + value_loss_scale * value_loss + aux_loss_scale * aux_loss
+        return {
+            "total": total, "policy": policy_loss, "value": value_loss,
+            "aux": aux_loss, "qd": qd_loss, "qe": qe_loss, "mob": mob_loss,
+        }
+
     def train_epoch(self, dataset: HiveDataset, batch_size: int = 64, value_loss_scale: float = 1.0, aux_loss_scale: float = 1.0) -> dict:
         """Train one epoch. Returns loss dict."""
         self.model.train()
         drop = self.device.type == "cuda"
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=drop)
 
-        total_policy_loss = 0.0
-        total_value_loss = 0.0
-        total_aux_loss = 0.0
-        total_qd_loss = 0.0
-        total_qe_loss = 0.0
-        total_mob_loss = 0.0
-        total_loss = 0.0
+        sums = {"total": 0.0, "policy": 0.0, "value": 0.0,
+                "aux": 0.0, "qd": 0.0, "qe": 0.0, "mob": 0.0}
         num_batches = 0
 
-        D = self.model.bilinear_dim
-        device_type = self.device.type
-        device = self.device
-
-        for (board, reserve, p_idx, p_prob, n_p,
-             m_src, m_dst, m_prob, n_m,
-             value_target, vo_mask, po_mask, aux_target) in tqdm(
-                loader, desc="  Training", leave=False, unit="batch"):
-            board = board.to(device)
-            reserve = reserve.to(device)
-            p_idx = p_idx.to(device)     # (B, MAX_PLACEMENTS) int64
-            p_prob = p_prob.to(device)   # (B, MAX_PLACEMENTS) float32
-            n_p = n_p.to(device)         # (B,) int32
-            m_src = m_src.to(device)
-            m_dst = m_dst.to(device)
-            m_prob = m_prob.to(device)
-            n_m = n_m.to(device)
-            value_target = value_target.to(device).unsqueeze(1)
-            vo_mask = vo_mask.to(device)
-            po_mask = po_mask.to(device)
-            aux_target = aux_target.to(device)
-
-            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                policy_logits, wdl_logits, aux = self._compiled(board, reserve)
-
-            B = board.size(0)
-            gs = board.size(-1)
-            gs2 = gs * gs
-            place_end = NUM_PLACE_CHANNELS * gs2
-
-            place_logits_flat = policy_logits[:, :place_end]                   # (B, 5*G²)
-            q = policy_logits[:, place_end:place_end + D * gs2].view(B, gs2, D)  # (B, G², D)
-            k = policy_logits[:, place_end + D * gs2:].view(B, gs2, D)           # (B, G², D)
-
-            # Gather placement logits at legal indices.
-            p_gather = torch.gather(place_logits_flat, 1, p_idx)               # (B, MAX_PLACEMENTS)
-
-            # Bilinear movement logits.
-            src_exp = m_src.unsqueeze(-1).expand(-1, -1, D)
-            dst_exp = m_dst.unsqueeze(-1).expand(-1, -1, D)
-            q_g = torch.gather(q, 1, src_exp)                                  # (B, MAX_MOVE_PAIRS, D)
-            k_g = torch.gather(k, 1, dst_exp)                                  # (B, MAX_MOVE_PAIRS, D)
-            m_logits = (q_g * k_g).sum(-1) / math.sqrt(D)                      # (B, MAX_MOVE_PAIRS)
-
-            # One softmax over the combined legal-action set — matches MCTS.
-            combined_logits = torch.cat([p_gather, m_logits], dim=1)
-            combined_probs = torch.cat([p_prob, m_prob], dim=1)
-
-            p_mask = (torch.arange(MAX_PLACEMENTS, device=device).unsqueeze(0)
-                      < n_p.unsqueeze(1).long())
-            m_mask = (torch.arange(MAX_MOVE_PAIRS, device=device).unsqueeze(0)
-                      < n_m.unsqueeze(1).long())
-            c_mask = torch.cat([p_mask, m_mask], dim=1)
-
-            combined_logits = combined_logits.masked_fill(~c_mask, float('-inf'))
-            log_probs = torch.log_softmax(combined_logits, dim=1)
-            log_probs = log_probs.masked_fill(~c_mask, 0.0)  # avoid 0 * -inf = NaN
-
-            per_sample_policy = -(combined_probs * log_probs).sum(dim=1)
-            has_target = ((n_p + n_m) > 0)
-            per_sample_policy = per_sample_policy * has_target.float()
-
-            policy_weight = (~vo_mask).float()
-            policy_loss = (per_sample_policy * policy_weight).mean()
-
-            # Value loss: cross-entropy on WDL soft targets, masked for policy-only samples.
-            wdl_target = _scalar_to_wdl(value_target.squeeze(1))  # (B, 3)
-            log_wdl = torch.log_softmax(wdl_logits.float(), dim=1)
-            per_sample_value = -(wdl_target * log_wdl).sum(dim=1)
-            value_weight = (~po_mask).float()
-            value_loss = (per_sample_value * value_weight).mean()
-
-            # Auxiliary losses: MSE on all 6 outputs, always active.
-            aux_mse = (aux - aux_target) ** 2
-            qd_loss = aux_mse[:, 0:2].mean()
-            qe_loss = aux_mse[:, 2:4].mean()
-            mob_loss = aux_mse[:, 4:6].mean()
-            aux_loss = qd_loss + qe_loss + mob_loss
-
-            loss = policy_loss + value_loss_scale * value_loss + aux_loss_scale * aux_loss
+        for batch in tqdm(loader, desc="  Training", leave=False, unit="batch"):
+            losses = self._compute_batch_losses(batch, value_loss_scale, aux_loss_scale)
+            loss = losses["total"]
 
             if self.warmup_steps > 0 and self._step_count < self.warmup_steps:
                 scale = (self._step_count + 1) / self.warmup_steps
@@ -525,13 +525,8 @@ class Trainer:
             self.optimizer.step()
             self._step_count += 1
 
-            total_policy_loss += policy_loss.item()
-            total_value_loss += value_loss.item()
-            total_aux_loss += aux_loss.item()
-            total_qd_loss += qd_loss.item()
-            total_qe_loss += qe_loss.item()
-            total_mob_loss += mob_loss.item()
-            total_loss += loss.item()
+            for k in sums:
+                sums[k] += losses[k].item()
             num_batches += 1
 
         if num_batches == 0:
@@ -539,11 +534,43 @@ class Trainer:
                     "qe_loss": 0, "mob_loss": 0, "aux_loss": 0, "total_loss": 0}
 
         return {
-            "policy_loss": total_policy_loss / num_batches,
-            "value_loss": total_value_loss / num_batches,
-            "aux_loss": total_aux_loss / num_batches,
-            "qd_loss": total_qd_loss / num_batches,
-            "qe_loss": total_qe_loss / num_batches,
-            "mob_loss": total_mob_loss / num_batches,
-            "total_loss": total_loss / num_batches,
+            "policy_loss": sums["policy"] / num_batches,
+            "value_loss": sums["value"] / num_batches,
+            "aux_loss": sums["aux"] / num_batches,
+            "qd_loss": sums["qd"] / num_batches,
+            "qe_loss": sums["qe"] / num_batches,
+            "mob_loss": sums["mob"] / num_batches,
+            "total_loss": sums["total"] / num_batches,
+        }
+
+    @torch.no_grad()
+    def validate(self, dataset: HiveDataset, batch_size: int = 64,
+                 value_loss_scale: float = 1.0, aux_loss_scale: float = 1.0) -> dict:
+        """No-grad pass over `dataset`. Returns the same loss dict shape as train_epoch."""
+        self.model.eval()
+        drop = self.device.type == "cuda"
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=drop)
+
+        sums = {"total": 0.0, "policy": 0.0, "value": 0.0,
+                "aux": 0.0, "qd": 0.0, "qe": 0.0, "mob": 0.0}
+        num_batches = 0
+
+        for batch in tqdm(loader, desc="  Validating", leave=False, unit="batch"):
+            losses = self._compute_batch_losses(batch, value_loss_scale, aux_loss_scale)
+            for k in sums:
+                sums[k] += losses[k].item()
+            num_batches += 1
+
+        if num_batches == 0:
+            return {"policy_loss": 0, "value_loss": 0, "qd_loss": 0,
+                    "qe_loss": 0, "mob_loss": 0, "aux_loss": 0, "total_loss": 0}
+
+        return {
+            "policy_loss": sums["policy"] / num_batches,
+            "value_loss": sums["value"] / num_batches,
+            "aux_loss": sums["aux"] / num_batches,
+            "qd_loss": sums["qd"] / num_batches,
+            "qe_loss": sums["qe"] / num_batches,
+            "mob_loss": sums["mob"] / num_batches,
+            "total_loss": sums["total"] / num_batches,
         }

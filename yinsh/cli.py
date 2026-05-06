@@ -129,6 +129,10 @@ def main():
     pt.add_argument("--exclude-players", nargs="*", default=["Dumbot"],
                     help="Players to exclude from training data (default: Dumbot)")
     pt.add_argument("--value-loss-scale", type=float, default=1.0)
+    pt.add_argument("--val-frac", type=float, default=0.1,
+                    help="Fraction of games held out as validation set (deterministic by sgf_name hash). "
+                         "After each chunk, val loss is logged and the best-by-val checkpoint is saved "
+                         "as <model>.best.pt. Set 0 to disable.")
 
     # battle
     b = sub.add_parser("battle", help="Pit two models against each other")
@@ -254,6 +258,7 @@ def main():
             verbose_samples=args.verbose_samples,
             augment_symmetry=args.augment_symmetry,
             value_loss_scale=args.value_loss_scale,
+            val_frac=args.val_frac,
         )
     elif args.command == "battle":
         from yinsh.selfplay.battle import run_battle

@@ -422,3 +422,63 @@ class Trainer:
             "value_loss": total_value_loss / num_batches,
             "total_loss": total_loss / num_batches,
         }
+
+    @torch.no_grad()
+    def validate(
+        self,
+        dataset: YinshDataset,
+        batch_size: int = 256,
+        value_loss_scale: float = 1.0,
+    ) -> dict:
+        """Mirror of `train_epoch` with no backward/step. Returns the same loss dict."""
+        self.model.eval()
+        drop = self.device.type == "cuda"
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=drop)
+
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        total_loss = 0.0
+        num_batches = 0
+        device_type = self.device.type
+
+        for board, reserve, policy_target, value_target, value_only_mask in tqdm(
+            loader, desc="  Validating", leave=False, unit="batch"
+        ):
+            board = board.to(self.device)
+            reserve = reserve.to(self.device)
+            policy_target = policy_target.to(self.device)
+            value_target = value_target.to(self.device).unsqueeze(1)
+            value_only_mask = value_only_mask.to(self.device)
+
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                policy_logits, wdl_logits = self._compiled(board, reserve)
+
+            policy_active = ~value_only_mask
+            if policy_active.any():
+                p_loss_per = _policy_ce(
+                    policy_logits[policy_active], policy_target[policy_active]
+                )
+                policy_loss = p_loss_per.mean()
+            else:
+                policy_loss = torch.tensor(0.0, device=self.device)
+
+            wdl_target = _scalar_to_wdl(value_target.squeeze(1))
+            log_wdl = torch.log_softmax(wdl_logits.float(), dim=1)
+            per_sample_value = -(wdl_target * log_wdl).sum(dim=1)
+            value_loss = per_sample_value.mean()
+
+            loss = policy_loss + value_loss_scale * value_loss
+
+            total_policy_loss += float(policy_loss.item())
+            total_value_loss += float(value_loss.item())
+            total_loss += float(loss.item())
+            num_batches += 1
+
+        if num_batches == 0:
+            return {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
+
+        return {
+            "policy_loss": total_policy_loss / num_batches,
+            "value_loss": total_value_loss / num_batches,
+            "total_loss": total_loss / num_batches,
+        }
