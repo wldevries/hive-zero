@@ -495,9 +495,20 @@ class Trainer:
         aux_loss = qd_loss + qe_loss + mob_loss
 
         total = policy_loss + value_loss_scale * value_loss + aux_loss_scale * aux_loss
+
+        pol_active = has_target & (~vo_mask)
+        argmax_pred = combined_logits.argmax(dim=1)
+        argmax_true = combined_probs.argmax(dim=1)
+        top1_hits = ((argmax_pred == argmax_true) & pol_active).sum()
+        n_legal = c_mask.sum(dim=1).clamp(min=1).float()
+        uniform_ce_sum = (torch.log(n_legal) * pol_active.float()).sum()
+        n_pol_active = pol_active.sum()
+
         return {
             "total": total, "policy": policy_loss, "value": value_loss,
             "aux": aux_loss, "qd": qd_loss, "qe": qe_loss, "mob": mob_loss,
+            "top1_hits": top1_hits, "uniform_ce_sum": uniform_ce_sum,
+            "n_pol_active": n_pol_active,
         }
 
     def train_epoch(self, dataset: HiveDataset, batch_size: int = 64, value_loss_scale: float = 1.0, aux_loss_scale: float = 1.0) -> dict:
@@ -546,25 +557,33 @@ class Trainer:
     @torch.no_grad()
     def validate(self, dataset: HiveDataset, batch_size: int = 64,
                  value_loss_scale: float = 1.0, aux_loss_scale: float = 1.0) -> dict:
-        """No-grad pass over `dataset`. Returns the same loss dict shape as train_epoch."""
+        """No-grad pass over `dataset`. Returns loss dict + top1_acc and uniform_ce diagnostics."""
         self.model.eval()
         drop = self.device.type == "cuda"
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=drop)
 
         sums = {"total": 0.0, "policy": 0.0, "value": 0.0,
                 "aux": 0.0, "qd": 0.0, "qe": 0.0, "mob": 0.0}
+        top1_hits = 0
+        uniform_ce_sum = 0.0
+        n_pol_active = 0
         num_batches = 0
 
         for batch in tqdm(loader, desc="  Validating", leave=False, unit="batch"):
             losses = self._compute_batch_losses(batch, value_loss_scale, aux_loss_scale)
             for k in sums:
                 sums[k] += losses[k].item()
+            top1_hits += int(losses["top1_hits"].item())
+            uniform_ce_sum += float(losses["uniform_ce_sum"].item())
+            n_pol_active += int(losses["n_pol_active"].item())
             num_batches += 1
 
         if num_batches == 0:
             return {"policy_loss": 0, "value_loss": 0, "qd_loss": 0,
-                    "qe_loss": 0, "mob_loss": 0, "aux_loss": 0, "total_loss": 0}
+                    "qe_loss": 0, "mob_loss": 0, "aux_loss": 0, "total_loss": 0,
+                    "top1_acc": 0.0, "uniform_ce": 0.0}
 
+        denom = max(n_pol_active, 1)
         return {
             "policy_loss": sums["policy"] / num_batches,
             "value_loss": sums["value"] / num_batches,
@@ -573,4 +592,6 @@ class Trainer:
             "qe_loss": sums["qe"] / num_batches,
             "mob_loss": sums["mob"] / num_batches,
             "total_loss": sums["total"] / num_batches,
+            "top1_acc": top1_hits / denom,
+            "uniform_ce": uniform_ce_sum / denom,
         }

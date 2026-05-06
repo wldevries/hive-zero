@@ -430,7 +430,7 @@ class Trainer:
         batch_size: int = 256,
         value_loss_scale: float = 1.0,
     ) -> dict:
-        """Mirror of `train_epoch` with no backward/step. Returns the same loss dict."""
+        """Mirror of `train_epoch` with no backward/step. Returns loss dict + top1_acc and uniform_ce."""
         self.model.eval()
         drop = self.device.type == "cuda"
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=drop)
@@ -438,6 +438,9 @@ class Trainer:
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_loss = 0.0
+        top1_hits = 0
+        uniform_ce_sum = 0.0
+        n_pol_active = 0
         num_batches = 0
         device_type = self.device.type
 
@@ -455,10 +458,19 @@ class Trainer:
 
             policy_active = ~value_only_mask
             if policy_active.any():
-                p_loss_per = _policy_ce(
-                    policy_logits[policy_active], policy_target[policy_active]
-                )
+                pa_logits = policy_logits[policy_active]
+                pa_target = policy_target[policy_active]
+                p_loss_per = _policy_ce(pa_logits, pa_target)
                 policy_loss = p_loss_per.mean()
+
+                pa_legal = (pa_target > 0).to(pa_logits.dtype)
+                pa_masked = pa_logits + (pa_legal - 1.0) * 1e9
+                argmax_pred = pa_masked.argmax(dim=1)
+                argmax_true = pa_target.argmax(dim=1)
+                top1_hits += int((argmax_pred == argmax_true).sum().item())
+                n_legal_per = pa_legal.sum(dim=1).clamp(min=1)
+                uniform_ce_sum += float(torch.log(n_legal_per).sum().item())
+                n_pol_active += int(policy_active.sum().item())
             else:
                 policy_loss = torch.tensor(0.0, device=self.device)
 
@@ -475,10 +487,14 @@ class Trainer:
             num_batches += 1
 
         if num_batches == 0:
-            return {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
+            return {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0,
+                    "top1_acc": 0.0, "uniform_ce": 0.0}
 
+        denom = max(n_pol_active, 1)
         return {
             "policy_loss": total_policy_loss / num_batches,
             "value_loss": total_value_loss / num_batches,
             "total_loss": total_loss / num_batches,
+            "top1_acc": top1_hits / denom,
+            "uniform_ce": uniform_ce_sum / denom,
         }

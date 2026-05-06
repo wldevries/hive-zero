@@ -26,14 +26,20 @@ from typing import Optional
 import colorama
 import numpy as np
 
-from yinsh.selfplay.selfplay import LOG_HEADER
-
 colorama.init()
 _R = colorama.Style.RESET_ALL
 _B = colorama.Style.BRIGHT
 _cr = lambda v: f"{colorama.Fore.RED}{_B}{v}{_R}"      # total loss
 _cy = lambda v: f"{colorama.Fore.YELLOW}{_B}{v}{_R}"   # policy / value loss
 _cc = lambda v: f"{colorama.Fore.CYAN}{_B}{v}{_R}"     # chunk / epoch labels
+
+PRETRAIN_LOG_HEADER = (
+    "chunk,epoch,games_done,total_games,positions,buffer_positions,"
+    "train_total,train_policy,train_value,"
+    "val_total,val_policy,val_value,"
+    "val_top1,val_uniform_ce,"
+    "lr,duration_s,best_val\n"
+)
 
 
 # Heavy imports are deferred so this module is cheap to import.
@@ -322,10 +328,10 @@ class Pretrainer:
 
         os.makedirs(checkpoint_dir, exist_ok=True)
         model_name = os.path.splitext(os.path.basename(self.model_path))[0]
-        log_path = f"{model_name}_log.csv"
+        log_path = f"{model_name}_pretrain_log.csv"
         if not os.path.exists(log_path):
             with open(log_path, "w") as f:
-                f.write(LOG_HEADER)
+                f.write(PRETRAIN_LOG_HEADER)
 
         train_games, val_games = split_train_val(games, val_frac, sgf_name_index=1)
         total_games = len(train_games)
@@ -414,6 +420,7 @@ class Pretrainer:
                     dataset.clear()
 
                     val_losses: dict | None = None
+                    is_best = False
                     if val_dataset is not None and len(val_dataset) > 0:
                         val_losses = self.trainer.validate(
                             val_dataset, batch_size=batch_size, value_loss_scale=value_loss_scale,
@@ -421,12 +428,16 @@ class Pretrainer:
                         vt = f"{val_losses['total_loss']:.4f}"
                         vp = f"{val_losses['policy_loss']:.4f}"
                         vv = f"{val_losses['value_loss']:.4f}"
+                        t1 = f"{val_losses['top1_acc']*100:.1f}%"
+                        uce = f"{val_losses['uniform_ce']:.3f}"
                         print(
                             f"  chunk={_cc(chunk_idx)} VAL "
-                            f"loss={_cr(vt)} (pol={_cy(vp)} val={_cy(vv)})"
+                            f"loss={_cr(vt)} (pol={_cy(vp)} val={_cy(vv)}) "
+                            f"top1={_cc(t1)} uniform_ce={uce}"
                         )
                         if val_losses["total_loss"] < best_val_total:
                             best_val_total = val_losses["total_loss"]
+                            is_best = True
                             self._save_checkpoint(
                                 self.model, best_path, epoch,
                                 {**val_losses, "val_best": True},
@@ -435,25 +446,17 @@ class Pretrainer:
                             print(f"  new best val={best_val_total:.4f} -> {best_path}")
 
                     lr = self.trainer._current_lr
-                    val_pol = val_losses["policy_loss"] if val_losses else 0.0
-                    val_val = val_losses["value_loss"] if val_losses else 0.0
-                    val_tot = val_losses["total_loss"] if val_losses else 0.0
+
+                    def _v(key: str) -> float:
+                        return val_losses[key] if val_losses else 0.0
                     with open(log_path, "a") as log:
                         log.write(
-                            # gen,epoch,simulations,games,positions,buffer,
-                            # wins_p1,wins_p2,draws,timeouts,
-                            # avg_game_len,med_game_len,min_game_len,max_game_len,
-                            # loss,policy_loss,value_loss,
-                            # lr,duration_s,
-                            # mcts_top1_mean,mcts_top1_std,mcts_depth_mean,mcts_depth_std,mcts_moves_mean,mcts_moves_std,
-                            # comment (val=val_loss/policy/value to keep train + val correlated in the same row)
-                            f"{chunk_idx},pretrain,0,{games_done},{total_positions},{chunk_positions},"
-                            f"0,0,0,0,"
-                            f"0,0,0,0,"
+                            f"{chunk_idx},{epoch},{games_done},{total_games},"
+                            f"{total_positions},{chunk_positions},"
                             f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
-                            f"{lr:.8f},{chunk_elapsed:.1f},"
-                            f"0,0,0,0,0,0,"
-                            f"epoch={epoch} val={val_tot:.6f}/{val_pol:.6f}/{val_val:.6f}\n"
+                            f"{_v('total_loss'):.6f},{_v('policy_loss'):.6f},{_v('value_loss'):.6f},"
+                            f"{_v('top1_acc'):.6f},{_v('uniform_ce'):.6f},"
+                            f"{lr:.8f},{chunk_elapsed:.1f},{int(is_best)}\n"
                         )
 
             total_errors += errors_this_epoch
