@@ -199,8 +199,8 @@ def main():
     train_parser.add_argument(
         "--lr",
         type=float,
-        default=0.02,
-        help="Learning rate for SGD optimizer (default: 0.02)",
+        default=None,
+        help="Learning rate for SGD optimizer (default: restore from checkpoint, or 0.02 if none).",
     )
     train_parser.add_argument(
         "--lr-schedule",

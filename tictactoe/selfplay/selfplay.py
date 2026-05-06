@@ -21,6 +21,7 @@ _cr = lambda v: f"{colorama.Fore.RED}{_BRIGHT}{v}{_RESET}"
 _cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
 
 from shared.lr_scheduler import LRScheduler
+from shared.optimizer_defaults import resolve_resumed_lr
 from shared.training_log import csv_comment
 
 from ..nn.model import TicTacToeNet, create_model, load_checkpoint, save_checkpoint, export_onnx
@@ -49,7 +50,7 @@ class SelfPlayTrainer:
         device: str = "cuda",
         num_blocks: int = 2,
         channels: int = 32,
-        lr: float = 0.02,
+        lr: Optional[float] = None,
         lr_scheduler: Optional[LRScheduler] = None,
         checkpoint_dir: str = "checkpoints/tictactoe",
         history_length: int = 1,
@@ -82,12 +83,15 @@ class SelfPlayTrainer:
 
         self.model.to(device)
         self.lr_scheduler = lr_scheduler
-        self.trainer = Trainer(model=self.model, device=device, lr=lr)
         opt_state = ckpt.get("optimizer_state_dict")
+        effective_lr, lr_source = resolve_resumed_lr(lr, opt_state)
+        self.trainer = Trainer(model=self.model, device=device, lr=effective_lr)
         if opt_state is not None:
             try:
                 self.trainer.optimizer.load_state_dict(opt_state)
-                print("  Restored optimizer state")
+                for pg in self.trainer.optimizer.param_groups:
+                    pg["lr"] = effective_lr
+                print(f"  Restored optimizer state; lr={effective_lr:g} from {lr_source}")
             except (ValueError, KeyError) as e:
                 print(f"  Skipped optimizer state (incompatible: {e})")
 

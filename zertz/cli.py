@@ -49,7 +49,8 @@ def main():
     train_parser.add_argument("--simulations", type=int, default=100)
     train_parser.add_argument("--epochs-per-gen", type=int, default=1)
     train_parser.add_argument("--training-batch-size", type=int, default=256)
-    train_parser.add_argument("--lr", type=float, default=0.02)
+    train_parser.add_argument("--lr", type=float, default=None,
+                              help="Learning rate (default: restore from checkpoint, or 0.02 if none).")
     train_parser.add_argument(
         "--lr-schedule", type=str, default=None,
         help="Stepped LR schedule as iter:lr pairs, e.g. '0:0.1,20:0.02,40:0.01'. Overrides --lr."

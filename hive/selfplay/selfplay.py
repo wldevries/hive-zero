@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from shared.lr_scheduler import LRScheduler
+from shared.optimizer_defaults import resolve_resumed_lr
 from shared.selfplay_config import MctsConfig, OpeningRandomConfig, PlayoutCapConfig
 from shared.training_log import csv_comment
 
@@ -343,7 +344,7 @@ class SelfPlayTrainer:
         name: str = "hive",
         device: str = "cpu",
         model_config: dict | None = None,
-        lr: float = 0.02,
+        lr: Optional[float] = None,
         lr_scheduler: Optional[LRScheduler] = None,
     ):
         self.name = name
@@ -380,12 +381,15 @@ class SelfPlayTrainer:
         self.grid_size = self.model.grid_size
         self.model.to(device)
         self.lr_scheduler = lr_scheduler
-        self.trainer = Trainer(self.model, device=device, lr=lr)
         opt_state = ckpt.get("optimizer_state_dict")
+        effective_lr, lr_source = resolve_resumed_lr(lr, opt_state)
+        self.trainer = Trainer(self.model, device=device, lr=effective_lr)
         if opt_state is not None:
             try:
                 self.trainer.optimizer.load_state_dict(opt_state)
-                print("  Restored optimizer state (momentum buffers)")
+                for pg in self.trainer.optimizer.param_groups:
+                    pg["lr"] = effective_lr
+                print(f"  Restored optimizer state (momentum buffers); lr={effective_lr:g} from {lr_source}")
             except (ValueError, KeyError) as e:
                 print(f"  Skipped optimizer state (incompatible: {e})")
 

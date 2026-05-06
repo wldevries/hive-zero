@@ -49,7 +49,8 @@ def main():
     t.add_argument("--simulations", type=int, default=200)
     t.add_argument("--epochs-per-gen", type=int, default=1)
     t.add_argument("--training-batch-size", type=int, default=256)
-    t.add_argument("--lr", type=float, default=0.02)
+    t.add_argument("--lr", type=float, default=None,
+                   help="Learning rate (default: restore from checkpoint, or 0.02 if none).")
     t.add_argument("--lr-schedule", type=str, default=None,
                    help="Stepped LR schedule, e.g. '0:0.1,20:0.02'. Overrides --lr.")
     t.add_argument("--replay-window", type=int, default=8)

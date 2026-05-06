@@ -31,3 +31,26 @@ def resolve_optimizer_defaults(
         default_wd if weight_decay is None else weight_decay,
         default_warmup if warmup_steps is None else warmup_steps,
     )
+
+
+SELFPLAY_DEFAULT_LR = 0.02
+
+
+def resolve_resumed_lr(
+    cli_lr: float | None,
+    opt_state: dict | None,
+) -> tuple[float, str]:
+    """Resolve the effective LR for a self-play run with optional checkpoint resume.
+
+    Priority: CLI > checkpoint > SELFPLAY_DEFAULT_LR. Returns (lr, source) where source
+    is one of "CLI", "checkpoint", "default" — useful for logging which one won.
+    """
+    if cli_lr is not None:
+        return cli_lr, "CLI"
+    if opt_state is not None:
+        try:
+            ckpt_lr = opt_state["param_groups"][0]["lr"]
+            return float(ckpt_lr), "checkpoint"
+        except (KeyError, IndexError, TypeError):
+            pass
+    return SELFPLAY_DEFAULT_LR, "default"

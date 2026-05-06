@@ -296,6 +296,9 @@ class Pretrainer:
         if opt_state is not None:
             try:
                 self.trainer.optimizer.load_state_dict(opt_state)
+                for pg in self.trainer.optimizer.param_groups:
+                    pg["lr"] = lr
+                    pg["weight_decay"] = weight_decay
                 print("  Restored optimizer state (momentum buffers)")
             except (ValueError, KeyError) as e:
                 print(f"  Skipped optimizer state (incompatible: {e})")
