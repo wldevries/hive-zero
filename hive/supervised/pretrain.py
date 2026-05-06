@@ -360,6 +360,8 @@ class Pretrainer:
         device: str = "cuda",
         model_config: dict | None = None,
         lr: float = 0.005,
+        optimizer: str = "adamw",
+        weight_decay: float = 1e-2,
     ):
         from ..nn.model import create_model, load_checkpoint, save_checkpoint, export_onnx, _describe_trunk
         from ..nn.training import Trainer
@@ -393,7 +395,9 @@ class Pretrainer:
         self.grid_size = self.model.grid_size
 
         self.model.to(device)
-        self.trainer = Trainer(self.model, device=device, lr=lr)
+        self.trainer = Trainer(self.model, device=device, lr=lr,
+                               optimizer=optimizer, weight_decay=weight_decay)
+        print(f"  Optimizer: {optimizer} (lr={lr}, weight_decay={weight_decay})")
         opt_state = ckpt.get("optimizer_state_dict")
         if opt_state is not None:
             try:

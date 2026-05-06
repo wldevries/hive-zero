@@ -5,6 +5,7 @@ import json
 import os
 
 from shared.lr_scheduler import lr_scheduler_from_string
+from shared.optimizer_defaults import resolve_optimizer_defaults as _resolve_optimizer_defaults
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_HERE)
@@ -104,7 +105,12 @@ def main():
     pt.add_argument("--model-config", type=str, default=None,
                     help="Path to JSON model config (default: configs/yinsh/medium.json). "
                          "Ignored when resuming from an existing checkpoint.")
-    pt.add_argument("--lr", type=float, default=0.005)
+    pt.add_argument("--optimizer", type=str, default="adamw", choices=["sgd", "adamw"],
+                    help="Optimizer kind (default: adamw — typically converges faster on a fixed dataset)")
+    pt.add_argument("--lr", type=float, default=None,
+                    help="Learning rate (default: 0.005 for sgd, 1e-3 for adamw)")
+    pt.add_argument("--weight-decay", type=float, default=None,
+                    help="L2 weight decay (default: 1e-4 for sgd, 1e-2 for adamw — adamw decouples decay from lr)")
     pt.add_argument("--epochs", type=int, default=3,
                     help="Full passes over the game list (default: 3)")
     pt.add_argument("--batch-size", type=int, default=256)
@@ -222,11 +228,16 @@ def main():
         print("Indexing zip archives...")
         zip_index = build_zip_index(args.boardspace_dir)
         print(f"  {len(zip_index)} zip files found")
+        lr, weight_decay = _resolve_optimizer_defaults(
+            args.optimizer, args.lr, args.weight_decay
+        )
         pretrainer = Pretrainer(
             model_path=args.model,
             device=args.device,
             model_config=_load_model_config(args.model_config),
-            lr=args.lr,
+            lr=lr,
+            optimizer=args.optimizer,
+            weight_decay=weight_decay,
         )
         pretrainer.run(
             games=games,

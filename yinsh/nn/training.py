@@ -319,16 +319,27 @@ class Trainer:
         weight_decay: float = 1e-4,
         device: str = "cpu",
         lr: float = 0.02,
+        optimizer: str = "sgd",
     ):
         self.device = torch.device(device)
         self.model = model or create_model()
         self.model.to(self.device)
-        self.optimizer = optim.SGD(
-            self.model.parameters(),
-            lr=lr,
-            momentum=0.9,
-            weight_decay=weight_decay,
-        )
+        kind = optimizer.lower()
+        if kind == "sgd":
+            self.optimizer = optim.SGD(
+                self.model.parameters(),
+                lr=lr,
+                momentum=0.9,
+                weight_decay=weight_decay,
+            )
+        elif kind == "adamw":
+            self.optimizer = optim.AdamW(
+                self.model.parameters(),
+                lr=lr,
+                weight_decay=weight_decay,
+            )
+        else:
+            raise ValueError(f"unknown optimizer {optimizer!r}; expected 'sgd' or 'adamw'")
         self._compiled = torch.compile(self.model, dynamic=True, backend="cudagraphs") if self.device.type == "cuda" else self.model
 
     @property

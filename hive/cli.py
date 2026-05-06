@@ -5,6 +5,7 @@ import json
 import os
 
 from shared.lr_scheduler import lr_scheduler_from_string
+from shared.optimizer_defaults import resolve_optimizer_defaults as _resolve_optimizer_defaults
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_HERE)
@@ -363,7 +364,16 @@ def main():
              "Ignored when resuming from an existing checkpoint.",
     )
     pretrain_parser.add_argument(
-        "--lr", type=float, default=0.005, help="Learning rate (default: 0.005)"
+        "--optimizer", type=str, default="adamw", choices=["sgd", "adamw"],
+        help="Optimizer kind (default: adamw — typically converges faster on a fixed dataset)",
+    )
+    pretrain_parser.add_argument(
+        "--lr", type=float, default=None,
+        help="Learning rate (default: 0.005 for sgd, 1e-3 for adamw)",
+    )
+    pretrain_parser.add_argument(
+        "--weight-decay", type=float, default=None,
+        help="L2 weight decay (default: 1e-4 for sgd, 1e-2 for adamw — adamw decouples decay from lr)",
     )
     pretrain_parser.add_argument(
         "--epochs",
@@ -498,11 +508,16 @@ def main():
         print("Indexing zip archives...")
         zip_index = build_zip_index(args.boardspace_dir)
         print(f"  {len(zip_index)} zip files found")
+        lr, weight_decay = _resolve_optimizer_defaults(
+            args.optimizer, args.lr, args.weight_decay
+        )
         pretrainer = Pretrainer(
             model_path=args.model,
             device=_resolve_device(args.device),
             model_config=_load_model_config(args.model_config),
-            lr=args.lr,
+            lr=lr,
+            optimizer=args.optimizer,
+            weight_decay=weight_decay,
         )
         pretrainer.run(
             games=games,
