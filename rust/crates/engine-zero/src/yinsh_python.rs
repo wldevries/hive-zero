@@ -313,13 +313,19 @@ impl PyYinshSelfPlaySession {
     }
 
     /// Run self-play with either a Python eval callback or an ONNX model file.
-    #[pyo3(signature = (eval_fn=None, progress_fn=None, onnx_path=None))]
+    ///
+    /// `opening_sequences`, if provided, is a per-game list of canonical Yinsh
+    /// notation strings replayed verbatim before MCTS takes over. An empty
+    /// inner list (or a missing entry) falls back to `random_opening_moves`
+    /// for that game.
+    #[pyo3(signature = (eval_fn=None, progress_fn=None, onnx_path=None, opening_sequences=None))]
     fn play_games(
         &self,
         _py: Python<'_>,
         eval_fn: Option<&Bound<'_, PyAny>>,
         progress_fn: Option<&Bound<'_, PyAny>>,
         onnx_path: Option<String>,
+        opening_sequences: Option<Vec<Vec<String>>>,
     ) -> PyResult<PyYinshSelfPlayResult> {
         // For the ORT path we keep an outer handle to the engine so we can read
         // the per-phase timers after self-play finishes. The closure captures a
@@ -380,6 +386,7 @@ impl PyYinshSelfPlaySession {
             min: self.random_opening_moves_min,
             max: self.random_opening_moves_max,
         };
+        let opening_sequences = opening_sequences.unwrap_or_default();
         let mut result = play_selfplay_core(
             self.num_games,
             mcts,
@@ -387,6 +394,7 @@ impl PyYinshSelfPlaySession {
             opening,
             core_eval,
             progress_core,
+            opening_sequences,
         )
         .map_err(PyRuntimeError::new_err)?;
 

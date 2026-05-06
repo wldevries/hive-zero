@@ -660,6 +660,7 @@ pub fn play_selfplay_core(
     opening: OpeningRandomConfig,
     eval_fn: EvalFn,
     progress_fn: Option<ProgressFn>,
+    opening_sequences: Vec<Vec<String>>,
 ) -> Result<SelfPlayResult, String> {
     let use_playout_cap = playout_cap.enabled();
 
@@ -696,6 +697,8 @@ pub fn play_selfplay_core(
 
     // Per-game random opening move counts: each game plays this many random moves
     // (sampled from valid_moves) before MCTS takes over. Diversifies openings.
+    // Games that have a non-empty `opening_sequences[gi]` use the book branch
+    // instead — random opening moves only apply to non-book games.
     let game_random_opening_moves: Vec<u32> = (0..num_games)
         .map(|_| {
             if opening.max > opening.min {
@@ -704,6 +707,16 @@ pub fn play_selfplay_core(
                 opening.min
             }
         })
+        .collect();
+
+    // Tracks games whose book replay aborted (illegal/unparseable move). Such
+    // games skip remaining book moves and fall straight through to MCTS.
+    let mut opening_done = vec![false; num_games];
+
+    // Cached per-game flag: true iff `opening_sequences[gi]` is non-empty.
+    // Used to decide whether the game's opening window is book- or random-driven.
+    let has_book: Vec<bool> = (0..num_games)
+        .map(|gi| opening_sequences.get(gi).is_some_and(|s| !s.is_empty()))
         .collect();
 
     let mut session_top1_sum = 0f64;
@@ -724,20 +737,53 @@ pub fn play_selfplay_core(
     let mut t_expand = Duration::ZERO;
 
     while active.iter().any(|&a| a) {
-        // Phase 1: play random opening moves for any active games still in their
-        // opening window. These moves do NOT produce training samples and are
-        // not counted in `total_turns` or per-iteration MCTS stats.
+        // Phase 1: play opening moves (book if assigned, else random) for any
+        // active games still in their opening window. These moves do NOT produce
+        // training samples and are not counted in `total_turns` or per-iteration
+        // MCTS stats.
         for gi in 0..num_games {
-            if !active[gi] || move_counts[gi] >= game_random_opening_moves[gi] {
+            if !active[gi] {
                 continue;
             }
-            let valid = boards[gi].valid_moves();
-            let mv = if valid.is_empty() {
-                YinshBoard::pass_move()
+
+            // Resolve which opening branch this game is on for this move.
+            let in_book = has_book[gi]
+                && !opening_done[gi]
+                && (move_counts[gi] as usize) < opening_sequences[gi].len();
+            let in_random = !has_book[gi] && move_counts[gi] < game_random_opening_moves[gi];
+            if !in_book && !in_random {
+                continue;
+            }
+
+            let mv = if in_book {
+                let move_str = &opening_sequences[gi][move_counts[gi] as usize];
+                match crate::notation::str_to_move(move_str) {
+                    Ok(parsed) => {
+                        let valid = boards[gi].valid_moves();
+                        if valid.iter().any(|v| *v == parsed) {
+                            parsed
+                        } else {
+                            // Move not legal at this position — abort book
+                            // replay and let MCTS take over from here.
+                            opening_done[gi] = true;
+                            continue;
+                        }
+                    }
+                    Err(_) => {
+                        opening_done[gi] = true;
+                        continue;
+                    }
+                }
             } else {
-                let idx = rng.random_range(0..valid.len());
-                valid[idx]
+                let valid = boards[gi].valid_moves();
+                if valid.is_empty() {
+                    YinshBoard::pass_move()
+                } else {
+                    let idx = rng.random_range(0..valid.len());
+                    valid[idx]
+                }
             };
+
             boards[gi].play_move(&mv).map_err(|e| e.to_string())?;
             move_counts[gi] += 1;
             result.total_moves += 1;
@@ -762,8 +808,21 @@ pub fn play_selfplay_core(
         }
 
         // Phase 2: MCTS for games that have completed their opening window.
+        // A book game is past its window once the sequence is exhausted (or
+        // aborted via `opening_done`); a random-opening game is past its window
+        // once `move_counts` reaches its per-game random count.
         let active_games: Vec<usize> = (0..num_games)
-            .filter(|&gi| active[gi] && move_counts[gi] >= game_random_opening_moves[gi])
+            .filter(|&gi| {
+                if !active[gi] {
+                    return false;
+                }
+                if has_book[gi] {
+                    opening_done[gi]
+                        || (move_counts[gi] as usize) >= opening_sequences[gi].len()
+                } else {
+                    move_counts[gi] >= game_random_opening_moves[gi]
+                }
+            })
             .collect();
         if active_games.is_empty() {
             if !active.iter().any(|&a| a) {

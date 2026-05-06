@@ -102,6 +102,48 @@ class SelfPlayTrainer:
             except (ValueError, KeyError) as e:
                 print(f"  Skipped optimizer state (incompatible: {e})")
 
+    def _load_opening_book(
+        self,
+        games_csv: str,
+        boardspace_dir: str,
+        min_elo: float = 1600.0,
+    ) -> list[list[str]]:
+        """Load boardspace YINSH game move sequences for use as opening positions.
+
+        Returns a list of move-string lists (one per game) in canonical Yinsh
+        notation (`E5`, `E5 G5`, `Claim E5 E6 E7 E8 E9 D3`). Short games (< 12
+        moves) are skipped.
+        """
+        from engine_zero import parse_yinsh_sgf_moves
+        from tqdm import tqdm
+
+        from ..supervised.pretrain import build_zip_index, load_filtered_games
+
+        elo_csv = os.path.join(os.path.dirname(games_csv) or ".", "player_elo.csv")
+        games = load_filtered_games(games_csv, elo_csv, min_elo=min_elo, min_games=20)
+        zip_index = build_zip_index(boardspace_dir)
+
+        import zipfile
+        sequences: list[list[str]] = []
+        errors = 0
+        for zip_file, sgf_name, _result, _p0, _p1 in tqdm(
+            games, desc="Loading opening book", unit="game"
+        ):
+            zip_path = zip_index.get(zip_file)
+            if not zip_path:
+                continue
+            try:
+                with zipfile.ZipFile(zip_path) as zf:
+                    content = zf.read(sgf_name).decode("iso-8859-1")
+                moves = parse_yinsh_sgf_moves(content)
+                if len(moves) >= 12:
+                    sequences.append(moves)
+            except Exception:
+                errors += 1
+
+        print(f"  Opening book: {len(sequences)} games loaded ({errors} errors)")
+        return sequences
+
     def _eval_fn(self, board_tensor_np, reserve_np):
         """Python NN eval callback for the Rust self-play loop.
 
@@ -144,6 +186,10 @@ class SelfPlayTrainer:
         value_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
         show_timing: bool = False,
+        opening_games_csv: Optional[str] = None,
+        opening_boardspace_dir: Optional[str] = None,
+        boardspace_frac: float = 1.0,
+        opening_min_elo: float = 1600.0,
     ):
         from engine_zero import YinshSelfPlaySession
 
@@ -180,6 +226,15 @@ class SelfPlayTrainer:
             "forced_playouts": mcts.forced_playouts,
         }
 
+        # Opening book: load boardspace game sequences if configured.
+        opening_book: list[list[str]] = []
+        if opening_games_csv and opening_boardspace_dir:
+            opening_book = self._load_opening_book(
+                opening_games_csv,
+                opening_boardspace_dir,
+                opening_min_elo,
+            )
+
         start_time = time.time()
         generation = self.start_generation
 
@@ -207,9 +262,24 @@ class SelfPlayTrainer:
                 if playout_cap.p > 0
                 else ""
             )
+            rand_str = (
+                f"{opening.min}-{opening.max}"
+                if opening.min != opening.max
+                else str(opening.min)
+            )
+            opening_enabled = opening.max > 0
+            opening_label = ""
+            if opening_book:
+                opening_label = (
+                    f", book={boardspace_frac:.0%} rand={rand_str}"
+                    if opening_enabled
+                    else f", book={boardspace_frac:.0%}"
+                )
+            elif opening_enabled:
+                opening_label = f", rand={rand_str}"
             print(
                 f"\n=== {_cc(self.name)}  Gen {generation}  "
-                f"[sims={mcts.simulations}{cap_str}] ==="
+                f"[sims={mcts.simulations}{cap_str}{opening_label}] ==="
             )
 
             onnx_path = None
@@ -243,11 +313,30 @@ class SelfPlayTrainer:
                     pbar.update(advance)
                 pbar.set_postfix(active=f"{active}/{total}")
 
+            opening_sequences = (
+                _make_opening_sequences(
+                    games_per_gen,
+                    opening_book,
+                    boardspace_frac,
+                    opening.max,
+                )
+                if opening_book
+                else None
+            )
+
             play_start = time.time()
             if onnx_path:
-                result = session.play_games(progress_fn=progress_fn, onnx_path=onnx_path)
+                result = session.play_games(
+                    progress_fn=progress_fn,
+                    onnx_path=onnx_path,
+                    opening_sequences=opening_sequences,
+                )
             else:
-                result = session.play_games(self._eval_fn, progress_fn=progress_fn)
+                result = session.play_games(
+                    self._eval_fn,
+                    progress_fn=progress_fn,
+                    opening_sequences=opening_sequences,
+                )
             play_time = time.time() - play_start
             pbar.update(pbar.total - pbar.n)
             pbar.close()
@@ -397,6 +486,32 @@ class SelfPlayTrainer:
                 print(f"  Checkpoint saved to {ckpt_path}")
 
         print(f"\nTraining complete after gen {generation}. Final model: {self.model_path}")
+
+
+def _make_opening_sequences(
+    num_games: int,
+    book: list[list[str]],
+    boardspace_frac: float,
+    opening_moves: int,
+) -> list[list[str]]:
+    """Generate per-game opening sequences from the book.
+
+    `boardspace_frac` of games get a prefix of exactly `opening_moves` moves
+    sampled from a random human game; the rest get an empty list (Rust falls
+    back to `random_opening_moves` for those games). Games shorter than
+    `opening_moves` are excluded from the eligible pool.
+    """
+    import random as _random
+
+    eligible = [g for g in book if len(g) >= opening_moves]
+    sequences: list[list[str]] = []
+    for _ in range(num_games):
+        if eligible and _random.random() < boardspace_frac:
+            game_moves = _random.choice(eligible)
+            sequences.append(game_moves[:opening_moves])
+        else:
+            sequences.append([])
+    return sequences
 
 
 def _render_boards_horizontally(

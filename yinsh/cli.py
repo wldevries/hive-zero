@@ -97,6 +97,18 @@ def main():
     t.add_argument("--random-opening-moves", type=_opening_moves, default=0,
                    help="Play N (or N-M for a random range) random moves at the start of "
                         "each game before MCTS takes over")
+    t.add_argument("--opening-book", type=str, default=None,
+                   help="Path to game_outcomes.csv to enable boardspace opening positions. "
+                        "The first --random-opening-moves (max) moves of a sampled human "
+                        "game are replayed before MCTS takes over.")
+    t.add_argument("--opening-boardspace-dir", type=str, default="games/yinsh/boardspace",
+                   help="Directory containing boardspace SGF zip archives "
+                        "(default: games/yinsh/boardspace)")
+    t.add_argument("--boardspace-frac", type=float, default=1.0,
+                   help="Fraction of games using book openings; remainder use "
+                        "--random-opening-moves (default: 1.0)")
+    t.add_argument("--opening-min-elo", type=float, default=1600.0,
+                   help="Minimum ELO for both players in opening book games (default: 1600)")
 
     # pretrain
     pt = sub.add_parser("pretrain", help="Supervised pre-training from human SGF archives")
@@ -221,6 +233,10 @@ def main():
             value_loss_scale=args.value_loss_scale,
             buf_dir=args.buf_dir,
             show_timing=args.show_timing,
+            opening_games_csv=args.opening_book,
+            opening_boardspace_dir=args.opening_boardspace_dir,
+            boardspace_frac=args.boardspace_frac,
+            opening_min_elo=args.opening_min_elo,
         )
     elif args.command == "pretrain":
         from yinsh.supervised.pretrain import (
