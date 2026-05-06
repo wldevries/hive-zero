@@ -244,6 +244,7 @@ class Pretrainer:
         lr: float = 0.005,
         optimizer: str = "adamw",
         weight_decay: float = 1e-2,
+        warmup_steps: int = 0,
     ):
         from yinsh.nn.model import (
             create_model,
@@ -281,8 +282,10 @@ class Pretrainer:
 
         self.model.to(device)
         self.trainer = Trainer(self.model, device=device, lr=lr,
-                               optimizer=optimizer, weight_decay=weight_decay)
-        print(f"  Optimizer: {optimizer} (lr={lr}, weight_decay={weight_decay})")
+                               optimizer=optimizer, weight_decay=weight_decay,
+                               warmup_steps=warmup_steps)
+        warmup_note = f", warmup_steps={warmup_steps}" if warmup_steps > 0 else ""
+        print(f"  Optimizer: {optimizer} (lr={lr}, weight_decay={weight_decay}{warmup_note})")
         opt_state = ckpt.get("optimizer_state_dict")
         if opt_state is not None:
             try:

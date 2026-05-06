@@ -391,11 +391,15 @@ class Trainer:
     def __init__(self, model: Optional[HiveNet] = None,
                  weight_decay: float = 1e-4, device: str = "cpu",
                  lr: float = 0.02, optimizer: str = "sgd",
-                 grad_clip: float | None = 1.0):
+                 grad_clip: float | None = 1.0,
+                 warmup_steps: int = 0):
         self.device = torch.device(device)
         self.model = model or create_model()
         self.model.to(self.device)
         self.grad_clip = grad_clip
+        self.warmup_steps = warmup_steps
+        self._base_lr = lr
+        self._step_count = 0
         kind = optimizer.lower()
         if kind == "sgd":
             self.optimizer = optim.SGD(
@@ -510,11 +514,16 @@ class Trainer:
 
             loss = policy_loss + value_loss_scale * value_loss + aux_loss_scale * aux_loss
 
+            if self.warmup_steps > 0 and self._step_count < self.warmup_steps:
+                scale = (self._step_count + 1) / self.warmup_steps
+                for pg in self.optimizer.param_groups:
+                    pg['lr'] = self._base_lr * scale
             self.optimizer.zero_grad()
             loss.backward()
             if self.grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             self.optimizer.step()
+            self._step_count += 1
 
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()

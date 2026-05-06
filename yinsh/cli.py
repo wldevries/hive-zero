@@ -111,6 +111,9 @@ def main():
                     help="Learning rate (default: 0.005 for sgd, 1e-3 for adamw)")
     pt.add_argument("--weight-decay", type=float, default=None,
                     help="L2 weight decay (default: 1e-4 for sgd, 1e-2 for adamw — adamw decouples decay from lr)")
+    pt.add_argument("--lr-warmup-steps", type=int, default=None,
+                    help="Linearly ramp lr from 0 to target over the first N optimizer steps "
+                         "(default: 0 for sgd, 500 for adamw). Set 0 to disable.")
     pt.add_argument("--epochs", type=int, default=3,
                     help="Full passes over the game list (default: 3)")
     pt.add_argument("--batch-size", type=int, default=256)
@@ -228,8 +231,8 @@ def main():
         print("Indexing zip archives...")
         zip_index = build_zip_index(args.boardspace_dir)
         print(f"  {len(zip_index)} zip files found")
-        lr, weight_decay = _resolve_optimizer_defaults(
-            args.optimizer, args.lr, args.weight_decay
+        lr, weight_decay, warmup_steps = _resolve_optimizer_defaults(
+            args.optimizer, args.lr, args.weight_decay, args.lr_warmup_steps,
         )
         pretrainer = Pretrainer(
             model_path=args.model,
@@ -238,6 +241,7 @@ def main():
             lr=lr,
             optimizer=args.optimizer,
             weight_decay=weight_decay,
+            warmup_steps=warmup_steps,
         )
         pretrainer.run(
             games=games,
