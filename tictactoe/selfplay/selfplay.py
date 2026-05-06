@@ -53,7 +53,6 @@ class SelfPlayTrainer:
         lr_scheduler: Optional[LRScheduler] = None,
         checkpoint_dir: str = "checkpoints/tictactoe",
         history_length: int = 1,
-        optimizer: str = "adam",
     ):
         self.model_path = model_path
         self.model_name = os.path.splitext(os.path.basename(model_path))[0]
@@ -62,6 +61,7 @@ class SelfPlayTrainer:
         self.start_generation = 0
         self.history_length = history_length
 
+        ckpt: dict = {}
         if os.path.exists(model_path):
             self.model, ckpt = load_checkpoint(model_path)
             self.start_generation = ckpt.get("generation", 0)
@@ -82,7 +82,14 @@ class SelfPlayTrainer:
 
         self.model.to(device)
         self.lr_scheduler = lr_scheduler
-        self.trainer = Trainer(model=self.model, device=device, lr=lr, optimizer=optimizer)
+        self.trainer = Trainer(model=self.model, device=device, lr=lr)
+        opt_state = ckpt.get("optimizer_state_dict")
+        if opt_state is not None:
+            try:
+                self.trainer.optimizer.load_state_dict(opt_state)
+                print("  Restored optimizer state")
+            except (ValueError, KeyError) as e:
+                print(f"  Skipped optimizer state (incompatible: {e})")
 
     def _eval_fn(self, board_tensor_np):
         """NN inference callback for Rust self-play.
@@ -287,7 +294,8 @@ class SelfPlayTrainer:
 
             # --- Save model ---
             metadata = {**train_params, "lr": lr}
-            save_checkpoint(self.model, self.model_path, generation=generation, metadata=metadata)
+            save_checkpoint(self.model, self.model_path, generation=generation,
+                            metadata=metadata, optimizer=self.trainer.optimizer)
             print(f"  Model saved: {self.model_path} (gen {generation})")
 
             # --- Checkpoint ---
@@ -295,7 +303,8 @@ class SelfPlayTrainer:
                 ckpt_path = os.path.join(
                     self.checkpoint_dir, f"{self.model_name}_gen{generation:05d}.pt"
                 )
-                save_checkpoint(self.model, ckpt_path, generation=generation, metadata=metadata)
+                save_checkpoint(self.model, ckpt_path, generation=generation,
+                                metadata=metadata, optimizer=self.trainer.optimizer)
                 print(f"  Checkpoint saved to {ckpt_path}")
 
         print(f"\nTraining complete after gen {generation}. Final model: {self.model_path}")

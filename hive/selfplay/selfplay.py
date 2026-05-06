@@ -354,6 +354,7 @@ class SelfPlayTrainer:
         self.device = device
         self.start_generation = 0
 
+        ckpt: dict = {}
         if os.path.exists(self.model_path):
             self.model, ckpt = load_checkpoint(self.model_path)
             self.start_generation = ckpt.get("generation", 0)
@@ -380,6 +381,13 @@ class SelfPlayTrainer:
         self.model.to(device)
         self.lr_scheduler = lr_scheduler
         self.trainer = Trainer(self.model, device=device, lr=lr)
+        opt_state = ckpt.get("optimizer_state_dict")
+        if opt_state is not None:
+            try:
+                self.trainer.optimizer.load_state_dict(opt_state)
+                print("  Restored optimizer state (momentum buffers)")
+            except (ValueError, KeyError) as e:
+                print(f"  Skipped optimizer state (incompatible: {e})")
 
     def run(
         self,
@@ -874,7 +882,8 @@ class SelfPlayTrainer:
 
             # --- Save model ---
             metadata = {**train_params, "lr": self.trainer._current_lr}
-            save_checkpoint(self.model, self.model_path, generation, metadata)
+            save_checkpoint(self.model, self.model_path, generation, metadata,
+                            optimizer=self.trainer.optimizer)
             onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
             export_onnx(self.model, onnx_path, batch_size=fixed_batch_size)
 
@@ -883,7 +892,8 @@ class SelfPlayTrainer:
                 ckpt_path = os.path.join(
                     self.checkpoint_dir, f"{self.model_name}_gen{generation:05d}.pt"
                 )
-                save_checkpoint(self.model, ckpt_path, generation, metadata)
+                save_checkpoint(self.model, ckpt_path, generation, metadata,
+                                optimizer=self.trainer.optimizer)
                 print(f"  Checkpoint saved to {ckpt_path}")
                 if checkpoint_eval:
                     eval_sims = (
@@ -981,7 +991,8 @@ class SelfPlayTrainer:
                 print(
                     "  No best_model.pt and no prior checkpoint — current model is now best"
                 )
-                save_checkpoint(self.model, best_model_path, generation)
+                save_checkpoint(self.model, best_model_path, generation,
+                                optimizer=self.trainer.optimizer)
                 shutil.copy2(best_model_path, self.model_path)
                 return
             print(
@@ -1019,7 +1030,8 @@ class SelfPlayTrainer:
             w, d, l = summary["engine1_wins"], summary["draws"], summary["engine2_wins"]
             if score >= 0.5:
                 winner_label = engine1.name
-                save_checkpoint(self.model, best_model_path, generation)
+                save_checkpoint(self.model, best_model_path, generation,
+                                optimizer=self.trainer.optimizer)
             else:
                 winner_label = engine2.name
                 shutil.copy2(prev_ckpt, best_model_path)

@@ -69,6 +69,7 @@ class SelfPlayTrainer:
         self.device = device
         self.start_generation = 0
 
+        ckpt: dict = {}
         if os.path.exists(self.model_path):
             self.model, ckpt = load_checkpoint(self.model_path)
             self.start_generation = ckpt.get("generation", 0)
@@ -93,6 +94,13 @@ class SelfPlayTrainer:
         self.model.to(device)
         self.lr_scheduler = lr_scheduler
         self.trainer = Trainer(model=self.model, device=device, lr=lr)
+        opt_state = ckpt.get("optimizer_state_dict")
+        if opt_state is not None:
+            try:
+                self.trainer.optimizer.load_state_dict(opt_state)
+                print("  Restored optimizer state (momentum buffers)")
+            except (ValueError, KeyError) as e:
+                print(f"  Skipped optimizer state (incompatible: {e})")
 
     def _eval_fn(self, board_tensor_np, reserve_np):
         """Python NN eval callback for the Rust self-play loop.
@@ -371,7 +379,8 @@ class SelfPlayTrainer:
                 comment = ""
 
             metadata = {**train_params, "lr": lr}
-            save_checkpoint(self.model, self.model_path, generation=generation, metadata=metadata)
+            save_checkpoint(self.model, self.model_path, generation=generation,
+                            metadata=metadata, optimizer=self.trainer.optimizer)
             try:
                 export_onnx(self.model, self.onnx_path)
             except Exception as e:
@@ -382,7 +391,8 @@ class SelfPlayTrainer:
                 ckpt_path = os.path.join(
                     self.checkpoint_dir, f"{self.name}_gen{generation:05d}.pt"
                 )
-                save_checkpoint(self.model, ckpt_path, generation=generation, metadata=metadata)
+                save_checkpoint(self.model, ckpt_path, generation=generation,
+                                metadata=metadata, optimizer=self.trainer.optimizer)
                 print(f"  Checkpoint saved to {ckpt_path}")
 
         print(f"\nTraining complete after gen {generation}. Final model: {self.model_path}")

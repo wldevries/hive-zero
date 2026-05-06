@@ -61,8 +61,9 @@ def create_model(num_blocks: int = 2, channels: int = 32, history_length: int = 
     return TicTacToeNet(num_blocks=num_blocks, channels=channels, history_length=history_length)
 
 
-def save_checkpoint(model: TicTacToeNet, path: str, generation: int = 0, metadata: dict | None = None):
-    torch.save({
+def save_checkpoint(model: TicTacToeNet, path: str, generation: int = 0, metadata: dict | None = None,
+                    optimizer: "torch.optim.Optimizer | None" = None):
+    checkpoint = {
         "model_state_dict": model.state_dict(),
         "game": "tictactoe",
         "num_blocks": len(model.res_blocks),
@@ -70,7 +71,10 @@ def save_checkpoint(model: TicTacToeNet, path: str, generation: int = 0, metadat
         "history_length": model.history_length,
         "generation": generation,
         "metadata": metadata or {},
-    }, path)
+    }
+    if optimizer is not None:
+        checkpoint["optimizer_state_dict"] = optimizer.state_dict()
+    torch.save(checkpoint, path)
 
 
 def load_checkpoint(path: str) -> tuple[TicTacToeNet, dict]:

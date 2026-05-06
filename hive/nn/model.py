@@ -153,8 +153,13 @@ def create_model(model_config: dict | None = None) -> HiveNet:
 
 
 def save_checkpoint(model: HiveNet, path: str, generation: int = 0,
-                    metadata: dict | None = None):
-    """Save model with architecture config and training metadata."""
+                    metadata: dict | None = None,
+                    optimizer: "torch.optim.Optimizer | None" = None):
+    """Save model with architecture config and training metadata.
+
+    If `optimizer` is provided, its state_dict is included so training can
+    resume with momentum buffers intact.
+    """
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "game": "hive",
@@ -165,6 +170,8 @@ def save_checkpoint(model: HiveNet, path: str, generation: int = 0,
         "generation": generation,
         "metadata": metadata or {},
     }
+    if optimizer is not None:
+        checkpoint["optimizer_state_dict"] = optimizer.state_dict()
     torch.save(checkpoint, path)
 
 

@@ -147,19 +147,20 @@ def create_model(model_config: dict | None = None) -> YinshNet:
 
 
 def save_checkpoint(
-    model: YinshNet, path: str, generation: int = 0, metadata: dict | None = None
+    model: YinshNet, path: str, generation: int = 0, metadata: dict | None = None,
+    optimizer: "torch.optim.Optimizer | None" = None,
 ):
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "game": "yinsh",
-            "channels": model.input_conv.out_channels,
-            "trunk": model.trunk_spec,
-            "generation": generation,
-            "metadata": metadata or {},
-        },
-        path,
-    )
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "game": "yinsh",
+        "channels": model.input_conv.out_channels,
+        "trunk": model.trunk_spec,
+        "generation": generation,
+        "metadata": metadata or {},
+    }
+    if optimizer is not None:
+        checkpoint["optimizer_state_dict"] = optimizer.state_dict()
+    torch.save(checkpoint, path)
 
 
 def load_checkpoint(path: str) -> tuple[YinshNet, dict]:

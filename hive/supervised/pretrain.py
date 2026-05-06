@@ -369,6 +369,7 @@ class Pretrainer:
         self._save_checkpoint = save_checkpoint
         self._export_onnx = export_onnx
 
+        ckpt: dict = {}
         if os.path.exists(model_path):
             self.model, ckpt = load_checkpoint(model_path)
             it = ckpt.get("generation", 0)
@@ -393,6 +394,13 @@ class Pretrainer:
 
         self.model.to(device)
         self.trainer = Trainer(self.model, device=device, lr=lr)
+        opt_state = ckpt.get("optimizer_state_dict")
+        if opt_state is not None:
+            try:
+                self.trainer.optimizer.load_state_dict(opt_state)
+                print("  Restored optimizer state (momentum buffers)")
+            except (ValueError, KeyError) as e:
+                print(f"  Skipped optimizer state (incompatible: {e})")
 
     def run(
         self,
@@ -543,11 +551,13 @@ class Pretrainer:
                 "policy_loss": losses.get("policy_loss", 0),
                 "value_loss": losses.get("value_loss", 0),
             }
-            self._save_checkpoint(self.model, self.model_path, epoch, epoch_losses)
+            self._save_checkpoint(self.model, self.model_path, epoch, epoch_losses,
+                                  optimizer=self.trainer.optimizer)
             onnx_path = self.model_path.rsplit(".", 1)[0] + ".onnx"
             self._export_onnx(self.model, onnx_path)
             ckpt_path = os.path.join(checkpoint_dir, f"{model_name}_epoch{epoch}.pt")
-            self._save_checkpoint(self.model, ckpt_path, epoch, epoch_losses)
+            self._save_checkpoint(self.model, ckpt_path, epoch, epoch_losses,
+                                  optimizer=self.trainer.optimizer)
             print(f"  Model saved → {self.model_path}  |  Checkpoint → {ckpt_path}")
 
         print(

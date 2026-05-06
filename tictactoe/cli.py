@@ -26,7 +26,6 @@ def main():
     train_parser.add_argument("--history", type=int, default=1,
                               help="Number of board history steps to encode (1=current only, up to 8)")
     train_parser.add_argument("--lr", type=float, default=0.001)
-    train_parser.add_argument("--optimizer", type=str, default="sgd", choices=["adam", "sgd"])
     train_parser.add_argument(
         "--lr-schedule", type=str, default=None,
         help="Stepped LR schedule as iter:lr pairs, e.g. '0:0.1,20:0.02,40:0.01'. Overrides --lr."
@@ -83,7 +82,6 @@ def main():
             lr_scheduler=lr_scheduler,
             checkpoint_dir=args.checkpoint_dir,
             history_length=args.history,
-            optimizer=args.optimizer,
         )
         trainer.run(
             num_generations=args.generations,

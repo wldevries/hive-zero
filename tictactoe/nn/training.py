@@ -90,13 +90,10 @@ class TicTacToeDataset(Dataset):
 class Trainer:
     """Trainer for TicTacToeNet."""
 
-    def __init__(self, model: TicTacToeNet, device: str = "cpu", lr: float = 0.02, optimizer: str = "sgd"):
+    def __init__(self, model: TicTacToeNet, device: str = "cpu", lr: float = 0.02):
         self.model = model
         self.device = torch.device(device)
-        if optimizer == "sgd":
-            self.optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
-        else:
-            self.optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+        self.optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
 
     @property
     def _current_lr(self):

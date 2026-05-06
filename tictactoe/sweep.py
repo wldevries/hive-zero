@@ -26,7 +26,6 @@ class Experiment:
     simulations: int = 100
     games: int = 200
     lr: float = 0.001
-    optimizer: str = "sgd"
     temperature: float = 1.0
     temp_threshold: int = 4
     c_puct: float = 1.5
@@ -79,7 +78,6 @@ def run_experiment(exp: Experiment, device: str, num_generations: int, sweep_dir
         lr=exp.lr,
         checkpoint_dir=os.path.join(sweep_dir, "checkpoints", exp.name),
         history_length=1,
-        optimizer=exp.optimizer,
     )
     trainer.run(
         num_generations=num_generations,

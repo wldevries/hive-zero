@@ -134,7 +134,8 @@ def create_model(model_config: dict | None = None) -> ZertzNet:
 
 
 def save_checkpoint(model: ZertzNet, path: str, generation: int = 0,
-                    metadata: dict | None = None):
+                    metadata: dict | None = None,
+                    optimizer: "torch.optim.Optimizer | None" = None):
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "game": "zertz",
@@ -143,6 +144,8 @@ def save_checkpoint(model: ZertzNet, path: str, generation: int = 0,
         "generation": generation,
         "metadata": metadata or {},
     }
+    if optimizer is not None:
+        checkpoint["optimizer_state_dict"] = optimizer.state_dict()
     torch.save(checkpoint, path)
 
 
