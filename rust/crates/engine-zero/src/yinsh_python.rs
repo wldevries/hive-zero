@@ -15,8 +15,10 @@ use core_game::symmetry::{D6Symmetry, Symmetry};
 use yinsh_game::board::{YinshBoard, YinshMove};
 use yinsh_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
 use yinsh_game::hex::{ALL_CELLS, BOARD_SIZE, DIRECTIONS, GRID_SIZE, ROW_DIRS, is_valid_i8};
-use yinsh_game::move_encoding::{NUM_POLICY_CHANNELS, POLICY_SIZE};
+use yinsh_game::move_encoding::{NUM_POLICY_CHANNELS, POLICY_SIZE, encode_move as encode_move_to_policy, get_legal_move_mask};
+use core_game::game::PolicyIndex;
 use yinsh_game::notation::{move_to_str, str_to_move};
+use yinsh_game::sgf::parse_sgf_move_strs;
 use yinsh_game::search::{
     BattleResult, EvalFn, ProgressFn, SelfPlayResult, best_move_core, play_battle_core,
     play_battle_vs_bot_core, play_selfplay_core,
@@ -552,6 +554,26 @@ impl PyYinshGame {
         )
     }
 
+    /// Return the 7139-cell legal-policy mask: 1.0 at every flat policy index
+    /// referenced by a legal move at the current position, 0.0 elsewhere.
+    /// Used by supervised pretrain to mark the legal action set in policy targets.
+    fn legal_policy_mask<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        let (mask, _) = get_legal_move_mask(&mut self.board);
+        PyArray1::from_owned_array(py, numpy::ndarray::Array1::from(mask))
+    }
+
+    /// Encode a move-notation string into its flat policy indices.
+    /// Returns 1 index for `PlaceRing`/`MoveRing`, 2 for `ClaimRow` (joint Sum).
+    /// Errors if the string isn't a recognized move at the current position.
+    fn encode_move(&mut self, move_str: &str) -> PyResult<Vec<usize>> {
+        let mv = str_to_move(move_str).map_err(PyValueError::new_err)?;
+        Ok(match encode_move_to_policy(&mv) {
+            PolicyIndex::Single(i) => vec![i],
+            PolicyIndex::Sum(a, b) => vec![a, b],
+            PolicyIndex::DotProduct { .. } => Vec::new(),
+        })
+    }
+
     /// Run MCTS and return `(best_move_str, root_value)`.
     #[pyo3(signature = (eval_fn, simulations=400, c_puct=1.5))]
     fn best_move(
@@ -726,6 +748,15 @@ fn yinsh_d6_movement_dir_permutations<'py>(py: Python<'py>) -> Vec<Bound<'py, Py
         .collect()
 }
 
+/// Parse a Boardspace YINSH SGF and return the move sequence as canonical
+/// notation strings ("E5", "E5 G5", "Claim E5 E6 E7 E8 E9 D3"). Pairs each
+/// `RemoveRow` action with its following `RemoveRing` into a single `Claim`.
+/// Mirrors `parse_sgf_moves` for Hive.
+#[pyfunction]
+fn parse_yinsh_sgf_moves(content: &str) -> PyResult<Vec<String>> {
+    parse_sgf_move_strs(content).map_err(PyValueError::new_err)
+}
+
 /// Subset of D6 symmetries that map every Yinsh valid cell to another valid cell.
 /// Returns the indices (0..12) into `D6Symmetry::all()` of the preserving symmetries.
 /// Used by Python-side augmentation to skip transforms that would inject phantom
@@ -775,5 +806,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(yinsh_d6_dir_permutations, m)?)?;
     m.add_function(wrap_pyfunction!(yinsh_d6_movement_dir_permutations, m)?)?;
     m.add_function(wrap_pyfunction!(yinsh_valid_d6_indices, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_yinsh_sgf_moves, m)?)?;
     Ok(())
 }

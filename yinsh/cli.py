@@ -90,6 +90,37 @@ def main():
                    help="Play N (or N-M for a random range) random moves at the start of "
                         "each game before MCTS takes over")
 
+    # pretrain
+    pt = sub.add_parser("pretrain", help="Supervised pre-training from human SGF archives")
+    pt.add_argument("--games-csv", default="games/yinsh/boardspace/game_outcomes.csv")
+    pt.add_argument("--elo-csv", default="games/yinsh/boardspace/player_elo.csv")
+    pt.add_argument("--boardspace-dir", default="games/yinsh/boardspace")
+    pt.add_argument("--min-elo", type=float, default=1600.0,
+                    help="Minimum ELO for both players (default: 1600)")
+    pt.add_argument("--min-games", type=int, default=20,
+                    help="Minimum games played for ELO to count (default: 20)")
+    pt.add_argument("--model", default="yinsh.pt")
+    pt.add_argument("--device", default="cuda")
+    pt.add_argument("--model-config", type=str, default=None,
+                    help="Path to JSON model config (default: configs/yinsh/medium.json). "
+                         "Ignored when resuming from an existing checkpoint.")
+    pt.add_argument("--lr", type=float, default=0.005)
+    pt.add_argument("--epochs", type=int, default=3,
+                    help="Full passes over the game list (default: 3)")
+    pt.add_argument("--batch-size", type=int, default=256)
+    pt.add_argument("--buffer-size", type=int, default=100_000,
+                    help="Positions per training chunk (default: 100k)")
+    pt.add_argument("--epochs-per-chunk", type=int, default=3,
+                    help="SGD epochs per buffer fill (default: 3)")
+    pt.add_argument("--checkpoint-dir", default="checkpoints")
+    pt.add_argument("--verbose-samples", action="store_true",
+                    help="Print skipped moves (useful for diagnosing bad SGFs)")
+    pt.add_argument("--augment-symmetry", action=argparse.BooleanOptionalAction, default=True,
+                    help="Apply Yinsh-valid D6 symmetry augmentation (default: on)")
+    pt.add_argument("--exclude-players", nargs="*", default=["Dumbot"],
+                    help="Players to exclude from training data (default: Dumbot)")
+    pt.add_argument("--value-loss-scale", type=float, default=1.0)
+
     # battle
     b = sub.add_parser("battle", help="Pit two models against each other")
     b.add_argument("model1", type=str)
@@ -169,6 +200,45 @@ def main():
             value_loss_scale=args.value_loss_scale,
             buf_dir=args.buf_dir,
             show_timing=args.show_timing,
+        )
+    elif args.command == "pretrain":
+        from yinsh.supervised.pretrain import (
+            Pretrainer,
+            build_zip_index,
+            load_filtered_games,
+        )
+
+        print("Loading filtered game list...")
+        games = load_filtered_games(
+            args.games_csv,
+            args.elo_csv,
+            min_elo=args.min_elo,
+            min_games=args.min_games,
+            exclude_players=set(args.exclude_players),
+        )
+        print(
+            f"  {len(games)} qualifying games (ELO≥{args.min_elo}, games≥{args.min_games})"
+        )
+        print("Indexing zip archives...")
+        zip_index = build_zip_index(args.boardspace_dir)
+        print(f"  {len(zip_index)} zip files found")
+        pretrainer = Pretrainer(
+            model_path=args.model,
+            device=args.device,
+            model_config=_load_model_config(args.model_config),
+            lr=args.lr,
+        )
+        pretrainer.run(
+            games=games,
+            zip_index=zip_index,
+            num_epochs=args.epochs,
+            batch_size=args.batch_size,
+            buffer_size=args.buffer_size,
+            epochs_per_chunk=args.epochs_per_chunk,
+            checkpoint_dir=args.checkpoint_dir,
+            verbose_samples=args.verbose_samples,
+            augment_symmetry=args.augment_symmetry,
+            value_loss_scale=args.value_loss_scale,
         )
     elif args.command == "battle":
         from yinsh.selfplay.battle import run_battle

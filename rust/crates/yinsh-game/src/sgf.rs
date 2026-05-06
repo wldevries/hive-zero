@@ -11,6 +11,10 @@
 
 use std::fmt;
 
+use crate::board::YinshMove;
+use crate::hex::{ROW_DIRS, cell_index, is_valid};
+use crate::notation::move_to_str;
+
 pub use core_game::sgf::{extract_player, extract_prop};
 
 // ---------------------------------------------------------------------------
@@ -351,4 +355,99 @@ where
             f(name, record);
         }
     })
+}
+
+// ---------------------------------------------------------------------------
+// SGF turn list → engine YinshMove sequence
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum MoveBuildError {
+    BadCoord(Coord),
+    UnsupportedStartColor,
+    BadRowDirection { from: Coord, to: Coord },
+    StrayRemoveRing { turn: usize },
+    OrphanRemoveRow { turn: usize },
+}
+
+impl fmt::Display for MoveBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MoveBuildError::BadCoord(c) => write!(f, "bad coordinate: {c}"),
+            MoveBuildError::UnsupportedStartColor => write!(f, "game starts with Black (not yet supported)"),
+            MoveBuildError::BadRowDirection { from, to } => write!(f, "bad row direction from {from} to {to}"),
+            MoveBuildError::StrayRemoveRing { turn } => write!(f, "turn {turn}: stray RemoveRing without preceding RemoveRow"),
+            MoveBuildError::OrphanRemoveRow { turn } => write!(f, "turn {turn}: RemoveRow not followed by RemoveRing"),
+        }
+    }
+}
+
+fn coord_to_idx(c: Coord) -> Result<usize, MoveBuildError> {
+    if !is_valid(c.col, c.row) {
+        return Err(MoveBuildError::BadCoord(c));
+    }
+    Ok(cell_index(c.col, c.row))
+}
+
+fn row_to_start_dir(from: Coord, to: Coord) -> Result<(usize, usize), MoveBuildError> {
+    let dc = (to.col as i8 - from.col as i8).signum();
+    let dr = (to.row as i8 - from.row as i8).signum();
+    if let Some(dir) = ROW_DIRS.iter().position(|&d| d == (dc, dr)) {
+        Ok((coord_to_idx(from)?, dir))
+    } else if let Some(dir) = ROW_DIRS.iter().position(|&d| d == (-dc, -dr)) {
+        Ok((coord_to_idx(to)?, dir))
+    } else {
+        Err(MoveBuildError::BadRowDirection { from, to })
+    }
+}
+
+/// Convert a parsed `GameRecord` into the engine's `YinshMove` sequence,
+/// pairing each `Turn::RemoveRow` with the following `Turn::RemoveRing` into
+/// a single `YinshMove::ClaimRow`.
+pub fn moves_from_record(record: &GameRecord) -> Result<Vec<YinshMove>, MoveBuildError> {
+    if !matches!(record.first_player_color, Color::White) {
+        return Err(MoveBuildError::UnsupportedStartColor);
+    }
+
+    let total = record.turns.len();
+    let mut moves = Vec::with_capacity(total);
+    let mut i = 0;
+    while i < total {
+        let (_, turn) = &record.turns[i];
+        let (mv, consumed) = match turn {
+            Turn::PlaceRing { at, .. } => (YinshMove::PlaceRing(coord_to_idx(*at)?), 1),
+            Turn::MoveRing { from, to, .. } => (
+                YinshMove::MoveRing { from: coord_to_idx(*from)?, to: coord_to_idx(*to)? },
+                1,
+            ),
+            Turn::RemoveRow { from, to, .. } => {
+                let (start, dir) = row_to_start_dir(*from, *to)?;
+                let next = record.turns.get(i + 1).map(|(_, t)| t);
+                let ring = match next {
+                    Some(Turn::RemoveRing { at, .. }) => coord_to_idx(*at)?,
+                    _ => return Err(MoveBuildError::OrphanRemoveRow { turn: i }),
+                };
+                (YinshMove::ClaimRow { start, dir, ring }, 2)
+            }
+            Turn::RemoveRing { .. } => {
+                return Err(MoveBuildError::StrayRemoveRing { turn: i });
+            }
+        };
+        moves.push(mv);
+        i += consumed;
+    }
+    Ok(moves)
+}
+
+/// Parse a Boardspace YINSH SGF and return the engine move list.
+pub fn parse_sgf_moves(content: &str) -> Result<Vec<YinshMove>, String> {
+    let record = parse_game(content).map_err(|e| e.to_string())?;
+    moves_from_record(&record).map_err(|e| e.to_string())
+}
+
+/// Parse a Boardspace YINSH SGF and return canonical move-notation strings
+/// ("E5", "E5 G5", "Claim E5 E6 E7 E8 E9 D3"). Convenient for language
+/// bindings that drive a fresh `YinshGame` move-by-move.
+pub fn parse_sgf_move_strs(content: &str) -> Result<Vec<String>, String> {
+    Ok(parse_sgf_moves(content)?.iter().map(move_to_str).collect())
 }
