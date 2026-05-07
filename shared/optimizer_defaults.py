@@ -36,6 +36,34 @@ def resolve_optimizer_defaults(
 SELFPLAY_DEFAULT_LR = 0.02
 
 
+def _kind_of_param_group(pg: dict) -> str | None:
+    """Identify an optimizer kind by signature keys present in a param group."""
+    if "momentum" in pg:
+        return "sgd"
+    if "betas" in pg:
+        return "adam"
+    return None
+
+
+def optimizer_state_compatible(live_optimizer, saved_state: dict | None) -> bool:
+    """Check whether a saved optimizer state can be loaded into `live_optimizer`.
+
+    PyTorch's `optimizer.load_state_dict` overwrites param_groups wholesale.
+    Loading SGD state into AdamW (or vice versa) succeeds silently but leaves
+    the live optimizer's param_groups missing the keys its `step()` needs
+    (e.g. SGD looks up `momentum`, AdamW looks up `betas`), crashing later.
+    Detect the kind mismatch up front and skip the load.
+    """
+    if not saved_state:
+        return False
+    saved_pgs = saved_state.get("param_groups", [])
+    if not saved_pgs or not live_optimizer.param_groups:
+        return False
+    live_kind = _kind_of_param_group(live_optimizer.param_groups[0])
+    saved_kind = _kind_of_param_group(saved_pgs[0])
+    return live_kind is not None and live_kind == saved_kind
+
+
 def resolve_resumed_lr(
     cli_lr: float | None,
     opt_state: dict | None,

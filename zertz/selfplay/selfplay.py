@@ -21,7 +21,7 @@ _cr = lambda v: f"{colorama.Fore.RED}{_BRIGHT}{v}{_RESET}"
 _cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
 
 from shared.lr_scheduler import LRScheduler
-from shared.optimizer_defaults import resolve_resumed_lr
+from shared.optimizer_defaults import optimizer_state_compatible, resolve_resumed_lr
 from shared.selfplay_config import MctsConfig, PlayoutCapConfig
 from shared.training_log import csv_comment
 
@@ -96,13 +96,16 @@ class SelfPlayTrainer:
         effective_lr, lr_source = resolve_resumed_lr(lr, opt_state)
         self.trainer = Trainer(model=self.model, device=device, lr=effective_lr)
         if opt_state is not None:
-            try:
-                self.trainer.optimizer.load_state_dict(opt_state)
-                for pg in self.trainer.optimizer.param_groups:
-                    pg["lr"] = effective_lr
-                print(f"  Restored optimizer state (momentum buffers); lr={effective_lr:g} from {lr_source}")
-            except (ValueError, KeyError) as e:
-                print(f"  Skipped optimizer state (incompatible: {e})")
+            if not optimizer_state_compatible(self.trainer.optimizer, opt_state):
+                print("  Skipped optimizer state (different optimizer kind in checkpoint)")
+            else:
+                try:
+                    self.trainer.optimizer.load_state_dict(opt_state)
+                    for pg in self.trainer.optimizer.param_groups:
+                        pg["lr"] = effective_lr
+                    print(f"  Restored optimizer state (momentum buffers); lr={effective_lr:g} from {lr_source}")
+                except (ValueError, KeyError) as e:
+                    print(f"  Skipped optimizer state (incompatible: {e})")
 
     def _eval_fn(self, board_tensor_np, reserve_np):
         """NN inference callback for Rust self-play.
