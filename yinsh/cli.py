@@ -159,6 +159,10 @@ def main():
                     help="Fraction of games held out as validation set (deterministic by sgf_name hash). "
                          "After each chunk, val loss is logged and the best-by-val checkpoint is saved "
                          "as <model>.best.pt. Set 0 to disable.")
+    pt.add_argument("--played-move-boost", type=float, default=10.0,
+                    help="Extra weight added on the played move's policy index(es) on top of the "
+                         "legal-mask 1.0. Higher = more peaked target around the human move. "
+                         "With ~36 legal moves: 1.0 → ~5%% mass on played, 10.0 → ~24%%, 20.0 → ~38%%.")
 
     # battle
     b = sub.add_parser("battle", help="Pit two models against each other")
@@ -293,6 +297,7 @@ def main():
             augment_symmetry=args.augment_symmetry,
             value_loss_scale=args.value_loss_scale,
             val_frac=args.val_frac,
+            played_move_boost=args.played_move_boost,
         )
     elif args.command == "battle":
         from yinsh.selfplay.battle import run_battle

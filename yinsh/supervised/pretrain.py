@@ -91,6 +91,7 @@ def game_to_samples(
     result: str,
     verbose: bool = False,
     game_name: str = "",
+    played_move_boost: float = 10.0,
 ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, float, int]]:
     """Convert one SGF game into pretrain samples.
 
@@ -100,6 +101,10 @@ def game_to_samples(
       policy_target : (POLICY_SIZE,) float32 — legal-mask (1.0 each) + played-move boost
       value         : ∈ {-1.0, 0.0, +1.0} from the to-move player's POV
       phase_flag    : 0=Setup, 1=Normal, 2=ClaimRow (Yinsh dataset's phase column)
+
+    `played_move_boost` is added on top of the legal-mask 1.0 at the played
+    move's policy index(es). With ~36 legal moves typical, boost=10 puts ~24%
+    of the post-softmax mass on the played move (vs ~5% at boost=1).
     """
     import engine_zero
     NUM_CHANNELS, GRID_SIZE, POLICY_SIZE, RESERVE_SIZE = _load_encoding_consts()
@@ -156,7 +161,7 @@ def game_to_samples(
 
         target = legal_mask.copy()
         for i in played_indices:
-            target[i] += 1.0
+            target[i] += played_move_boost
 
         pending.append((board, reserve, target, side_to_move, phase_flag))
 
@@ -316,6 +321,7 @@ class Pretrainer:
         augment_symmetry: bool = True,
         value_loss_scale: float = 1.0,
         val_frac: float = 0.1,
+        played_move_boost: float = 10.0,
     ) -> None:
         """Pre-train the YINSH model.
 
@@ -344,7 +350,9 @@ class Pretrainer:
             f"epochs/chunk: {epochs_per_chunk} | symmetry_aug: {augment_symmetry}"
         )
 
-        val_dataset = self._build_val_dataset(val_games, zip_index, verbose_samples)
+        val_dataset = self._build_val_dataset(
+            val_games, zip_index, verbose_samples, played_move_boost,
+        )
 
         dataset = YinshDataset(max_size=buffer_size)
         dataset.augment_symmetry = augment_symmetry
@@ -378,6 +386,7 @@ class Pretrainer:
                         samples = game_to_samples(
                             content, result,
                             verbose=verbose_samples, game_name=sgf_name,
+                            played_move_boost=played_move_boost,
                         )
                     except Exception:
                         errors_this_epoch += 1
@@ -502,6 +511,7 @@ class Pretrainer:
         val_games: list[tuple[str, str, str, str, str]],
         zip_index: dict[str, str],
         verbose_samples: bool,
+        played_move_boost: float = 10.0,
     ):
         """Build an in-memory val YinshDataset from `val_games`. Returns None if empty."""
         from yinsh.nn.training import YinshDataset
@@ -519,6 +529,7 @@ class Pretrainer:
                     content = zf.read(sgf_name).decode("iso-8859-1")
                 samples = game_to_samples(
                     content, result, verbose=verbose_samples, game_name=sgf_name,
+                    played_move_boost=played_move_boost,
                 )
             except Exception:
                 samples = []
