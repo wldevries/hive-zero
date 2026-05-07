@@ -17,6 +17,7 @@ Value target                : +1 win / 0 draw / −1 loss from the position-side
 from __future__ import annotations
 
 import csv
+import math
 import os
 import random
 import time
@@ -34,12 +35,18 @@ _cy = lambda v: f"{colorama.Fore.YELLOW}{_B}{v}{_R}"   # policy / value loss
 _cc = lambda v: f"{colorama.Fore.CYAN}{_B}{v}{_R}"     # chunk / epoch labels
 
 PRETRAIN_LOG_HEADER = (
-    "chunk,epoch,games_done,total_games,positions,buffer_positions,"
+    "chunk,chunk_in_epoch,chunk_games,mini_epoch,epoch,"
+    "games_done,total_games,positions,buffer_positions,"
     "train_total,train_policy,train_value,"
     "val_total,val_policy,val_value,"
     "val_top1,val_uniform_ce,"
     "lr,duration_s,best_val\n"
 )
+
+# Slight over-estimate of average positions per Yinsh game (typical is ~66).
+# Used only to compute the chunk count up front so chunks are roughly equal —
+# overshooting yields fewer-but-larger chunks, which is the safe direction.
+EST_POSITIONS_PER_GAME = 80
 
 
 # Heavy imports are deferred so this module is cheap to import.
@@ -338,16 +345,37 @@ class Pretrainer:
         os.makedirs(checkpoint_dir, exist_ok=True)
         model_name = os.path.splitext(os.path.basename(self.model_path))[0]
         log_path = f"{model_name}_pretrain_log.csv"
+        # Rotate if an old-schema log exists, so new rows aren't appended onto
+        # a header that has fewer columns.
+        if os.path.exists(log_path):
+            with open(log_path, "r") as f:
+                existing_header = f.readline()
+            if existing_header != PRETRAIN_LOG_HEADER:
+                backup = f"{log_path}.{int(time.time())}.bak"
+                os.rename(log_path, backup)
+                print(f"  Rotated pretrain log with old schema -> {backup}")
         if not os.path.exists(log_path):
             with open(log_path, "w") as f:
                 f.write(PRETRAIN_LOG_HEADER)
 
         train_games, val_games = split_train_val(games, val_frac, sgf_name_index=1)
         total_games = len(train_games)
+
+        # Plan chunks up front so each chunk is roughly equal in size — this
+        # avoids the catastrophic-overfit "tail chunk" the position-based flush
+        # used to produce when total positions wasn't a multiple of buffer_size.
+        est_positions = total_games * EST_POSITIONS_PER_GAME
+        chunks_per_epoch = max(1, math.ceil(est_positions / buffer_size))
+        games_per_chunk = math.ceil(total_games / chunks_per_epoch)
+
         print(
             f"Dataset: {total_games} train + {len(val_games)} val games | "
             f"buffer: {buffer_size} | epochs: {num_epochs} | "
             f"epochs/chunk: {epochs_per_chunk} | symmetry_aug: {augment_symmetry}"
+        )
+        print(
+            f"  Chunking: {chunks_per_epoch} chunk(s)/epoch × ~{games_per_chunk} games "
+            f"(~{games_per_chunk * EST_POSITIONS_PER_GAME // 1000}k pos est)"
         )
 
         val_dataset = self._build_val_dataset(
@@ -372,6 +400,8 @@ class Pretrainer:
             losses: dict = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
 
             games_done = 0
+            chunk_in_epoch = 0
+            chunk_start_game = 0
             chunk_buf: list[tuple] = []  # accumulate (b, r, p, v, phase) tuples
 
             for zip_file, sgf_name, result, _p0, _p1 in train_games:
@@ -395,7 +425,7 @@ class Pretrainer:
                     positions_this_epoch += len(samples)
                     total_positions += len(samples)
 
-                if games_done % 100 == 0 or len(chunk_buf) >= buffer_size:
+                if games_done % 100 == 0:
                     elapsed_load = time.time() - epoch_start
                     print(
                         f"\r  loading  games={games_done}/{total_games} "
@@ -403,11 +433,14 @@ class Pretrainer:
                         end="", flush=True,
                     )
 
-                buffer_full = len(chunk_buf) >= buffer_size
+                chunk_full = games_done % games_per_chunk == 0
                 last_game = games_done == total_games
-                if (buffer_full or last_game) and chunk_buf:
+                if (chunk_full or last_game) and chunk_buf:
                     print()  # newline after \r loading line
                     chunk_idx += 1
+                    chunk_in_epoch += 1
+                    chunk_games = games_done - chunk_start_game
+                    chunk_start_game = games_done
                     chunk_start = time.time()
 
                     # Push the chunk into the dataset.
@@ -415,11 +448,19 @@ class Pretrainer:
                     chunk_positions = len(chunk_buf)
                     chunk_buf = []
 
+                    # Train all mini-epochs, capturing per-mini-epoch losses +
+                    # wall-clock so we can log each as its own CSV row.
+                    mini_records: list[tuple[dict, float]] = []
+                    last_t = chunk_start
                     for mini_epoch in range(1, epochs_per_chunk + 1):
                         losses = self.trainer.train_epoch(
                             dataset, batch_size=batch_size, value_loss_scale=value_loss_scale,
                         )
-                        elapsed = time.time() - chunk_start
+                        now = time.time()
+                        mini_duration = now - last_t
+                        last_t = now
+                        elapsed = now - chunk_start
+                        mini_records.append((losses, mini_duration))
                         tl = f"{losses['total_loss']:.4f}"
                         pl = f"{losses['policy_loss']:.4f}"
                         vl = f"{losses['value_loss']:.4f}"
@@ -428,7 +469,6 @@ class Pretrainer:
                             f"loss={_cr(tl)} (pol={_cy(pl)} val={_cy(vl)}) [{elapsed:.1f}s]"
                         )
 
-                    chunk_elapsed = time.time() - chunk_start
                     dataset.clear()
 
                     val_losses: dict | None = None
@@ -459,17 +499,32 @@ class Pretrainer:
 
                     lr = self.trainer._current_lr
 
-                    def _v(key: str) -> float:
-                        return val_losses[key] if val_losses else 0.0
+                    # One CSV row per mini-epoch. val_* + best_val are written
+                    # only on the last mini-epoch row (where val ran); other
+                    # rows leave those columns blank so analytics tools read
+                    # them as NaN rather than a misleading 0.
                     with open(log_path, "a") as log:
-                        log.write(
-                            f"{chunk_idx},{epoch},{games_done},{total_games},"
-                            f"{total_positions},{chunk_positions},"
-                            f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},{losses['value_loss']:.6f},"
-                            f"{_v('total_loss'):.6f},{_v('policy_loss'):.6f},{_v('value_loss'):.6f},"
-                            f"{_v('top1_acc'):.6f},{_v('uniform_ce'):.6f},"
-                            f"{lr:.8f},{chunk_elapsed:.1f},{int(is_best)}\n"
-                        )
+                        for mi, (mlosses, mdur) in enumerate(mini_records, start=1):
+                            is_last_mini = mi == len(mini_records)
+                            if is_last_mini and val_losses is not None:
+                                v_total = f"{val_losses['total_loss']:.6f}"
+                                v_pol = f"{val_losses['policy_loss']:.6f}"
+                                v_val = f"{val_losses['value_loss']:.6f}"
+                                v_top1 = f"{val_losses['top1_acc']:.6f}"
+                                v_uce = f"{val_losses['uniform_ce']:.6f}"
+                                v_best = str(int(is_best))
+                            else:
+                                v_total = v_pol = v_val = v_top1 = v_uce = v_best = ""
+                            log.write(
+                                f"{chunk_idx},{chunk_in_epoch},{chunk_games},{mi},{epoch},"
+                                f"{games_done},{total_games},"
+                                f"{total_positions},{chunk_positions},"
+                                f"{mlosses['total_loss']:.6f},"
+                                f"{mlosses['policy_loss']:.6f},"
+                                f"{mlosses['value_loss']:.6f},"
+                                f"{v_total},{v_pol},{v_val},{v_top1},{v_uce},"
+                                f"{lr:.8f},{mdur:.1f},{v_best}\n"
+                            )
 
             total_errors += errors_this_epoch
             elapsed = time.time() - epoch_start
