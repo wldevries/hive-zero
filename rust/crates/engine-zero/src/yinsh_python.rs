@@ -133,7 +133,9 @@ pub struct PyYinshSelfPlayResult {
 #[pymethods]
 impl PyYinshSelfPlayResult {
     /// Returns `(boards[N, C*H*W], reserves[N, R], policies[N, P], values[N],
-    /// value_only_flags, phase_flags)`.
+    /// root_q[N], value_only_flags, phase_flags)`. `root_q[i]` is the MCTS
+    /// root W−L (no contempt) at the turn position `i` was played, in that
+    /// turn's player's perspective. Used for q-target value mixing.
     fn training_data<'py>(
         &self,
         py: Python<'py>,
@@ -141,6 +143,7 @@ impl PyYinshSelfPlayResult {
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
+        Bound<'py, PyArray1<f32>>,
         Bound<'py, PyArray1<f32>>,
         Vec<bool>,
         Vec<u8>,
@@ -162,11 +165,13 @@ impl PyYinshSelfPlayResult {
         )
         .unwrap();
         let values = numpy::ndarray::Array1::from(self.inner.value_targets.clone());
+        let root_q = numpy::ndarray::Array1::from(self.inner.root_q_targets.clone());
         (
             PyArray2::from_owned_array(py, boards),
             PyArray2::from_owned_array(py, reserves),
             PyArray2::from_owned_array(py, policies),
             PyArray1::from_owned_array(py, values),
+            PyArray1::from_owned_array(py, root_q),
             self.inner.value_only_flags.clone(),
             self.inner.phase_flags.clone(),
         )

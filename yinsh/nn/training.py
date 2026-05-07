@@ -185,11 +185,25 @@ class YinshDataset(Dataset):
         self.reserve_vectors = _ds("reserve_vectors", (max_size, RESERVE_SIZE), np.float32)
         self.policy_targets  = _ds("policy_targets",  (max_size, POLICY_SIZE),  np.float32)
         self.value_targets   = _ds("value_targets",   (max_size,),               np.float32)
+        # MCTS root W−L (no contempt) per sample, used for q-target value
+        # mixing in `Trainer.train_epoch`. NaN on any sample disables mixing
+        # for that sample (falls back to z). Older buffers without this
+        # dataset get one initialized from value_targets so q-mix is a no-op
+        # for those samples on resume.
+        self.root_q_targets  = _ds("root_q_targets",  (max_size,),               np.float32)
         self.value_only      = _ds("value_only",      (max_size,),               np.bool_)
         self.phase_flags     = _ds("phase_flags",     (max_size,),               np.uint8)
         self.generations     = _ds("generations",     (max_size,),               np.int32)
 
         if self._h5file is not None:
+            # Backward-compat: a buffer written before root_q existed will
+            # have just created the dataset filled with zeros, but the live
+            # samples (indices < self._size) were trained on real outcomes.
+            # Seed root_q for those samples from value_targets so q-mix
+            # collapses to z (no change in behavior) until they cycle out.
+            if "root_q_targets_initialized" not in self._h5file.attrs and self._size > 0:
+                self.root_q_targets[: self._size] = self.value_targets[: self._size]
+            self._h5file.attrs["root_q_targets_initialized"] = True
             self._h5file.flush()
 
     def close(self):
@@ -209,18 +223,27 @@ class YinshDataset(Dataset):
         value_only: list[bool],
         phase_flags: list[int] | np.ndarray,
         generation: int = 0,
+        root_q_targets: np.ndarray | None = None,
     ):
         n = board_tensors.shape[0]
         boards  = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
         vo_arr  = np.asarray(value_only, dtype=np.bool_)
         pf_arr  = np.asarray(phase_flags, dtype=np.uint8)
         gen_arr = np.full(n, generation, dtype=np.int32)
+        # When root_q is not provided (e.g. supervised pretrain that has no
+        # MCTS), fall back to value_targets so q-mix is a no-op.
+        rq_arr = (
+            np.asarray(root_q_targets, dtype=np.float32)
+            if root_q_targets is not None
+            else np.asarray(value_targets, dtype=np.float32)
+        )
 
         pairs = [
             (self.board_tensors,   boards),
             (self.reserve_vectors, reserve_vectors),
             (self.policy_targets,  policy_targets),
             (self.value_targets,   value_targets),
+            (self.root_q_targets,  rq_arr),
             (self.value_only,      vo_arr),
             (self.phase_flags,     pf_arr),
             (self.generations,     gen_arr),
@@ -277,6 +300,7 @@ class YinshDataset(Dataset):
             torch.from_numpy(self.reserve_vectors[base_idx].copy()),
             torch.from_numpy(policy),
             torch.tensor(self.value_targets[base_idx], dtype=torch.float32),
+            torch.tensor(self.root_q_targets[base_idx], dtype=torch.float32),
             torch.tensor(bool(self.value_only[base_idx]), dtype=torch.bool),
         )
 
@@ -357,7 +381,17 @@ class Trainer:
         dataset: YinshDataset,
         batch_size: int = 256,
         value_loss_scale: float = 1.0,
+        q_mix_lambda: float = 0.0,
     ) -> dict:
+        """Run one training epoch.
+
+        `q_mix_lambda`: KataGo-style q-target mixing weight in [0, 1]. The
+        per-sample value target becomes `(1-λ)·z + λ·root_q`, where `z` is the
+        game outcome and `root_q` is the MCTS root W−L (no contempt) at the
+        played turn. Samples with NaN root_q (e.g. supervised pretrain or
+        bot-played turns in hive) bypass mixing and use `z` directly. λ=0
+        recovers the original outcome-only behavior.
+        """
         self.model.train()
         drop = self.device.type == "cuda"
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=drop)
@@ -368,13 +402,14 @@ class Trainer:
         num_batches = 0
         device_type = self.device.type
 
-        for board, reserve, policy_target, value_target, value_only_mask in tqdm(
+        for board, reserve, policy_target, value_target, root_q, value_only_mask in tqdm(
             loader, desc="  Training", leave=False, unit="batch"
         ):
             board = board.to(self.device)
             reserve = reserve.to(self.device)
             policy_target = policy_target.to(self.device)
             value_target = value_target.to(self.device).unsqueeze(1)
+            root_q = root_q.to(self.device).unsqueeze(1)
             value_only_mask = value_only_mask.to(self.device)
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
@@ -390,8 +425,16 @@ class Trainer:
             else:
                 policy_loss = torch.tensor(0.0, device=self.device)
 
+            # Q-target mixing: blend the search-improved root value into the
+            # outcome target. NaN root_q (no MCTS at that sample) keeps z.
+            if q_mix_lambda > 0.0:
+                rq_safe = torch.where(torch.isnan(root_q), value_target, root_q)
+                effective_target = (1.0 - q_mix_lambda) * value_target + q_mix_lambda * rq_safe
+            else:
+                effective_target = value_target
+
             # Value loss: cross-entropy on WDL soft targets.
-            wdl_target = _scalar_to_wdl(value_target.squeeze(1))  # (B, 3)
+            wdl_target = _scalar_to_wdl(effective_target.squeeze(1))  # (B, 3)
             log_wdl = torch.log_softmax(wdl_logits.float(), dim=1)
             per_sample_value = -(wdl_target * log_wdl).sum(dim=1)
             value_loss = per_sample_value.mean()
@@ -444,7 +487,7 @@ class Trainer:
         num_batches = 0
         device_type = self.device.type
 
-        for board, reserve, policy_target, value_target, value_only_mask in tqdm(
+        for board, reserve, policy_target, value_target, _root_q, value_only_mask in tqdm(
             loader, desc="  Validating", leave=False, unit="batch"
         ):
             board = board.to(self.device)

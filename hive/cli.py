@@ -299,6 +299,15 @@ def main():
              "decisive outcomes from genuinely asymmetric play (default: off).",
     )
     train_parser.add_argument(
+        "--value-target-q-mix",
+        type=float,
+        default=0.0,
+        help="KataGo-style value target mixing: blend the MCTS root W-L (no "
+             "contempt) into the outcome target as (1-lambda)*z + lambda*root_q. "
+             "Helps draws teach the value head 'who was ahead' rather than "
+             "collapsing to D=1. Typical 0.25-0.5; 0 = off (default).",
+    )
+    train_parser.add_argument(
         "--augment-symmetry",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -660,6 +669,7 @@ def main():
             export_sgf=args.export_sgf,
             bot_frac=args.bot_frac if args.opponent_bot == "alphabeta" else 0.0,
             bot_depth=args.bot_depth,
+            value_target_q_mix=args.value_target_q_mix,
         )
     else:
         # Default: UHP engine

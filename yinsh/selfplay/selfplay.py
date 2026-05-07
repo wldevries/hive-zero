@@ -198,6 +198,7 @@ class SelfPlayTrainer:
         boardspace_frac: float = 1.0,
         opening_min_elo: float = 1600.0,
         draw_keep_frac: float = 1.0,
+        value_target_q_mix: float = 0.0,
     ):
         from engine_zero import YinshSelfPlaySession
 
@@ -232,6 +233,7 @@ class SelfPlayTrainer:
             "asymmetric_contempt": mcts.asymmetric_contempt,
             "random_opening_moves": (opening.min, opening.max) if opening.max != opening.min else opening.min,
             "forced_playouts": mcts.forced_playouts,
+            "value_target_q_mix": value_target_q_mix,
         }
 
         # Opening book: load boardspace game sequences if configured.
@@ -384,13 +386,14 @@ class SelfPlayTrainer:
                 print(f"  Playout cap: {fs}/{tt} full-search turns ({pct:.0f}%)")
 
             buf_start = time.time()
-            boards, reserves, policies, values, value_only, phase_flags = (
+            boards, reserves, policies, values, root_q, value_only, phase_flags = (
                 result.training_data()
             )
             boards = np.asarray(boards)
             reserves = np.asarray(reserves)
             policies = np.asarray(policies)
             values = np.asarray(values)
+            root_q = np.asarray(root_q)
             value_only = list(value_only)
             phase_flags = list(phase_flags)
 
@@ -404,6 +407,7 @@ class SelfPlayTrainer:
                     reserves = reserves[keep]
                     policies = policies[keep]
                     values = values[keep]
+                    root_q = root_q[keep]
                     value_only = [v for v, k in zip(value_only, keep) if k]
                     phase_flags = [p for p, k in zip(phase_flags, keep) if k]
 
@@ -415,6 +419,7 @@ class SelfPlayTrainer:
                 value_only=value_only,
                 phase_flags=phase_flags,
                 generation=generation,
+                root_q_targets=root_q,
             )
             buf_time = time.time() - buf_start
 
@@ -468,7 +473,8 @@ class SelfPlayTrainer:
             lr = self.trainer._current_lr
             for epoch in range(epochs_per_gen):
                 losses = self.trainer.train_epoch(
-                    dataset, batch_size=batch_size, value_loss_scale=value_loss_scale
+                    dataset, batch_size=batch_size, value_loss_scale=value_loss_scale,
+                    q_mix_lambda=value_target_q_mix,
                 )
                 lr = self.trainer._current_lr
                 total_s = f"{losses['total_loss']:.4f}"

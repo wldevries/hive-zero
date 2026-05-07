@@ -94,6 +94,12 @@ def main():
                    help="Use KataGo-style forced playouts at the root: every legal "
                         "move gets a visit floor proportional to sqrt(P*N). "
                         "Pairs well with low c_puct (default: off)")
+    t.add_argument("--value-target-q-mix", type=float, default=0.0,
+                   help="KataGo-style value target mixing: blend the MCTS root W-L "
+                        "(no contempt) into the outcome target as "
+                        "(1-lambda)*z + lambda*root_q. Helps draws teach the value "
+                        "head 'who was ahead' rather than collapsing to D=1. "
+                        "Typical 0.25-0.5; 0 = off (default).")
 
     def _opening_moves(s):
         if "-" in s:
@@ -249,6 +255,7 @@ def main():
             boardspace_frac=args.boardspace_frac,
             opening_min_elo=args.opening_min_elo,
             draw_keep_frac=args.draw_keep_frac,
+            value_target_q_mix=args.value_target_q_mix,
         )
     elif args.command == "pretrain":
         from yinsh.supervised.pretrain import (

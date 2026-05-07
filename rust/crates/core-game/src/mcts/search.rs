@@ -885,6 +885,19 @@ impl<G: GameEngine> MctsSearch<G> {
         raw_wl - contempt * avg_draw
     }
 
+    /// Mean W−L estimate at the root in root's own perspective, with NO
+    /// contempt subtracted. This is the search-improved value target used for
+    /// q-target mixing in training: contempt is a play-time aversion that
+    /// should not bleed into the value head's regression target.
+    pub fn root_value_raw(&self) -> f32 {
+        let root = self.arena.get(self.root);
+        let n = root.visit_count;
+        if n == 0 {
+            return 0.0;
+        }
+        -root.value_sum / n as f32
+    }
+
     /// Encode a game state for NN evaluation.
     pub fn encode_game(game: &G) -> (Vec<f32>, Vec<f32>) {
         let mut board = vec![0.0f32; game.board_tensor_size()];

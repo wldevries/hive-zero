@@ -99,6 +99,11 @@ pub struct SelfPlayResult {
     pub movement_prob_data: Vec<f32>,
     pub movement_offsets: Vec<u32>,
     pub value_targets: Vec<f32>,
+    /// Per-sample MCTS root W−L (no contempt) captured at the turn the
+    /// position was played. NaN where no MCTS root existed (alphabeta-bot
+    /// turns); the trainer treats those as no-mix. Used as the q-target
+    /// source for value-target mixing: `target = (1-λ)·z + λ·q`.
+    pub root_q_targets: Vec<f32>,
     pub value_only_flags: Vec<bool>,
     pub policy_only_flags: Vec<bool>,
     pub my_queen_danger: Vec<f32>,
@@ -157,6 +162,12 @@ struct TurnRecord {
     my_mobility: f32,
     opp_mobility: f32,
     position_hash: u64,
+    /// MCTS root value (W−L scalar, no contempt) at this turn, in
+    /// `turn_color`'s perspective. Used as the q-target for training-time
+    /// target mixing. NaN signals "no q target" (e.g. alphabeta-bot turns
+    /// where there's no MCTS root); the trainer treats those as no-mix and
+    /// falls back to the raw outcome target z.
+    root_q: f32,
 }
 
 fn opposite_color(color: PieceColor) -> PieceColor {
@@ -594,6 +605,9 @@ pub fn play_selfplay_core(
                 my_mobility: games[game_index].piece_mobility(turn_color),
                 opp_mobility: games[game_index].piece_mobility(opp),
                 position_hash: games[game_index].position_hash(),
+                // No MCTS root for alphabeta-bot turns — sentinel disables
+                // q-mix on these samples.
+                root_q: f32::NAN,
             });
             total_turns += 1;
 
@@ -896,6 +910,9 @@ pub fn play_selfplay_core(
             }
             total_turns += 1;
 
+            // Search-improved root value (W−L scalar, no contempt) for q-mix
+            // training. Read before any reroot below.
+            let root_q = searches[game_index].root_value_raw();
             histories[game_index].push(TurnRecord {
                 board_offset: turn_board_offsets[index],
                 reserve_offset: turn_reserve_offsets[index],
@@ -913,6 +930,7 @@ pub fn play_selfplay_core(
                 my_mobility: games[game_index].piece_mobility(turn_color),
                 opp_mobility: games[game_index].piece_mobility(opp_color),
                 position_hash: games[game_index].position_hash(),
+                root_q,
             });
 
             let move_index = if !is_full[index] || temp == 0.0 {
@@ -996,6 +1014,7 @@ pub fn play_selfplay_core(
     let mut result_movement_prob: Vec<f32> = Vec::new();
     let mut result_movement_offsets: Vec<u32> = vec![0u32];
     let mut result_value_targets = Vec::new();
+    let mut result_root_q_targets: Vec<f32> = Vec::new();
     let mut result_value_only = Vec::new();
     let mut result_policy_only = Vec::new();
     let mut result_my_queen_danger = Vec::new();
@@ -1134,6 +1153,7 @@ pub fn play_selfplay_core(
             result_movement_prob.extend_from_slice(&record.movement_prob);
             result_movement_offsets.push(result_movement_src.len() as u32);
             result_value_targets.push(value);
+            result_root_q_targets.push(record.root_q);
             result_value_only.push(record.is_value_only);
             result_policy_only.push(policy_only);
             result_my_queen_danger.push(record.my_queen_danger);
@@ -1183,6 +1203,7 @@ pub fn play_selfplay_core(
         movement_prob_data: result_movement_prob,
         movement_offsets: result_movement_offsets,
         value_targets: result_value_targets,
+        root_q_targets: result_root_q_targets,
         value_only_flags: result_value_only,
         policy_only_flags: result_policy_only,
         my_queen_danger: result_my_queen_danger,

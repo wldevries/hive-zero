@@ -470,6 +470,10 @@ pub struct SelfPlayResult {
     pub reserve_data: Vec<f32>,
     pub policy_data: Vec<f32>,
     pub value_targets: Vec<f32>,
+    /// Per-sample MCTS root value (W−L scalar, no contempt) captured at the
+    /// turn the position was played. Used as the q-target source for value
+    /// target mixing: `target = (1-λ)·z + λ·q`.
+    pub root_q_targets: Vec<f32>,
     pub value_only_flags: Vec<bool>,
     pub phase_flags: Vec<u8>,
     pub num_samples: usize,
@@ -533,6 +537,9 @@ struct TurnRecord {
     player: Player,
     value_only: bool,
     phase: u8,
+    /// MCTS root value (W−L scalar, no contempt) at this turn, in `player`'s
+    /// perspective. Used as the q-target for training-time target mixing.
+    root_q: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -958,6 +965,10 @@ pub fn play_selfplay_core(
             boards[gi].encode_board(&mut board_snap, &mut reserve_snap);
             let phase = phase_code(boards[gi].phase);
             let player = boards[gi].next_player();
+            // Capture the search-improved root value (W−L, no contempt) for
+            // training-time q-target mixing. Reads from the just-completed
+            // search; must happen before any reroot below.
+            let root_q = searches[gi].root_value_raw();
             histories[gi].push(TurnRecord {
                 board: board_snap,
                 reserve: reserve_snap,
@@ -965,6 +976,7 @@ pub fn play_selfplay_core(
                 player,
                 value_only: !is_full[i],
                 phase,
+                root_q,
             });
 
             // Sample the move (tempered for first `temp_threshold` moves).
@@ -1032,6 +1044,7 @@ pub fn play_selfplay_core(
     result.reserve_data.reserve(total_samples * RESERVE_SIZE);
     result.policy_data.reserve(total_samples * POLICY_SIZE);
     result.value_targets.reserve(total_samples);
+    result.root_q_targets.reserve(total_samples);
     result.value_only_flags.reserve(total_samples);
     result.phase_flags.reserve(total_samples);
 
@@ -1048,6 +1061,7 @@ pub fn play_selfplay_core(
                 _ => 0.0,
             };
             result.value_targets.push(value);
+            result.root_q_targets.push(record.root_q);
             result.value_only_flags.push(record.value_only);
             result.phase_flags.push(record.phase);
         }

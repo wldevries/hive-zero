@@ -126,6 +126,12 @@ class HiveDataset(Dataset):
         self.movement_probs  = _ds("movement_probs",  (max_size, MAX_MOVE_PAIRS),                     np.float32)
         self.num_movements   = _ds("num_movements",   (max_size,),                                    np.int32)
         self.value_targets   = _ds("value_targets",   (max_size,),                                    np.float32)
+        # MCTS root W−L (no contempt) per sample, used for q-target value
+        # mixing in `Trainer._compute_batch_losses`. NaN disables mixing for
+        # that sample (alphabeta-bot turns, supervised pretrain). Older
+        # buffers without the dataset get one seeded from value_targets so
+        # q-mix is a no-op for those samples.
+        self.root_q_targets  = _ds("root_q_targets",  (max_size,),                                    np.float32)
         self.value_only      = _ds("value_only",      (max_size,),                                    np.bool_)
         self.policy_only     = _ds("policy_only",     (max_size,),                                    np.bool_)
         self.my_queen_danger  = _ds("my_queen_danger",  (max_size,), np.float32)
@@ -136,6 +142,9 @@ class HiveDataset(Dataset):
         self.opp_mobility     = _ds("opp_mobility",     (max_size,), np.float32)
 
         if self._h5file is not None:
+            if "root_q_targets_initialized" not in self._h5file.attrs and self._size > 0:
+                self.root_q_targets[: self._size] = self.value_targets[: self._size]
+            self._h5file.attrs["root_q_targets_initialized"] = True
             self._h5file.flush()
 
     def close(self):
@@ -180,6 +189,9 @@ class HiveDataset(Dataset):
         self.num_movements[idx] = nm
 
         self.value_targets[idx] = value_target
+        # No MCTS root available in single-sample API; fall back to z so
+        # q-mix is a no-op for these samples.
+        self.root_q_targets[idx] = value_target
         self.value_only[idx] = value_only
         self.policy_only[idx] = policy_only
         self.my_queen_danger[idx] = my_queen_danger
@@ -206,7 +218,8 @@ class HiveDataset(Dataset):
                   my_queen_escape: np.ndarray | None = None,
                   opp_queen_escape: np.ndarray | None = None,
                   my_mobility: np.ndarray | None = None,
-                  opp_mobility: np.ndarray | None = None):
+                  opp_mobility: np.ndarray | None = None,
+                  root_q_targets: np.ndarray | None = None):
         """Bulk insert from contiguous arrays."""
         n = board_tensors.shape[0]
         boards = board_tensors.reshape(n, NUM_CHANNELS, self.grid_size, self.grid_size)
@@ -219,6 +232,13 @@ class HiveDataset(Dataset):
         oqe  = opp_queen_escape if opp_queen_escape is not None else _z()
         mmob = my_mobility      if my_mobility      is not None else _z()
         omob = opp_mobility     if opp_mobility     is not None else _z()
+        # Fall back to value_targets when caller doesn't supply root_q (e.g.
+        # supervised pretrain), so q-mix becomes a no-op for those samples.
+        rq = (
+            np.asarray(root_q_targets, dtype=np.float32)
+            if root_q_targets is not None
+            else np.asarray(value_targets, dtype=np.float32)
+        )
 
         pairs = [
             (self.board_tensors,   boards),
@@ -231,6 +251,7 @@ class HiveDataset(Dataset):
             (self.movement_probs,  movement_prob_data),
             (self.num_movements,   num_movements_arr),
             (self.value_targets,   value_targets),
+            (self.root_q_targets,  rq),
             (self.value_only,      vo_arr),
             (self.policy_only,     po_arr),
             (self.my_queen_danger,  mqd),
@@ -379,6 +400,7 @@ class HiveDataset(Dataset):
             torch.from_numpy(m_prob),
             torch.tensor(n_m, dtype=torch.int32),
             torch.tensor(self.value_targets[base_idx], dtype=torch.float32),
+            torch.tensor(self.root_q_targets[base_idx], dtype=torch.float32),
             torch.tensor(self.value_only[base_idx], dtype=torch.bool),
             torch.tensor(self.policy_only[base_idx], dtype=torch.bool),
             torch.from_numpy(aux_targets),
@@ -418,11 +440,17 @@ class Trainer:
     def _current_lr(self) -> float:
         return self.optimizer.param_groups[0]['lr']
 
-    def _compute_batch_losses(self, batch, value_loss_scale: float, aux_loss_scale: float):
-        """Compute per-batch loss tensors. Shared by train_epoch and validate."""
+    def _compute_batch_losses(self, batch, value_loss_scale: float, aux_loss_scale: float,
+                              q_mix_lambda: float = 0.0):
+        """Compute per-batch loss tensors. Shared by train_epoch and validate.
+
+        `q_mix_lambda`: KataGo-style q-target mixing weight. Effective value
+        target becomes `(1-λ)·z + λ·root_q`. NaN root_q (alphabeta-bot turns
+        and supervised pretrain samples) bypasses mixing for that sample.
+        """
         (board, reserve, p_idx, p_prob, n_p,
          m_src, m_dst, m_prob, n_m,
-         value_target, vo_mask, po_mask, aux_target) = batch
+         value_target, root_q, vo_mask, po_mask, aux_target) = batch
 
         device = self.device
         device_type = self.device.type
@@ -438,6 +466,7 @@ class Trainer:
         m_prob = m_prob.to(device)
         n_m = n_m.to(device)
         value_target = value_target.to(device).unsqueeze(1)
+        root_q = root_q.to(device).unsqueeze(1)
         vo_mask = vo_mask.to(device)
         po_mask = po_mask.to(device)
         aux_target = aux_target.to(device)
@@ -482,7 +511,13 @@ class Trainer:
         policy_weight = (~vo_mask).float()
         policy_loss = (per_sample_policy * policy_weight).mean()
 
-        wdl_target = _scalar_to_wdl(value_target.squeeze(1))
+        if q_mix_lambda > 0.0:
+            rq_safe = torch.where(torch.isnan(root_q), value_target, root_q)
+            effective_target = (1.0 - q_mix_lambda) * value_target + q_mix_lambda * rq_safe
+        else:
+            effective_target = value_target
+
+        wdl_target = _scalar_to_wdl(effective_target.squeeze(1))
         log_wdl = torch.log_softmax(wdl_logits.float(), dim=1)
         per_sample_value = -(wdl_target * log_wdl).sum(dim=1)
         value_weight = (~po_mask).float()
@@ -511,7 +546,8 @@ class Trainer:
             "n_pol_active": n_pol_active,
         }
 
-    def train_epoch(self, dataset: HiveDataset, batch_size: int = 64, value_loss_scale: float = 1.0, aux_loss_scale: float = 1.0) -> dict:
+    def train_epoch(self, dataset: HiveDataset, batch_size: int = 64, value_loss_scale: float = 1.0,
+                    aux_loss_scale: float = 1.0, q_mix_lambda: float = 0.0) -> dict:
         """Train one epoch. Returns loss dict."""
         self.model.train()
         drop = self.device.type == "cuda"
@@ -522,7 +558,7 @@ class Trainer:
         num_batches = 0
 
         for batch in tqdm(loader, desc="  Training", leave=False, unit="batch"):
-            losses = self._compute_batch_losses(batch, value_loss_scale, aux_loss_scale)
+            losses = self._compute_batch_losses(batch, value_loss_scale, aux_loss_scale, q_mix_lambda)
             loss = losses["total"]
 
             if self.warmup_steps > 0 and self._step_count < self.warmup_steps:

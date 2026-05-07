@@ -432,6 +432,7 @@ class SelfPlayTrainer:
         export_sgf: bool = True,
         bot_frac: float = 0.0,
         bot_depth: int = 2,
+        value_target_q_mix: float = 0.0,
     ):
         """Run the full training loop.
 
@@ -466,6 +467,7 @@ class SelfPlayTrainer:
             "augment_symmetry": augment_symmetry,
             "draw_contempt": mcts.draw_contempt,
             "asymmetric_contempt": mcts.asymmetric_contempt,
+            "value_target_q_mix": value_target_q_mix,
         }
 
         # Training log (CSV, truncated on fresh start)
@@ -663,6 +665,7 @@ class SelfPlayTrainer:
                 reserves,
                 (place_idx, place_probs, num_placements),
                 values,
+                root_q,
                 value_only_flags,
                 policy_only_flags,
                 aux_targets,
@@ -688,6 +691,7 @@ class SelfPlayTrainer:
                 opp_queen_escape=aux_targets[:, 3],
                 my_mobility=aux_targets[:, 4],
                 opp_mobility=aux_targets[:, 5],
+                root_q_targets=root_q,
             )
             buf_time = time.time() - buf_start
 
@@ -842,6 +846,7 @@ class SelfPlayTrainer:
                         batch_size=batch_size,
                         value_loss_scale=value_loss_scale,
                         aux_loss_scale=aux_loss_scale,
+                        q_mix_lambda=value_target_q_mix,
                     )
                     lr = self.trainer._current_lr
                     total_s = f"{losses['total_loss']:.4f}"

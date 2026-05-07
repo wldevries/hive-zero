@@ -163,6 +163,7 @@ fn into_py_selfplay_result(result: search::SelfPlayResult) -> PySelfPlayResult {
         movement_prob_data: result.movement_prob_data,
         movement_offsets: result.movement_offsets,
         value_targets: result.value_targets,
+        root_q_targets: result.root_q_targets,
         value_only_flags: result.value_only_flags,
         policy_only_flags: result.policy_only_flags,
         my_queen_danger: result.my_queen_danger,
@@ -240,6 +241,10 @@ pub struct PySelfPlayResult {
     movement_prob_data: Vec<f32>,
     movement_offsets: Vec<u32>,
     value_targets: Vec<f32>,
+    /// MCTS root W−L (no contempt) per sample, in the turn player's
+    /// perspective. NaN where there was no MCTS root (alphabeta-bot turns) —
+    /// the trainer treats those as no-mix. Source for q-target value mixing.
+    root_q_targets: Vec<f32>,
     value_only_flags: Vec<bool>,
     policy_only_flags: Vec<bool>,
     my_queen_danger: Vec<f32>,
@@ -285,6 +290,7 @@ impl PySelfPlayResult {
             Bound<'py, PyArray1<i32>>,   // num_placements (n,)
         ),
         Bound<'py, PyArray1<f32>>,   // values (n,)
+        Bound<'py, PyArray1<f32>>,   // root_q (n,)  — NaN where no MCTS root
         Vec<bool>,                   // value_only_flags
         Vec<bool>,                   // policy_only_flags
         Bound<'py, PyArray2<f32>>,   // aux (n, 6)
@@ -304,6 +310,7 @@ impl PySelfPlayResult {
         let boards = numpy::ndarray::Array2::from_shape_vec((n, board_size), self.board_data.clone()).unwrap();
         let reserves = numpy::ndarray::Array2::from_shape_vec((n, RESERVE_SIZE), self.reserve_data.clone()).unwrap();
         let values = numpy::ndarray::Array1::from(self.value_targets.clone());
+        let root_q = numpy::ndarray::Array1::from(self.root_q_targets.clone());
 
         let mut aux_data = Vec::with_capacity(n * 6);
         for index in 0..n {
@@ -364,6 +371,7 @@ impl PySelfPlayResult {
                 PyArray1::from_owned_array(py, num_place_arr),
             ),
             PyArray1::from_owned_array(py, values),
+            PyArray1::from_owned_array(py, root_q),
             self.value_only_flags.clone(),
             self.policy_only_flags.clone(),
             PyArray2::from_owned_array(py, aux),
