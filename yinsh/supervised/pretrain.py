@@ -344,7 +344,9 @@ class Pretrainer:
 
         os.makedirs(checkpoint_dir, exist_ok=True)
         model_name = os.path.splitext(os.path.basename(self.model_path))[0]
-        log_path = f"{model_name}_pretrain_log.csv"
+        log_path = os.path.join(
+            os.path.dirname(self.model_path), f"{model_name}_pretrain_log.csv"
+        )
         if not os.path.exists(log_path):
             with open(log_path, "w") as f:
                 f.write(PRETRAIN_LOG_HEADER)
