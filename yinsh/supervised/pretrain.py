@@ -345,15 +345,6 @@ class Pretrainer:
         os.makedirs(checkpoint_dir, exist_ok=True)
         model_name = os.path.splitext(os.path.basename(self.model_path))[0]
         log_path = f"{model_name}_pretrain_log.csv"
-        # Rotate if an old-schema log exists, so new rows aren't appended onto
-        # a header that has fewer columns.
-        if os.path.exists(log_path):
-            with open(log_path, "r") as f:
-                existing_header = f.readline()
-            if existing_header != PRETRAIN_LOG_HEADER:
-                backup = f"{log_path}.{int(time.time())}.bak"
-                os.rename(log_path, backup)
-                print(f"  Rotated pretrain log with old schema -> {backup}")
         if not os.path.exists(log_path):
             with open(log_path, "w") as f:
                 f.write(PRETRAIN_LOG_HEADER)
