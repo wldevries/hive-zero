@@ -1,4 +1,4 @@
-use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex};
+use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex, Undoable};
 use core_game::symmetry::UnitSymmetry;
 
 pub const GRID_SIZE: usize = 3;
@@ -42,6 +42,17 @@ pub struct TicTacToe {
     pub history_length: usize,
     /// Previous board states (most recent last).
     history: Vec<[Cell; 9]>,
+    /// Snapshots pushed by play_move and popped by undo.
+    undo_stack: Vec<TTTSnapshot>,
+}
+
+#[derive(Clone)]
+struct TTTSnapshot {
+    board: [Cell; 9],
+    next_player: Player,
+    outcome: Outcome,
+    move_count: u8,
+    history: Vec<[Cell; 9]>,
 }
 
 impl TicTacToe {
@@ -58,6 +69,7 @@ impl TicTacToe {
             move_count: 0,
             history_length,
             history: Vec::new(),
+            undo_stack: Vec::new(),
         }
     }
 
@@ -136,6 +148,15 @@ impl Game for TicTacToe {
             return Err("Game is already over".into());
         }
 
+        // Snapshot for undo. Cloning history is cheap (max MAX_HISTORY-1 small arrays).
+        self.undo_stack.push(TTTSnapshot {
+            board: self.board,
+            next_player: self.next_player,
+            outcome: self.outcome,
+            move_count: self.move_count,
+            history: self.history.clone(),
+        });
+
         // Save current board to history before applying move
         if self.history_length > 1 {
             self.history.push(self.board);
@@ -165,6 +186,17 @@ impl Game for TicTacToe {
 
     fn is_pass(mv: &TTTMove) -> bool {
         mv.0 == 255
+    }
+}
+
+impl Undoable for TicTacToe {
+    fn undo(&mut self) {
+        let snap = self.undo_stack.pop().expect("undo with no prior play_move");
+        self.board = snap.board;
+        self.next_player = snap.next_player;
+        self.outcome = snap.outcome;
+        self.move_count = snap.move_count;
+        self.history = snap.history;
     }
 }
 

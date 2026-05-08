@@ -3,7 +3,7 @@
 
 use super::arena::{NodeArena, NodeId};
 use super::node::MctsNode;
-use crate::game::{GameEngine, Outcome, Player, PolicyIndex};
+use crate::game::{GameEngine, Outcome, Player, PolicyIndex, Undoable};
 
 const DEFAULT_C_PUCT: f32 = 1.5;
 
@@ -339,7 +339,7 @@ pub fn terminal_value(outcome: Outcome, perspective: Player) -> (f32, f32) {
 /// Expand a node with a policy vector, adding children to the arena.
 /// `game` is the reconstructed game state at this node (not stored in the node).
 /// `max_children` caps how many children are created (top by softmaxed policy score).
-fn expand_with_policy<G: GameEngine>(
+fn expand_with_policy<G: GameEngine + Undoable>(
     arena: &mut NodeArena<G::Move>,
     node_id: NodeId,
     game: &mut G,
@@ -347,12 +347,13 @@ fn expand_with_policy<G: GameEngine>(
     max_children: usize,
 ) {
     arena.get_mut(node_id).is_expanded = true;
-    let child_turn = game.next_player().opposite();
+    let parent_player = game.next_player();
 
     let (_mask, indexed_moves) = game.get_legal_move_mask();
     if indexed_moves.is_empty() {
-        // Pass — child turn is opposite of current
-        let child_id = arena.alloc(Some(node_id), G::pass_move(), 1.0, child_turn);
+        // Pass — pass always alternates the turn (the only same-player chains
+        // come from in-game rules like Yinsh ClaimRow, never from a pass).
+        let child_id = arena.alloc(Some(node_id), G::pass_move(), 1.0, parent_player.opposite());
         arena.get_mut(node_id).first_child = Some(child_id);
         arena.get_mut(node_id).child_count = 1;
         return;
@@ -412,6 +413,15 @@ fn expand_with_policy<G: GameEngine>(
 
     for &i in &order {
         let (_, mv) = indexed_moves[i];
+        // Apply the move to read the *actual* next player at the child, then
+        // undo. Yinsh ClaimRow chains and other same-player transitions need
+        // child.turn_player == parent.turn_player so backprop's player-boundary
+        // sign-flip works. Hardcoding `parent.opposite()` here corrupts
+        // same-player chains. See docs/mcts_value_convention.md.
+        game.play_move(&mv).expect("legal move from get_legal_move_mask should apply");
+        let child_turn = game.next_player();
+        game.undo();
+
         let child_id = arena.alloc(Some(node_id), mv, scores[i], child_turn);
 
         if first_child_id.is_none() {
@@ -443,7 +453,7 @@ pub struct MctsSearch<G: GameEngine> {
     depth_count: u64,
 }
 
-impl<G: GameEngine> MctsSearch<G> {
+impl<G: GameEngine + Undoable> MctsSearch<G> {
     pub fn new(capacity: usize) -> Self {
         MctsSearch {
             arena: NodeArena::new(capacity, G::pass_move()),
@@ -909,6 +919,170 @@ impl<G: GameEngine> MctsSearch<G> {
 
 #[cfg(test)]
 mod tests {
-    // Tests require a concrete GameEngine implementation, so they live
-    // in the hive crate (or other game crates) rather than here.
+    //! Regression tests for the same-player-chain backprop bug
+    //! (see docs/mcts_value_convention.md).
+    //!
+    //! Yinsh's ClaimRow phase and pre-refactor Zertz mid-captures keep the
+    //! current player on consecutive nodes. Backprop's player-boundary sign
+    //! flip only works if `expand_with_policy` records each child's *actual*
+    //! post-move `next_player`, not a hardcoded `parent.opposite()`.
+
+    use super::*;
+    use crate::game::{Game, NNGame, Outcome, Player, PolicyIndex, Undoable};
+    use crate::symmetry::UnitSymmetry;
+
+    /// Tiny synthetic game with a single legal move that *keeps* the player
+    /// (a same-player transition) plus a sibling move that flips it normally.
+    /// At depth 0 only the same-player branch exists; both branches lead to a
+    /// terminal where Player1 wins. Used to verify expand_with_policy and
+    /// backprop sign together.
+    #[derive(Clone)]
+    struct ChainGame {
+        depth: u8,             // remaining moves before terminal
+        player: Player,
+        last_mover: Player,
+        history: Vec<(u8, Player, Player)>,
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    enum ChainMove {
+        Keep, // same-player chain (Yinsh ClaimRow analogue)
+        Flip, // normal alternation
+    }
+
+    impl ChainGame {
+        fn new(depth: u8) -> Self {
+            Self { depth, player: Player::Player1, last_mover: Player::Player1, history: Vec::new() }
+        }
+    }
+
+    impl Game for ChainGame {
+        type Move = ChainMove;
+        type Symmetry = UnitSymmetry;
+
+        fn next_player(&self) -> Player { self.player }
+
+        fn outcome(&self) -> Outcome {
+            if self.depth == 0 { Outcome::WonBy(self.last_mover) } else { Outcome::Ongoing }
+        }
+
+        fn valid_moves(&mut self) -> Vec<ChainMove> {
+            if self.depth == 0 { return vec![]; }
+            vec![ChainMove::Keep, ChainMove::Flip]
+        }
+
+        fn play_move(&mut self, mv: &ChainMove) -> Result<(), String> {
+            if self.depth == 0 { return Err("terminal".into()); }
+            self.history.push((self.depth, self.player, self.last_mover));
+            self.last_mover = self.player;
+            self.depth -= 1;
+            if matches!(mv, ChainMove::Flip) {
+                self.player = self.player.opposite();
+            }
+            Ok(())
+        }
+
+        fn pass_move() -> ChainMove { ChainMove::Flip }
+        fn is_pass(_mv: &ChainMove) -> bool { false }
+    }
+
+    impl Undoable for ChainGame {
+        fn undo(&mut self) {
+            let (d, p, lm) = self.history.pop().expect("undo with empty history");
+            self.depth = d;
+            self.player = p;
+            self.last_mover = lm;
+        }
+    }
+
+    impl NNGame for ChainGame {
+        const BOARD_CHANNELS: usize = 1;
+        const RESERVE_SIZE: usize = 0;
+        const NUM_POLICY_CHANNELS: usize = 1;
+        fn grid_size(&self) -> usize { 2 }
+        fn encode_board(&self, _board: &mut [f32], _reserve: &mut [f32]) {}
+        fn get_legal_move_mask(&mut self) -> (Vec<f32>, Vec<(PolicyIndex, ChainMove)>) {
+            let mvs = self.valid_moves();
+            let mask = vec![0.0f32; self.policy_size()];
+            // Distinct policy indices for each child so priors don't collide.
+            let indexed: Vec<(PolicyIndex, ChainMove)> = mvs.into_iter().enumerate()
+                .map(|(i, mv)| (PolicyIndex::Single(i), mv))
+                .collect();
+            (mask, indexed)
+        }
+    }
+
+    /// expand_with_policy must consult the *actual* post-move next_player for
+    /// each child. The Keep child stays on the parent's player; the Flip
+    /// child alternates. Pre-fix code hardcoded parent.opposite() for both,
+    /// which made the backprop comparison treat Keep as a player change.
+    #[test]
+    fn child_turn_matches_post_move_player() {
+        let mut game = ChainGame::new(2);
+        let mut arena = NodeArena::<ChainMove>::new(16, ChainMove::Flip);
+        let parent_player = game.next_player();
+        let root = arena.alloc(None, ChainMove::Flip, 0.0, parent_player);
+
+        let policy = vec![0.0f32; game.policy_size()];
+        expand_with_policy::<ChainGame>(&mut arena, root, &mut game, &policy, usize::MAX);
+
+        let mut keep_seen = false;
+        let mut flip_seen = false;
+        let mut child_id = arena.get(root).first_child;
+        while let Some(cid) = child_id {
+            let child = arena.get(cid);
+            match child.move_from_parent {
+                ChainMove::Keep => {
+                    assert_eq!(child.turn_player, parent_player,
+                        "Keep (same-player chain) must inherit parent's turn_player");
+                    keep_seen = true;
+                }
+                ChainMove::Flip => {
+                    assert_eq!(child.turn_player, parent_player.opposite(),
+                        "Flip (normal alternation) must invert turn_player");
+                    flip_seen = true;
+                }
+            }
+            child_id = child.next_sibling;
+        }
+        assert!(keep_seen && flip_seen, "both children should have been expanded");
+    }
+
+    /// End-to-end: Player1 can win in one move via the Keep branch (depth=1).
+    /// The terminal at the leaf returns +1 for Player1; backprop must propagate
+    /// that as a positive value to the root, since Keep does not cross a
+    /// player boundary. Pre-fix code stored Keep's child as Player2 and so
+    /// flipped the sign — root would have seen the win as a loss.
+    #[test]
+    fn same_player_chain_backprop_preserves_sign() {
+        let game = ChainGame::new(1);
+        let mut search = MctsSearch::<ChainGame>::new(64);
+        search.params = SearchParams::new(
+            CpuctStrategy::Constant { c_puct: 1.5 },
+            ForcedExploration::None,
+            RootNoise::None,
+        );
+
+        let policy = vec![0.0f32; game.policy_size()];
+        search.init(&game, &policy);
+
+        // 16 sims is plenty — the tree only has 2 children (both terminal at depth 0).
+        for _ in 0..16 {
+            let leaves = search.select_leaves(1);
+            if leaves.is_empty() { continue; }
+            let mut policies = Vec::new();
+            let mut values = Vec::new();
+            for _ in &leaves {
+                policies.push(vec![0.0f32; game.policy_size()]);
+                values.push(0.0f32);
+            }
+            search.expand_and_backprop(&policies, &values, &[]);
+        }
+
+        // Root is Player1 to move; both children lead to terminal WonBy(Player1).
+        // root_value() must be positive (≈ +1) — Player1 wins from root.
+        let rv = search.root_value();
+        assert!(rv > 0.5,
+            "root_value should be ~+1 for a winning position, got {}", rv);
+    }
 }
