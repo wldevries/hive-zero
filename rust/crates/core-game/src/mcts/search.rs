@@ -3,7 +3,7 @@
 
 use super::arena::{NodeArena, NodeId};
 use super::node::MctsNode;
-use crate::game::{GameEngine, Outcome, Player, PolicyIndex, Undoable};
+use crate::game::{GameEngine, Outcome, Player, PolicyIndex};
 
 const DEFAULT_C_PUCT: f32 = 1.5;
 
@@ -339,7 +339,7 @@ pub fn terminal_value(outcome: Outcome, perspective: Player) -> (f32, f32) {
 /// Expand a node with a policy vector, adding children to the arena.
 /// `game` is the reconstructed game state at this node (not stored in the node).
 /// `max_children` caps how many children are created (top by softmaxed policy score).
-fn expand_with_policy<G: GameEngine + Undoable>(
+fn expand_with_policy<G: GameEngine>(
     arena: &mut NodeArena<G::Move>,
     node_id: NodeId,
     game: &mut G,
@@ -347,13 +347,17 @@ fn expand_with_policy<G: GameEngine + Undoable>(
     max_children: usize,
 ) {
     arena.get_mut(node_id).is_expanded = true;
-    let parent_player = game.next_player();
+    // Cheap default: assume each child alternates the turn. This is wrong for
+    // same-player chains (Yinsh ClaimRow), but child.turn_player is never
+    // read until that child itself becomes a leaf — at which point
+    // `select_leaves` reconstructs the game and fixes up the value to match
+    // `game.next_player()`. See the fix-up call there for the invariant.
+    let child_turn = game.next_player().opposite();
 
     let (_mask, indexed_moves) = game.get_legal_move_mask();
     if indexed_moves.is_empty() {
-        // Pass — pass always alternates the turn (the only same-player chains
-        // come from in-game rules like Yinsh ClaimRow, never from a pass).
-        let child_id = arena.alloc(Some(node_id), G::pass_move(), 1.0, parent_player.opposite());
+        // Pass — pass always alternates the turn.
+        let child_id = arena.alloc(Some(node_id), G::pass_move(), 1.0, child_turn);
         arena.get_mut(node_id).first_child = Some(child_id);
         arena.get_mut(node_id).child_count = 1;
         return;
@@ -413,15 +417,6 @@ fn expand_with_policy<G: GameEngine + Undoable>(
 
     for &i in &order {
         let (_, mv) = indexed_moves[i];
-        // Apply the move to read the *actual* next player at the child, then
-        // undo. Yinsh ClaimRow chains and other same-player transitions need
-        // child.turn_player == parent.turn_player so backprop's player-boundary
-        // sign-flip works. Hardcoding `parent.opposite()` here corrupts
-        // same-player chains. See docs/mcts_value_convention.md.
-        game.play_move(&mv).expect("legal move from get_legal_move_mask should apply");
-        let child_turn = game.next_player();
-        game.undo();
-
         let child_id = arena.alloc(Some(node_id), mv, scores[i], child_turn);
 
         if first_child_id.is_none() {
@@ -453,7 +448,7 @@ pub struct MctsSearch<G: GameEngine> {
     depth_count: u64,
 }
 
-impl<G: GameEngine + Undoable> MctsSearch<G> {
+impl<G: GameEngine> MctsSearch<G> {
     pub fn new(capacity: usize) -> Self {
         MctsSearch {
             arena: NodeArena::new(capacity, G::pass_move()),
@@ -516,6 +511,18 @@ impl<G: GameEngine + Undoable> MctsSearch<G> {
 
             // Reconstruct game state at the leaf
             let game = self.reconstruct_game(leaf);
+
+            // Lazy fix-up: `expand_with_policy` stored a placeholder
+            // `parent.opposite()` for this node's `turn_player`, which is
+            // wrong for same-player chains (Yinsh ClaimRow, etc.). Correct it
+            // now using the actual reconstructed game state, before any code
+            // reads `node.turn_player` on this leaf — terminal backprop,
+            // virtual loss, or later `expand_and_backprop` /
+            // `correct_virtual_loss`. Backprop walking up only reads
+            // ancestors whose `turn_player` was already fixed up at *their*
+            // first encounter, so the invariant "every visited node has the
+            // right turn_player" holds inductively.
+            self.arena.get_mut(leaf).turn_player = game.next_player();
 
             if game.is_game_over() {
                 let (value, draw) = terminal_value(game.outcome(), game.next_player());
@@ -1012,40 +1019,60 @@ mod tests {
         }
     }
 
-    /// expand_with_policy must consult the *actual* post-move next_player for
-    /// each child. The Keep child stays on the parent's player; the Flip
-    /// child alternates. Pre-fix code hardcoded parent.opposite() for both,
-    /// which made the backprop comparison treat Keep as a player change.
+    /// Every visited node's stored `turn_player` must match
+    /// `game.next_player()` at that node's reconstructed state. With lazy
+    /// fix-up, this is only guaranteed for nodes that have been encountered
+    /// as a leaf at least once (visit_count >= 1) — `expand_with_policy`
+    /// stores a placeholder that's wrong on same-player chains, and
+    /// `select_leaves` corrects it on first encounter.
     #[test]
-    fn child_turn_matches_post_move_player() {
-        let mut game = ChainGame::new(2);
-        let mut arena = NodeArena::<ChainMove>::new(16, ChainMove::Flip);
-        let parent_player = game.next_player();
-        let root = arena.alloc(None, ChainMove::Flip, 0.0, parent_player);
+    fn turn_player_correct_after_visit() {
+        let game = ChainGame::new(2);
+        let mut search = MctsSearch::<ChainGame>::new(64);
+        search.params = SearchParams::new(
+            CpuctStrategy::Constant { c_puct: 1.5 },
+            ForcedExploration::None,
+            RootNoise::None,
+        );
 
         let policy = vec![0.0f32; game.policy_size()];
-        expand_with_policy::<ChainGame>(&mut arena, root, &mut game, &policy, usize::MAX);
+        search.init(&game, &policy);
 
-        let mut keep_seen = false;
-        let mut flip_seen = false;
-        let mut child_id = arena.get(root).first_child;
-        while let Some(cid) = child_id {
-            let child = arena.get(cid);
-            match child.move_from_parent {
-                ChainMove::Keep => {
-                    assert_eq!(child.turn_player, parent_player,
-                        "Keep (same-player chain) must inherit parent's turn_player");
-                    keep_seen = true;
-                }
-                ChainMove::Flip => {
-                    assert_eq!(child.turn_player, parent_player.opposite(),
-                        "Flip (normal alternation) must invert turn_player");
-                    flip_seen = true;
-                }
+        // Run enough sims that every reachable node (root + 2 + 4 = 7) is visited.
+        for _ in 0..64 {
+            let leaves = search.select_leaves(1);
+            if leaves.is_empty() { continue; }
+            let mut policies = Vec::new();
+            let mut values = Vec::new();
+            for _ in &leaves {
+                policies.push(vec![0.0f32; game.policy_size()]);
+                values.push(0.0f32);
             }
-            child_id = child.next_sibling;
+            search.expand_and_backprop(&policies, &values, &[]);
         }
-        assert!(keep_seen && flip_seen, "both children should have been expanded");
+
+        let mut stack = vec![search.root];
+        let mut visited_keep_child = false;
+        while let Some(node_id) = stack.pop() {
+            let node = search.arena.get(node_id);
+            let mut child_id = node.first_child;
+            while let Some(cid) = child_id {
+                stack.push(cid);
+                child_id = search.arena.get(cid).next_sibling;
+            }
+            if node.visit_count == 0 { continue; }
+            let actual = search.reconstruct_game(node_id).next_player();
+            assert_eq!(node.turn_player, actual,
+                "node {} has stored turn_player {:?} but reconstructed game says {:?}",
+                node_id, node.turn_player, actual);
+            // Also confirm the Keep branch (same-player chain) was exercised:
+            // it's the case the bug specifically hit.
+            if node.parent.is_some() && node.move_from_parent == ChainMove::Keep {
+                visited_keep_child = true;
+            }
+        }
+        assert!(visited_keep_child,
+            "Keep (same-player) child should have been visited; otherwise the test does not exercise the fix");
     }
 
     /// End-to-end: Player1 can win in one move via the Keep branch (depth=1).
