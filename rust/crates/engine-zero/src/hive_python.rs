@@ -515,8 +515,16 @@ fn d6_grid_permutations<'py>(py: Python<'py>, grid_size: usize) -> Vec<Bound<'py
 }
 
 /// Parse SGF content and return list of UHP move strings.
+///
+/// Rejects expansion-piece games (Mosquito/Ladybug/Pillbug) with a `ValueError`
+/// — base-only `Game` cannot store them and would panic on `linear_index`.
 #[pyfunction]
 fn parse_sgf_moves(content: &str) -> PyResult<Vec<String>> {
+    if hive_game::sgf::game_type(content) != "base" {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "expansion-piece game (M/L/P) — base-game parser only",
+        ));
+    }
     let mut game = Game::new();
     let mut moves = Vec::new();
     hive_game::sgf::replay_into_game_verbose(content, &mut game, |g, mv| {
