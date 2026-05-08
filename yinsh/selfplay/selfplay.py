@@ -277,15 +277,14 @@ class SelfPlayTrainer:
                 if opening.min != opening.max
                 else str(opening.min)
             )
-            opening_enabled = opening.max > 0
             opening_label = ""
             if opening_book:
                 opening_label = (
                     f", book={boardspace_frac:.0%} rand={rand_str}"
-                    if opening_enabled
+                    if opening.enabled()
                     else f", book={boardspace_frac:.0%}"
                 )
-            elif opening_enabled:
+            elif opening.enabled():
                 opening_label = f", rand={rand_str}"
             print(
                 f"\n=== {_cc(self.name)}  Gen {generation}  "

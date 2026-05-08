@@ -58,6 +58,9 @@ class OpeningRandomConfig:
             return cls(min=arg[0], max=arg[1])
         return cls(min=arg, max=arg)
 
+    def enabled(self) -> bool:
+        return self.max > 0
+
     def session_kwargs(self) -> dict:
         return {
             "random_opening_moves_min": self.min,
