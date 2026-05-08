@@ -1,10 +1,19 @@
-"""Inspect WDL head distribution on in-distribution positions (boardspace SGFs).
+"""Inspect WDL head distribution on in-distribution positions.
 
-Auto-detects game (hive | yinsh) from the checkpoint metadata. Walks
-`--boardspace-dir`, picks --num-games random SGFs, samples one random
-position per game, then prints WDL summary stats segmented by:
-  - hive:  move_count buckets (opening / mid / late)
-  - yinsh: phase (setup / normal / claim_row), with normal split by stage
+Auto-detects game (hive | yinsh) from the checkpoint metadata. Two sources:
+
+  --source boardspace (default): walk `--boardspace-dir`, pick --num-games
+    random SGFs, sample one random position per game.
+
+  --source replay: read the model's own `replay.h5` (locked-file safe) and
+    sample --num-games positions from the live segment. Compares the
+    model's WDL against the stored `value_targets` (game outcome) and
+    `root_q_targets` (MCTS root W-L at the played turn) — answers "is the
+    head's distribution shifting away from what self-play actually visits?"
+
+Segmentation:
+  - hive:  move_count buckets (opening / mid / late) — boardspace only.
+  - yinsh: phase (setup / normal / claim_row), normal split by stage.
 """
 import argparse
 import os
@@ -182,16 +191,93 @@ def sample_yinsh_positions(boardspace_dir: str, num_games: int, seed: int):
     return np.stack(boards), np.stack(reserves), segments
 
 
+def sample_replay_positions(replay_path: str, num: int, seed: int,
+                            recent_gens: int | None, game: str):
+    """Sample positions from a replay.h5 buffer.
+
+    Returns (boards, reserves, segments, extras), where `extras` carries
+    `value_targets`, `root_q_targets`, and `generations` for the sampled
+    rows so the caller can compare model output to stored training targets.
+    """
+    import h5py
+
+    rng = np.random.default_rng(seed)
+    try:
+        # locking=False so we can read while the trainer holds the file
+        # open in r+. h5py >=3.5 honours this on Windows.
+        f = h5py.File(replay_path, "r", locking=False)
+    except (OSError, PermissionError) as e:
+        sys.exit(
+            f"could not open {replay_path}: {e}\n"
+            "hint: replay.h5 is held by the trainer; pause selfplay or copy "
+            "the file (robocopy /B handles locked files on Windows) and pass "
+            "--replay <copy>."
+        )
+
+    with f:
+        size = int(f.attrs.get("size", 0))
+        if size == 0:
+            sys.exit(f"replay buffer at {replay_path} is empty")
+
+        gens_all = np.asarray(f["generations"][:size])
+        mask = np.ones(size, dtype=bool)
+        if recent_gens is not None:
+            cutoff = int(gens_all.max()) - recent_gens + 1
+            mask = gens_all >= cutoff
+
+        candidates = np.flatnonzero(mask)
+        if len(candidates) == 0:
+            sys.exit(f"no rows survive --recent-gens={recent_gens}")
+        take = min(num, len(candidates))
+        chosen = np.sort(rng.choice(candidates, size=take, replace=False))
+
+        boards = np.asarray(f["board_tensors"][chosen]).astype(np.float32, copy=False)
+        reserves = np.asarray(f["reserve_vectors"][chosen]).astype(np.float32, copy=False)
+        phases = np.asarray(f["phase_flags"][chosen])
+        value_targets = np.asarray(f["value_targets"][chosen]).astype(np.float32, copy=False)
+        root_q = np.asarray(f["root_q_targets"][chosen]).astype(np.float32, copy=False)
+        gens = np.asarray(f["generations"][chosen])
+
+    if game == "yinsh":
+        segments = {
+            "all":       np.ones_like(phases, dtype=bool),
+            "setup":     phases == 0,
+            "normal":    phases == 1,
+            "claim_row": phases == 2,
+        }
+    else:
+        # hive replay has phase_flags but the existing buckets are
+        # move_count-based; stick with a single "all" segment here.
+        segments = {"all": np.ones_like(phases, dtype=bool)}
+
+    extras = {
+        "value_targets": value_targets,
+        "root_q_targets": root_q,
+        "generations": gens,
+    }
+    return boards, reserves, segments, extras
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("ckpt", help="Path to model .pt checkpoint")
+    p.add_argument("--source", choices=["boardspace", "replay"], default="boardspace",
+                   help="Position source (default: boardspace)")
     p.add_argument("--boardspace-dir", default=None,
                    help="Boardspace SGF dir (default: games/{game}/boardspace)")
+    p.add_argument("--replay", default=None,
+                   help="Path to replay.h5 (default: <ckpt-dir>/replay.h5). "
+                        "Implies --source replay.")
+    p.add_argument("--recent-gens", type=int, default=None,
+                   help="Replay mode: only sample from the most recent N generations.")
     p.add_argument("--num-games", type=int, default=300)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--contempt", type=float, default=0.2)
     p.add_argument("--batch-size", type=int, default=256)
     args = p.parse_args()
+
+    if args.replay is not None:
+        args.source = "replay"
 
     game = detect_game(args.ckpt)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -200,21 +286,38 @@ def main():
         from hive.nn.model import load_checkpoint
         model, ckpt = load_checkpoint(args.ckpt)
         grid_size = ckpt.get("grid_size", 23)
-        bdir = args.boardspace_dir or "games/hive/boardspace"
-        print(f"loaded {args.ckpt} | game=hive | gen={ckpt.get('generation','?')} "
-              f"| grid={grid_size} | device={device}")
-        boards, reserves, segments = sample_hive_positions(bdir, args.num_games, grid_size, args.seed)
+        header = (f"loaded {args.ckpt} | game=hive | gen={ckpt.get('generation','?')} "
+                  f"| grid={grid_size} | device={device}")
     elif game == "yinsh":
         from yinsh.nn.model import load_checkpoint
         model, ckpt = load_checkpoint(args.ckpt)
-        bdir = args.boardspace_dir or "games/yinsh/boardspace"
-        print(f"loaded {args.ckpt} | game=yinsh | gen={ckpt.get('generation','?')} | device={device}")
-        boards, reserves, segments = sample_yinsh_positions(bdir, args.num_games, args.seed)
+        header = (f"loaded {args.ckpt} | game=yinsh | gen={ckpt.get('generation','?')} "
+                  f"| device={device}")
     else:
         sys.exit(f"unsupported game in checkpoint: {game!r}")
+    print(header)
+
+    extras = None
+    if args.source == "boardspace":
+        if game == "hive":
+            bdir = args.boardspace_dir or "games/hive/boardspace"
+            boards, reserves, segments = sample_hive_positions(
+                bdir, args.num_games, grid_size, args.seed)
+        else:
+            bdir = args.boardspace_dir or "games/yinsh/boardspace"
+            boards, reserves, segments = sample_yinsh_positions(
+                bdir, args.num_games, args.seed)
+        source_desc = bdir
+    else:
+        rpath = args.replay or os.path.join(os.path.dirname(args.ckpt), "replay.h5")
+        boards, reserves, segments, extras = sample_replay_positions(
+            rpath, args.num_games, args.seed, args.recent_gens, game)
+        source_desc = rpath
+        if args.recent_gens is not None:
+            source_desc += f" (last {args.recent_gens} gens)"
 
     model.to(device).eval()
-    print(f"sampled {boards.shape[0]} positions from {bdir}")
+    print(f"sampled {boards.shape[0]} positions from {source_desc}")
 
     # Batched inference. Both models return (policy, wdl, ...) — wdl is index 1.
     boards_t = torch.from_numpy(boards).to(device)
@@ -251,6 +354,33 @@ def main():
     print(f"With contempt={args.contempt}: W-L-c*D scalar — mean={score.mean():+.4f}, std={score.std():.4f}")
     print(f"Same with contempt=0:    W-L scalar      — mean={(W-L).mean():+.4f}, std={(W-L).std():.4f}")
     print(f"Mean shift from contempt: {(-args.contempt * D).mean():+.4f}  (should pull score toward L)")
+
+    if extras is not None:
+        vt = extras["value_targets"]
+        rq = extras["root_q_targets"]
+        gens = extras["generations"]
+        wl = W - L
+
+        wins   = (vt > 0.5).sum()
+        losses = (vt < -0.5).sum()
+        draws  = ((vt >= -0.5) & (vt <= 0.5)).sum()
+        n = len(vt)
+        print()
+        print(f"Replay sample: gens {gens.min()}..{gens.max()}, n={n}")
+        print(f"  value_targets z (game outcome): "
+              f"win={wins} ({wins/n:.1%}) draw={draws} ({draws/n:.1%}) loss={losses} ({losses/n:.1%}) "
+              f"mean={vt.mean():+.4f}")
+        rq_finite = rq[np.isfinite(rq)]
+        if rq_finite.size:
+            print(f"  root_q_targets (MCTS root W-L):  mean={rq_finite.mean():+.4f} std={rq_finite.std():.4f} "
+                  f"|q|>0.3 frac={(np.abs(rq_finite) > 0.3).mean():.2%}")
+        print(f"  model W-L on these positions:    mean={wl.mean():+.4f} std={wl.std():.4f} "
+              f"|W-L|>0.3 frac={(np.abs(wl) > 0.3).mean():.2%}")
+        corr_z = float(np.corrcoef(wl, vt)[0, 1])
+        print(f"  corr(model W-L, z):              {corr_z:+.3f}")
+        if rq_finite.size == n:
+            corr_q = float(np.corrcoef(wl, rq)[0, 1])
+            print(f"  corr(model W-L, root_q):         {corr_q:+.3f}")
 
 
 if __name__ == "__main__":
