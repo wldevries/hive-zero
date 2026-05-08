@@ -302,10 +302,18 @@ def main():
         "--value-target-q-mix",
         type=float,
         default=0.0,
+        # NOTE: currently a no-op on Hive draws. The Rust selfplay marks every
+        # position from a drawn game as policy_only (search.rs:1137), which the
+        # training loop reads as a value-loss mask BEFORE q-mix is applied
+        # (training.py value_weight = ~po_mask). q-mix produces an effective
+        # target but its loss is multiplied by zero. Useful on Yinsh/Zertz only,
+        # where draws are rare. Fix is to bypass po_mask when q_mix_lambda > 0
+        # or to use --use-heuristic instead. See docs/hive_ideas.md.
         help="KataGo-style value target mixing: blend the MCTS root W-L (no "
              "contempt) into the outcome target as (1-lambda)*z + lambda*root_q. "
              "Helps draws teach the value head 'who was ahead' rather than "
-             "collapsing to D=1. Typical 0.25-0.5; 0 = off (default).",
+             "collapsing to D=1. Typical 0.25-0.5; 0 = off (default). "
+             "WARNING: no-op on Hive draws (masked out by policy_only).",
     )
     train_parser.add_argument(
         "--augment-symmetry",
@@ -612,6 +620,16 @@ def main():
         if args.resign_threshold > 0:
             parser.error(
                 f"--resign-threshold must be negative (e.g. -0.95), got {args.resign_threshold}"
+            )
+
+        if args.value_target_q_mix > 0.0:
+            print(
+                f"WARNING: --value-target-q-mix={args.value_target_q_mix} is a no-op on Hive draws. "
+                "The Rust selfplay marks every drawn-game position as policy_only "
+                "(search.rs:1137), which masks the value loss before q-mix takes effect. "
+                "On runs with many timeout draws (Hive's typical regime) this flag has zero "
+                "effect on training. Use --use-heuristic instead, or fix po_mask handling.",
+                flush=True,
             )
 
         lr_scheduler = None
