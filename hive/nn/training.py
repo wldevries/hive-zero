@@ -480,8 +480,16 @@ class Trainer:
         place_end = NUM_PLACE_CHANNELS * gs2
 
         place_logits_flat = policy_logits[:, :place_end]
-        q = policy_logits[:, place_end:place_end + D * gs2].view(B, gs2, D)
-        k = policy_logits[:, place_end + D * gs2:].view(B, gs2, D)
+        # Q/K come from `nn.Conv2d(C, D, 1)(p).flatten(1)`, which has D-major
+        # memory layout: flat[b, d*gs2 + cell]. The Rust MCTS reads with this
+        # same stride (search.rs DotProduct: q_offset + d*g2 + src_cell).
+        # `.view(B, gs2, D)` would silently re-interpret the memory as
+        # cell-major and scramble channel<->cell, breaking gradient flow on
+        # movement priors (placements were unaffected since they use a flat
+        # gather). Keep the D-major layout, then transpose for `gather` over
+        # cells along dim 1.
+        q = policy_logits[:, place_end:place_end + D * gs2].view(B, D, gs2).transpose(1, 2)
+        k = policy_logits[:, place_end + D * gs2:].view(B, D, gs2).transpose(1, 2)
 
         p_gather = torch.gather(place_logits_flat, 1, p_idx)
 
