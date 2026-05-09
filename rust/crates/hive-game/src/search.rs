@@ -25,13 +25,50 @@ pub struct SelfPlayConfig {
     /// Fraction of games that bypass resignation and play to completion to
     /// measure resignation false-positive rate.
     pub calibration_frac: f32,
-    pub skip_timeout_games: bool,
-    pub use_heuristic: bool,
+    /// What to do with positions from games that hit `max_moves` (timeouts).
+    /// Real draws (`Draw`, `DrawByRepetition`) ignore this flag and always
+    /// train as `value=0` with `policy_only=false` — they're real outcomes.
+    pub timeout_target: TimeoutTarget,
+    /// Mixing weight λ used when `timeout_target == TimeoutTarget::QMix`. The
+    /// per-position value target becomes `λ·root_q` (z=0 for timeouts).
+    pub q_mix_lambda: f32,
     pub grid_size: usize,
     /// Fraction of games where one side plays via alphabeta `bot_depth` rather
     /// than the NN — a curriculum-style opponent for early generations.
     pub bot_frac: f32,
     pub bot_depth: u32,
+}
+
+/// Strategy for assigning value targets to *timeout* games (move cap hit).
+/// Genuine draws (repetition, no-progress) bypass this entirely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeoutTarget {
+    /// Keep positions in the buffer with `policy_only=true`; value loss is
+    /// masked at training time. Default — preserves prior behaviour.
+    Mask,
+    /// Drop the entire game (no rows added to the buffer).
+    Skip,
+    /// Run alphabeta to depth `HEURISTIC_VALUE_DEPTH` for a positional value;
+    /// fall back to mask if alphabeta returns 0.
+    Heuristic,
+    /// Train value as `λ·root_q` (the position's MCTS root W−L).
+    QMix,
+}
+
+/// Per-game source of value targets, derived from the game outcome and
+/// `SelfPlayConfig.timeout_target`. Drives both the per-record `value` and
+/// the per-game `policy_only` flag.
+enum GameValueSource {
+    /// Decisive (regular win/loss or resignation).
+    Decisive { white: f32, black: f32 },
+    /// Repetition or no-progress draw — real outcome, train as D=1.
+    RealDraw,
+    /// Timeout, value loss masked.
+    TimeoutMasked,
+    /// Timeout, alphabeta heuristic value (per-side, sign-flipped).
+    TimeoutHeuristic { white: f32, black: f32 },
+    /// Timeout, λ·root_q per-record. Lambda baked in here.
+    TimeoutQMix { lambda: f32 },
 }
 use core_game::symmetry::{D6Symmetry, Symmetry};
 
@@ -269,8 +306,8 @@ pub fn play_selfplay_core(
         resign_moves,
         resign_min_moves,
         calibration_frac,
-        skip_timeout_games,
-        use_heuristic,
+        timeout_target,
+        q_mix_lambda,
         grid_size,
         bot_frac,
         bot_depth,
@@ -1036,86 +1073,82 @@ pub fn play_selfplay_core(
     let mut bot_draws = 0u32;
 
     for game_index in 0..num_games {
-        let (outcome_w, outcome_b, decisive) = if let Some(color) = resigned_as[game_index] {
+        let game_value: GameValueSource = if let Some(color) = resigned_as[game_index] {
             resignations += 1;
             match color {
                 PieceColor::White => {
                     wins_b += 1;
-                    (-1.0f32, 1.0f32, true)
+                    GameValueSource::Decisive { white: -1.0, black: 1.0 }
                 }
                 PieceColor::Black => {
                     wins_w += 1;
-                    (1.0f32, -1.0f32, true)
+                    GameValueSource::Decisive { white: 1.0, black: -1.0 }
                 }
             }
         } else {
             match games[game_index].state {
                 GameState::WhiteWins => {
                     wins_w += 1;
-                    (1.0f32, -1.0f32, true)
+                    GameValueSource::Decisive { white: 1.0, black: -1.0 }
                 }
                 GameState::BlackWins => {
                     wins_b += 1;
-                    (-1.0f32, 1.0f32, true)
+                    GameValueSource::Decisive { white: -1.0, black: 1.0 }
                 }
                 GameState::DrawByRepetition => {
                     draws_repetition += 1;
-                    let (white_score, black_score) = if use_heuristic {
-                        crate::alphabeta::evaluate_alphabeta(
-                            &games[game_index],
-                            HEURISTIC_VALUE_DEPTH,
-                        )
-                    } else {
-                        (0.0, 0.0)
-                    };
-                    (white_score, black_score, false)
+                    GameValueSource::RealDraw
                 }
                 GameState::Draw => {
                     draws += 1;
-                    let (white_score, black_score) = if use_heuristic {
-                        crate::alphabeta::evaluate_alphabeta(
-                            &games[game_index],
-                            HEURISTIC_VALUE_DEPTH,
-                        )
-                    } else {
-                        (0.0, 0.0)
-                    };
-                    (white_score, black_score, false)
+                    GameValueSource::RealDraw
                 }
                 _ => {
                     // InProgress: game hit move cap (timeout)
                     draws_timeout += 1;
-                    let (white_score, black_score) = if use_heuristic {
-                        crate::alphabeta::evaluate_alphabeta(
-                            &games[game_index],
-                            HEURISTIC_VALUE_DEPTH,
-                        )
-                    } else {
-                        (0.0, 0.0)
-                    };
-                    (white_score, black_score, false)
+                    match timeout_target {
+                        TimeoutTarget::Skip => {
+                            // Drop the entire game from the buffer.
+                            // Bot-stat tracking still needs to fire, but no
+                            // records are emitted.
+                            if bot_colors[game_index].is_some() {
+                                bot_draws += 1;
+                            }
+                            continue;
+                        }
+                        TimeoutTarget::Mask => GameValueSource::TimeoutMasked,
+                        TimeoutTarget::Heuristic => {
+                            let (w, b) = crate::alphabeta::evaluate_alphabeta(
+                                &games[game_index],
+                                HEURISTIC_VALUE_DEPTH,
+                            );
+                            if w == 0.0 {
+                                GameValueSource::TimeoutMasked
+                            } else {
+                                GameValueSource::TimeoutHeuristic { white: w, black: b }
+                            }
+                        }
+                        TimeoutTarget::QMix => GameValueSource::TimeoutQMix { lambda: q_mix_lambda },
+                    }
                 }
             }
         };
 
         if let Some(bot_color) = bot_colors[game_index] {
-            if decisive {
-                let bot_outcome = match bot_color {
-                    PieceColor::White => outcome_w,
-                    PieceColor::Black => outcome_b,
-                };
-                if bot_outcome > 0.0 {
-                    bot_wins += 1;
-                } else {
-                    bot_losses += 1;
+            match &game_value {
+                GameValueSource::Decisive { white, black } => {
+                    let bot_outcome = match bot_color {
+                        PieceColor::White => *white,
+                        PieceColor::Black => *black,
+                    };
+                    if bot_outcome > 0.0 {
+                        bot_wins += 1;
+                    } else {
+                        bot_losses += 1;
+                    }
                 }
-            } else {
-                bot_draws += 1;
+                _ => bot_draws += 1,
             }
-        }
-
-        if !decisive && skip_timeout_games {
-            continue;
         }
 
         // For repetition-ended games, train up to and including the first occurrence
@@ -1134,13 +1167,26 @@ pub fn play_selfplay_core(
             histories[game_index].len()
         };
 
-        let policy_only = !decisive && outcome_w == 0.0;
+        // Only the masked-timeout path zeros value loss; real draws train as
+        // D=1 (the natural target from `_scalar_to_wdl(0)` on the Python side),
+        // heuristic / q-mix paths feed real signal so po_mask=false there too.
+        let policy_only = matches!(game_value, GameValueSource::TimeoutMasked);
         for record in &histories[game_index][..truncate_at] {
             let board = &board_buf[record.board_offset..record.board_offset + board_size];
             let reserve = &reserve_buf[record.reserve_offset..record.reserve_offset + RESERVE_SIZE];
-            let value = match record.turn_color {
-                PieceColor::White => outcome_w,
-                PieceColor::Black => outcome_b,
+            let value = match (&game_value, record.turn_color) {
+                (GameValueSource::Decisive { white, .. }, PieceColor::White)
+                | (GameValueSource::TimeoutHeuristic { white, .. }, PieceColor::White) => *white,
+                (GameValueSource::Decisive { black, .. }, PieceColor::Black)
+                | (GameValueSource::TimeoutHeuristic { black, .. }, PieceColor::Black) => *black,
+                (GameValueSource::RealDraw, _) | (GameValueSource::TimeoutMasked, _) => 0.0,
+                (GameValueSource::TimeoutQMix { lambda }, _) => {
+                    if record.root_q.is_nan() {
+                        0.0
+                    } else {
+                        *lambda * record.root_q
+                    }
+                }
             };
 
             result_board_data.extend_from_slice(board);

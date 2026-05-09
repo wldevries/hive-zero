@@ -270,15 +270,24 @@ def main():
         help="Fraction of games using book openings; remainder use --random-opening-moves (default: 1.0)",
     )
     train_parser.add_argument(
-        "--skip-timeout-games",
-        action="store_true",
-        help="Exclude positions from games that hit the move limit (timeouts) from training",
+        "--timeout-target",
+        choices=["mask", "skip", "heuristic", "q-mix"],
+        default="mask",
+        help="What to do with positions from games that hit --max-moves (timeouts). "
+             "Real draws (repetition, no-progress) ignore this and always train as "
+             "(W=0,D=1,L=0). "
+             "  mask (default): keep positions, value loss is zeroed (policy/aux still train). "
+             "  skip: drop the entire game from the buffer. "
+             "  heuristic: use depth-3 alphabeta eval as the value target. "
+             "  q-mix: train value as lambda * root_q (the MCTS root W-L from that turn).",
     )
     train_parser.add_argument(
-        "--use-heuristic",
-        action="store_true",
-        default=False,
-        help="Use heuristic value for draw/timeout training targets",
+        "--q-mix-lambda",
+        type=float,
+        default=0.3,
+        help="Mixing weight for --timeout-target q-mix. Per-position value target = "
+             "lambda * root_q (z=0 for timeouts). Typical 0.25-0.5; ignored unless "
+             "--timeout-target=q-mix (default: 0.3).",
     )
     train_parser.add_argument(
         "--draw-contempt",
@@ -297,23 +306,6 @@ def main():
              "it is, so the contempt side correctly models opponent as playing "
              "without draw aversion. Intended to break draw lock-in by producing "
              "decisive outcomes from genuinely asymmetric play (default: off).",
-    )
-    train_parser.add_argument(
-        "--value-target-q-mix",
-        type=float,
-        default=0.0,
-        # NOTE: currently a no-op on Hive draws. The Rust selfplay marks every
-        # position from a drawn game as policy_only (search.rs:1137), which the
-        # training loop reads as a value-loss mask BEFORE q-mix is applied
-        # (training.py value_weight = ~po_mask). q-mix produces an effective
-        # target but its loss is multiplied by zero. Useful on Yinsh/Zertz only,
-        # where draws are rare. Fix is to bypass po_mask when q_mix_lambda > 0
-        # or to use --use-heuristic instead. See docs/hive_ideas.md.
-        help="KataGo-style value target mixing: blend the MCTS root W-L (no "
-             "contempt) into the outcome target as (1-lambda)*z + lambda*root_q. "
-             "Helps draws teach the value head 'who was ahead' rather than "
-             "collapsing to D=1. Typical 0.25-0.5; 0 = off (default). "
-             "WARNING: no-op on Hive draws (masked out by policy_only).",
     )
     train_parser.add_argument(
         "--augment-symmetry",
@@ -622,16 +614,6 @@ def main():
                 f"--resign-threshold must be negative (e.g. -0.95), got {args.resign_threshold}"
             )
 
-        if args.value_target_q_mix > 0.0:
-            print(
-                f"WARNING: --value-target-q-mix={args.value_target_q_mix} is a no-op on Hive draws. "
-                "The Rust selfplay marks every drawn-game position as policy_only "
-                "(search.rs:1137), which masks the value loss before q-mix takes effect. "
-                "On runs with many timeout draws (Hive's typical regime) this flag has zero "
-                "effect on training. Use --use-heuristic instead, or fix po_mask handling.",
-                flush=True,
-            )
-
         lr_scheduler = None
         if args.lr_schedule:
             lr_scheduler = lr_scheduler_from_string(args.lr_schedule)
@@ -676,18 +658,17 @@ def main():
             opening_games_csv=args.opening_book,
             opening_boardspace_dir=args.opening_boardspace_dir,
             boardspace_frac=args.boardspace_frac,
-            skip_timeout_games=args.skip_timeout_games,
+            timeout_target=args.timeout_target,
+            q_mix_lambda=args.q_mix_lambda,
             augment_symmetry=args.augment_symmetry,
             comment=args.comment,
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
             aux_loss_scale=args.aux_loss_scale,
-            use_heuristic=args.use_heuristic,
             buf_dir=args.buf_dir,
             export_sgf=args.export_sgf,
             bot_frac=args.bot_frac if args.opponent_bot == "alphabeta" else 0.0,
             bot_depth=args.bot_depth,
-            value_target_q_mix=args.value_target_q_mix,
         )
     else:
         # Default: UHP engine

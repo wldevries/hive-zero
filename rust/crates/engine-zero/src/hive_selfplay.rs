@@ -8,9 +8,21 @@ use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE, f32_to_bf16};
 use hive_game::game::Game;
 use hive_game::move_encoding;
 use hive_game::piece::PieceColor;
-use hive_game::search::{self, play_battle_core, play_selfplay_core, SelfPlayConfig};
+use hive_game::search::{self, play_battle_core, play_selfplay_core, SelfPlayConfig, TimeoutTarget};
 
 use crate::inference::HiveInference;
+
+fn parse_timeout_target(s: &str) -> PyResult<TimeoutTarget> {
+    match s {
+        "mask" => Ok(TimeoutTarget::Mask),
+        "skip" => Ok(TimeoutTarget::Skip),
+        "heuristic" => Ok(TimeoutTarget::Heuristic),
+        "q-mix" | "q_mix" | "qmix" => Ok(TimeoutTarget::QMix),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid timeout_target {other:?}; expected one of: mask, skip, heuristic, q-mix"
+        ))),
+    }
+}
 
 /// Binding-layer wrapper: holds the hive-game `SelfPlayConfig` plus
 /// session-only fields (num_games, fixed_batch_size) that don't belong
@@ -471,8 +483,8 @@ impl PySelfPlaySession {
         calibration_frac = 0.1,
         random_opening_moves_min = 0,
         random_opening_moves_max = 0,
-        skip_timeout_games = false,
-        use_heuristic = false,
+        timeout_target = "mask".to_string(),
+        q_mix_lambda = 0.0,
         grid_size = 23,
         fixed_batch_size = None,
         draw_contempt = 0.0,
@@ -499,16 +511,17 @@ impl PySelfPlaySession {
         calibration_frac: f32,
         random_opening_moves_min: u32,
         random_opening_moves_max: u32,
-        skip_timeout_games: bool,
-        use_heuristic: bool,
+        timeout_target: String,
+        q_mix_lambda: f32,
         grid_size: usize,
         fixed_batch_size: Option<usize>,
         draw_contempt: f32,
         asymmetric_contempt: bool,
         bot_frac: f32,
         bot_depth: u32,
-    ) -> Self {
-        PySelfPlaySession {
+    ) -> PyResult<Self> {
+        let timeout_target = parse_timeout_target(&timeout_target)?;
+        Ok(PySelfPlaySession {
             session: SessionConfig {
                 num_games,
                 fixed_batch_size,
@@ -535,14 +548,14 @@ impl PySelfPlaySession {
                     resign_moves,
                     resign_min_moves,
                     calibration_frac,
-                    skip_timeout_games,
-                    use_heuristic,
+                    timeout_target,
+                    q_mix_lambda,
                     grid_size,
                     bot_frac,
                     bot_depth,
                 },
             },
-        }
+        })
     }
 
     #[pyo3(signature = (eval_fn=None, progress_fn=None, opening_sequences=None, onnx_path=None))]

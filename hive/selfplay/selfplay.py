@@ -220,8 +220,8 @@ class RustParallelSelfPlay:
         resign_min_moves: int = 20,
         calibration_frac: float = 0.1,
         fixed_batch_size: int | None = None,
-        skip_timeout_games: bool = False,
-        use_heuristic: bool = False,
+        timeout_target: str = "mask",
+        q_mix_lambda: float = 0.0,
         bot_frac: float = 0.0,
         bot_depth: int = 2,
     ):
@@ -236,8 +236,8 @@ class RustParallelSelfPlay:
         self.resign_min_moves = resign_min_moves
         self.calibration_frac = calibration_frac
         self.fixed_batch_size = fixed_batch_size
-        self.skip_timeout_games = skip_timeout_games
-        self.use_heuristic = use_heuristic
+        self.timeout_target = timeout_target
+        self.q_mix_lambda = q_mix_lambda
         self.bot_frac = bot_frac
         self.bot_depth = bot_depth
 
@@ -301,8 +301,8 @@ class RustParallelSelfPlay:
             resign_moves=self.resign_moves,
             resign_min_moves=self.resign_min_moves,
             calibration_frac=self.calibration_frac,
-            skip_timeout_games=self.skip_timeout_games,
-            use_heuristic=self.use_heuristic,
+            timeout_target=self.timeout_target,
+            q_mix_lambda=self.q_mix_lambda,
             grid_size=grid_size,
             bot_frac=self.bot_frac,
             bot_depth=self.bot_depth,
@@ -421,18 +421,17 @@ class SelfPlayTrainer:
         opening_boardspace_dir: str | None = None,
         boardspace_frac: float = 1.0,
         opening_min_elo: float = 1600.0,
-        skip_timeout_games: bool = False,
+        timeout_target: str = "mask",
+        q_mix_lambda: float = 0.0,
         augment_symmetry: bool = True,
         comment: str = "",
         use_ort: bool = False,
-        use_heuristic: bool = False,
         value_loss_scale: float = 1.0,
         aux_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
         export_sgf: bool = True,
         bot_frac: float = 0.0,
         bot_depth: int = 2,
-        value_target_q_mix: float = 0.0,
     ):
         """Run the full training loop.
 
@@ -467,7 +466,8 @@ class SelfPlayTrainer:
             "augment_symmetry": augment_symmetry,
             "draw_contempt": mcts.draw_contempt,
             "asymmetric_contempt": mcts.asymmetric_contempt,
-            "value_target_q_mix": value_target_q_mix,
+            "timeout_target": timeout_target,
+            "q_mix_lambda": q_mix_lambda,
         }
 
         # Training log (CSV, truncated on fresh start)
@@ -608,8 +608,8 @@ class SelfPlayTrainer:
                 resign_min_moves=resign_min_moves,
                 calibration_frac=calibration_frac,
                 fixed_batch_size=fixed_batch_size,
-                skip_timeout_games=skip_timeout_games,
-                use_heuristic=use_heuristic,
+                timeout_target=timeout_target,
+                q_mix_lambda=q_mix_lambda,
                 bot_frac=bot_frac,
                 bot_depth=bot_depth,
             )
@@ -846,7 +846,6 @@ class SelfPlayTrainer:
                         batch_size=batch_size,
                         value_loss_scale=value_loss_scale,
                         aux_loss_scale=aux_loss_scale,
-                        q_mix_lambda=value_target_q_mix,
                     )
                     lr = self.trainer._current_lr
                     total_s = f"{losses['total_loss']:.4f}"

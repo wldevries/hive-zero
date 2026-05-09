@@ -126,11 +126,10 @@ class HiveDataset(Dataset):
         self.movement_probs  = _ds("movement_probs",  (max_size, MAX_MOVE_PAIRS),                     np.float32)
         self.num_movements   = _ds("num_movements",   (max_size,),                                    np.int32)
         self.value_targets   = _ds("value_targets",   (max_size,),                                    np.float32)
-        # MCTS root W−L (no contempt) per sample, used for q-target value
-        # mixing in `Trainer._compute_batch_losses`. NaN disables mixing for
-        # that sample (alphabeta-bot turns, supervised pretrain). Older
-        # buffers without the dataset get one seeded from value_targets so
-        # q-mix is a no-op for those samples.
+        # MCTS root W−L (no contempt) per sample, retained for diagnostics
+        # and inspection scripts. Q-mix on timeouts is now baked into
+        # `value_targets` Rust-side (see TimeoutTarget::QMix in search.rs),
+        # so this dataset is no longer read by the loss path.
         self.root_q_targets  = _ds("root_q_targets",  (max_size,),                                    np.float32)
         self.value_only      = _ds("value_only",      (max_size,),                                    np.bool_)
         self.policy_only     = _ds("policy_only",     (max_size,),                                    np.bool_)
@@ -440,13 +439,12 @@ class Trainer:
     def _current_lr(self) -> float:
         return self.optimizer.param_groups[0]['lr']
 
-    def _compute_batch_losses(self, batch, value_loss_scale: float, aux_loss_scale: float,
-                              q_mix_lambda: float = 0.0):
+    def _compute_batch_losses(self, batch, value_loss_scale: float, aux_loss_scale: float):
         """Compute per-batch loss tensors. Shared by train_epoch and validate.
 
-        `q_mix_lambda`: KataGo-style q-target mixing weight. Effective value
-        target becomes `(1-λ)·z + λ·root_q`. NaN root_q (alphabeta-bot turns
-        and supervised pretrain samples) bypasses mixing for that sample.
+        Q-target mixing for timeout games is now baked into `value_target` at
+        Rust-side collection time (see `TimeoutTarget::QMix` in search.rs), so
+        no per-batch mixing is needed here.
         """
         (board, reserve, p_idx, p_prob, n_p,
          m_src, m_dst, m_prob, n_m,
@@ -519,13 +517,7 @@ class Trainer:
         policy_weight = (~vo_mask).float()
         policy_loss = (per_sample_policy * policy_weight).mean()
 
-        if q_mix_lambda > 0.0:
-            rq_safe = torch.where(torch.isnan(root_q), value_target, root_q)
-            effective_target = (1.0 - q_mix_lambda) * value_target + q_mix_lambda * rq_safe
-        else:
-            effective_target = value_target
-
-        wdl_target = _scalar_to_wdl(effective_target.squeeze(1))
+        wdl_target = _scalar_to_wdl(value_target.squeeze(1))
         log_wdl = torch.log_softmax(wdl_logits.float(), dim=1)
         per_sample_value = -(wdl_target * log_wdl).sum(dim=1)
         value_weight = (~po_mask).float()
@@ -555,7 +547,7 @@ class Trainer:
         }
 
     def train_epoch(self, dataset: HiveDataset, batch_size: int = 64, value_loss_scale: float = 1.0,
-                    aux_loss_scale: float = 1.0, q_mix_lambda: float = 0.0) -> dict:
+                    aux_loss_scale: float = 1.0) -> dict:
         """Train one epoch. Returns loss dict."""
         self.model.train()
         drop = self.device.type == "cuda"
@@ -566,7 +558,7 @@ class Trainer:
         num_batches = 0
 
         for batch in tqdm(loader, desc="  Training", leave=False, unit="batch"):
-            losses = self._compute_batch_losses(batch, value_loss_scale, aux_loss_scale, q_mix_lambda)
+            losses = self._compute_batch_losses(batch, value_loss_scale, aux_loss_scale)
             loss = losses["total"]
 
             if self.warmup_steps > 0 and self._step_count < self.warmup_steps:
