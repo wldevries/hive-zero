@@ -314,10 +314,14 @@ def load_filtered_games(
     min_games: int = 20,
     exclude_players: set[str] | None = None,
 ) -> list[tuple[str, str, str]]:
-    """Return a filtered list of (zip_file, sgf_name, result) tuples.
+    """Return a filtered list of (zip_basename, sgf_name, result) tuples.
 
     Filters: base games, both players ELO ≥ min_elo with ≥ min_games played,
     decisive outcome only (p0_wins or p1_wins — draws and unknowns excluded).
+    The CSV's `zip_file` column may be path-style
+    (`games/hive/boardspace\\archive-2006\\games-Aug-1-2006.zip`) or a bare
+    filename — we normalize to the basename so `build_zip_index`'s lookup
+    works either way.
     """
     qualified: set[str] = set()
     with open(elo_csv, newline="", encoding="utf-8") as f:
@@ -339,7 +343,8 @@ def load_filtered_games(
                 and row["p0"] not in exclude_players
                 and row["p1"] not in exclude_players
             ):
-                games.append((row["zip_file"], row["sgf_name"], row["result"]))
+                zip_basename = os.path.basename(row["zip_file"].replace("\\", "/"))
+                games.append((zip_basename, row["sgf_name"], row["result"]))
 
     return games
 
