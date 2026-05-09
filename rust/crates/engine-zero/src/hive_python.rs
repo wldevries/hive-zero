@@ -12,7 +12,9 @@ use crate::inference::HiveInference;
 use hive_game::game::{self, Game};
 use hive_game::move_encoding;
 use hive_game::piece::{Piece, PieceColor, PieceType};
-use hive_game::search::best_move_core;
+use hive_game::search::{
+    best_move_core, mcts_root_stats_core, HiveTerminalKind,
+};
 
 fn call_python_eval(
     eval_fn: &Bound<'_, PyAny>,
@@ -482,6 +484,135 @@ impl PyGame {
             hive_game::uhp::format_move_uhp(&self.game, &best)
         })
     }
+
+    /// Diagnostic: run MCTS at the current position and return per-root-child
+    /// stats (visit count, Q from root POV, raw policy prior, terminal kind).
+    /// Mirrors `best_move_ort`'s search path but exposes the full distribution
+    /// instead of just the best move. `forced_playouts=true` switches to the
+    /// KataGo-style soft forced-exploration that self-play uses (selection_k=0.5).
+    #[pyo3(signature = (
+        ort_session,
+        simulations=800,
+        c_puct=1.5,
+        forced_playouts=false,
+        draw_contempt=0.0,
+        dir_alpha=0.0,
+        dir_epsilon=0.0,
+        play_batch_size=8,
+    ))]
+    fn mcts_root_stats(
+        &mut self,
+        ort_session: &mut PyHiveOrtSession,
+        simulations: usize,
+        c_puct: f32,
+        forced_playouts: bool,
+        draw_contempt: f32,
+        dir_alpha: f32,
+        dir_epsilon: f32,
+        play_batch_size: usize,
+    ) -> PyResult<PyMctsRootStats> {
+        if self.game.is_game_over() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Game is already over",
+            ));
+        }
+        if self.game.clone().valid_moves().is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Only pass is legal at root",
+            ));
+        }
+
+        let gs = self.game.nn_grid_size;
+        let engine = &mut ort_session.engine;
+        let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
+            engine
+                .infer_batch(boards, reserves, batch_size, NUM_CHANNELS, gs, RESERVE_SIZE)
+                .map(|r: crate::inference::HiveInferenceResult| {
+                    let mut values = Vec::with_capacity(batch_size);
+                    let mut draws = Vec::with_capacity(batch_size);
+                    for i in 0..batch_size {
+                        values.push(r.wdl[i * 3] - r.wdl[i * 3 + 2]);
+                        draws.push(r.wdl[i * 3 + 1]);
+                    }
+                    (r.policy, values, draws)
+                })
+                .map_err(|e| e.to_string())
+        });
+
+        let root_noise = if dir_alpha > 0.0 && dir_epsilon > 0.0 {
+            RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon }
+        } else {
+            RootNoise::None
+        };
+        let forced = if forced_playouts {
+            ForcedExploration::Soft { selection_k: 0.5, pruning_k: 2.0 }
+        } else {
+            ForcedExploration::None
+        };
+        let mut search_params = SearchParams::new(
+            CpuctStrategy::Constant { c_puct },
+            forced,
+            root_noise,
+        );
+        search_params.draw_contempt = draw_contempt;
+
+        let stats = mcts_root_stats_core(
+            &self.game,
+            simulations,
+            &search_params,
+            play_batch_size,
+            core_eval,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+        let children = stats
+            .children
+            .into_iter()
+            .map(|c| PyMctsChildStat {
+                uhp_move: c.uhp_move,
+                visits: c.visit_count,
+                value: c.value,
+                prior: c.policy_prior,
+                terminal: terminal_kind_str(c.terminal).to_string(),
+            })
+            .collect();
+
+        Ok(PyMctsRootStats {
+            root_visits: stats.root_visit_count,
+            root_value: stats.root_value_raw,
+            children,
+        })
+    }
+}
+
+fn terminal_kind_str(k: HiveTerminalKind) -> &'static str {
+    match k {
+        HiveTerminalKind::NonTerminal => "ongoing",
+        HiveTerminalKind::WinForRoot => "win",
+        HiveTerminalKind::LossForRoot => "loss",
+        HiveTerminalKind::Draw => "draw",
+    }
+}
+
+/// One entry in `MctsRootStats.children`. `terminal` is one of
+/// "ongoing" / "win" / "loss" / "draw", from the root player's POV
+/// (a "loss" child is a suicide move that surrenders the game).
+#[pyclass(name = "MctsChildStat", get_all)]
+#[derive(Clone)]
+pub struct PyMctsChildStat {
+    pub uhp_move: String,
+    pub visits: u32,
+    pub value: f32,
+    pub prior: f32,
+    pub terminal: String,
+}
+
+#[pyclass(name = "MctsRootStats", get_all)]
+pub struct PyMctsRootStats {
+    pub root_visits: u32,
+    /// Search-improved Q from the root player's perspective (no contempt).
+    pub root_value: f32,
+    pub children: Vec<PyMctsChildStat>,
 }
 
 /// Compute the 12 D6 symmetry gather-permutation tables for a grid_size x grid_size board.
@@ -561,6 +692,8 @@ impl PyHiveOrtSession {
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGame>()?;
     m.add_class::<PyHiveOrtSession>()?;
+    m.add_class::<PyMctsRootStats>()?;
+    m.add_class::<PyMctsChildStat>()?;
     m.add_function(wrap_pyfunction!(parse_sgf_moves, m)?)?;
     m.add_function(wrap_pyfunction!(d6_grid_permutations, m)?)?;
     Ok(())

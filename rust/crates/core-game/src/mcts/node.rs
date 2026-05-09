@@ -26,6 +26,40 @@
 use crate::game::Player;
 use super::arena::NodeId;
 
+/// Proven outcome of a node, viewed from *that node's player's* perspective —
+/// the player to move at the node. `Win` means the player to move can force a
+/// win from this state, `Loss` means every move loses, `Draw` means the best
+/// achievable outcome is a draw.
+///
+/// Set by `select_leaves` on terminal leaves and propagated upward by
+/// `propagate_proven` whenever it can be deduced from children. Once set on a
+/// node it is monotonic (never cleared) — the underlying game tree never
+/// changes, only our knowledge of it grows.
+///
+/// Move-selection (`best_move`) and training targets (`get_*_visit_distribution`)
+/// consult these flags to prefer proven wins, avoid proven losses, and stop
+/// emitting policy mass on suicide moves regardless of how their visit count
+/// happened to land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Proven {
+    Win,
+    Loss,
+    Draw,
+}
+
+impl Proven {
+    /// Flip a proven outcome across a player boundary (Win <-> Loss; Draw stays).
+    /// Used when translating a child's proven flag into the parent's perspective.
+    #[inline]
+    pub fn flip(self) -> Self {
+        match self {
+            Self::Win => Self::Loss,
+            Self::Loss => Self::Win,
+            Self::Draw => Self::Draw,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MctsNode<M: Copy> {
     pub parent: Option<NodeId>,
@@ -53,6 +87,10 @@ pub struct MctsNode<M: Copy> {
     /// The player to move at this node (not the player who moved here).
     pub turn_player: Player,
     pub child_count: u16,
+    /// Proven outcome from this node's player's perspective, once known.
+    /// `None` until either a terminal leaf sets it directly, or all of this
+    /// node's children become proven and `propagate_proven` deduces it.
+    pub proven: Option<Proven>,
 }
 
 impl<M: Copy> MctsNode<M> {
@@ -70,6 +108,7 @@ impl<M: Copy> MctsNode<M> {
             move_from_parent: mv,
             turn_player,
             child_count: 0,
+            proven: None,
         }
     }
 

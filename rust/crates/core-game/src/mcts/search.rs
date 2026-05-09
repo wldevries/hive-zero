@@ -2,10 +2,25 @@
 /// Game states are reconstructed by replaying moves from the root, not stored per node.
 
 use super::arena::{NodeArena, NodeId};
-use super::node::MctsNode;
+use super::node::{MctsNode, Proven};
 use crate::game::{GameEngine, Outcome, Player, PolicyIndex};
 
 const DEFAULT_C_PUCT: f32 = 1.5;
+
+/// Diagnostic snapshot for a single root child. Returned by
+/// `MctsSearch::root_child_stats`. Lets callers dump per-move visit counts,
+/// Q values, raw priors, and terminal status in one pass without poking at
+/// the arena directly.
+pub struct RootChildStat<M: Copy> {
+    pub move_from_parent: M,
+    pub visit_count: u32,
+    /// Q from the root player's perspective (positive = good move for root).
+    pub value: f32,
+    /// Raw NN policy_prior; Dirichlet noise NOT mixed in.
+    pub policy_prior: f32,
+    /// Outcome of the state reached by this move (Ongoing if not terminal).
+    pub outcome: Outcome,
+}
 
 #[derive(Clone)]
 pub enum CpuctStrategy {
@@ -320,6 +335,70 @@ fn correct_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, node_id: NodeId, real
     }
 }
 
+/// Set the proven flag on a freshly-detected terminal leaf, then walk up the
+/// tree setting `proven` on every ancestor whose outcome can now be deduced.
+///
+/// Propagation stops as soon as an ancestor's outcome is still uncertain (some
+/// child unproven and no proven win-for-parent yet) — this is monotonic, so a
+/// later terminal hit can resume propagation from where this run stopped.
+///
+/// `same_player` (parent vs. child) is checked per edge so this code works for
+/// games with consecutive same-player turns (Yinsh ClaimRow, Zertz mid-capture).
+fn propagate_proven<M: Copy>(arena: &mut NodeArena<M>, leaf: NodeId, leaf_proven: Proven) {
+    arena.get_mut(leaf).proven = Some(leaf_proven);
+
+    let mut current = leaf;
+    loop {
+        let parent_id = match arena.get(current).parent {
+            None => return,
+            Some(p) => p,
+        };
+        let parent_player = arena.get(parent_id).turn_player;
+
+        // Aggregate child proven flags translated into parent's perspective.
+        let mut any_win = false;
+        let mut any_draw = false;
+        let mut all_proven = true;
+        let mut child_id = arena.get(parent_id).first_child;
+        while let Some(cid) = child_id {
+            let child = arena.get(cid);
+            let same_player = parent_player == child.turn_player;
+            match child.proven {
+                Some(p) => {
+                    let for_parent = if same_player { p } else { p.flip() };
+                    match for_parent {
+                        Proven::Win => { any_win = true; }
+                        Proven::Draw => { any_draw = true; }
+                        Proven::Loss => {} // bad for parent; doesn't help unless all are
+                    }
+                }
+                None => { all_proven = false; }
+            }
+            if any_win { break; } // a single Win is enough for the parent
+            child_id = child.next_sibling;
+        }
+
+        let new_proven = if any_win {
+            Some(Proven::Win)
+        } else if all_proven {
+            if any_draw { Some(Proven::Draw) } else { Some(Proven::Loss) }
+        } else {
+            None
+        };
+
+        match new_proven {
+            None => return,
+            Some(p) => {
+                if arena.get(parent_id).proven == Some(p) {
+                    return; // unchanged; nothing to do upstream
+                }
+                arena.get_mut(parent_id).proven = Some(p);
+                current = parent_id;
+            }
+        }
+    }
+}
+
 /// Terminal game (W−L, D) pair from a perspective, mirroring the per-leaf
 /// outputs of a WDL value head: a sure win gives (+1, 0), a sure loss gives
 /// (−1, 0), a sure draw gives (0, 1). The two components are propagated
@@ -526,6 +605,18 @@ impl<G: GameEngine> MctsSearch<G> {
 
             if game.is_game_over() {
                 let (value, draw) = terminal_value(game.outcome(), game.next_player());
+                // Mark this leaf as proven (from the leaf player's POV) and
+                // propagate the proof upward as far as it can be deduced.
+                let leaf_player = game.next_player();
+                let leaf_proven = match game.outcome() {
+                    Outcome::Draw => Some(Proven::Draw),
+                    Outcome::WonBy(p) if p == leaf_player => Some(Proven::Win),
+                    Outcome::WonBy(_) => Some(Proven::Loss),
+                    Outcome::Ongoing => None, // unreachable given is_game_over
+                };
+                if let Some(p) = leaf_proven {
+                    propagate_proven(&mut self.arena, leaf, p);
+                }
                 backpropagate(&mut self.arena, leaf, value, draw);
             } else {
                 // Apply virtual loss so subsequent selections in this batch diverge.
@@ -683,6 +774,13 @@ impl<G: GameEngine> MctsSearch<G> {
         // so the effective contempt depends on whether root.turn_player is the
         // designated contempt side.
         let contempt = effective_contempt(&self.params, root.turn_player);
+
+        // Tiered selection over root children. A child's `proven` flag is from
+        // the *child's* player's perspective; translate to root's POV per edge.
+        // Tier 0 (lowest int = best): proven Win for root — forced mate, always pick.
+        // Tier 1: unproven OR proven Draw for root — normal MCTS visit-count selection.
+        // Tier 2: proven Loss for root — suicide moves; pick only if nothing better exists.
+        let mut best_tier = u8::MAX;
         let mut best_visits = 0u32;
         let mut best_value = f32::NEG_INFINITY;
         let mut best_move = None;
@@ -690,12 +788,24 @@ impl<G: GameEngine> MctsSearch<G> {
         let mut child_id = root.first_child;
         while let Some(cid) = child_id {
             let child = self.arena.get(cid);
-            if child.visit_count > best_visits {
-                best_visits = child.visit_count;
-                best_value = child.value(contempt);
-                best_move = Some(child.move_from_parent);
-            } else if child.visit_count == best_visits && best_move.is_some() && child.value(contempt) > best_value {
-                best_value = child.value(contempt);
+            let same_player = root.turn_player == child.turn_player;
+            let tier = match child.proven {
+                Some(p) => match if same_player { p } else { p.flip() } {
+                    Proven::Win => 0u8,
+                    Proven::Draw => 1u8,
+                    Proven::Loss => 2u8,
+                },
+                None => 1u8,
+            };
+            let v = child.value(contempt);
+            let visits = child.visit_count;
+            let is_better = tier < best_tier
+                || (tier == best_tier && visits > best_visits)
+                || (tier == best_tier && visits == best_visits && best_move.is_some() && v > best_value);
+            if best_move.is_none() || is_better {
+                best_tier = tier;
+                best_visits = visits;
+                best_value = v;
                 best_move = Some(child.move_from_parent);
             }
             child_id = child.next_sibling;
@@ -704,26 +814,74 @@ impl<G: GameEngine> MctsSearch<G> {
         best_move
     }
 
+    /// Diagnostic snapshot of one root child.
+    /// `value` is from the root player's perspective (positive = good for root),
+    /// matching how UCB reads it at the root level. `policy_prior` is the raw
+    /// NN softmax — no Dirichlet noise mixed in. `outcome` is the outcome of the
+    /// state reached by playing this move from the root (Ongoing if not terminal).
+    pub fn root_child_stats(&self) -> Vec<RootChildStat<G::Move>> {
+        let root = self.arena.get(self.root);
+        let mut out = Vec::new();
+        let mut child_id = root.first_child;
+        while let Some(cid) = child_id {
+            let child = self.arena.get(cid);
+            let game = self.reconstruct_game(cid);
+            out.push(RootChildStat {
+                move_from_parent: child.move_from_parent,
+                visit_count: child.visit_count,
+                value: child.value(0.0),
+                policy_prior: child.policy_prior,
+                outcome: game.outcome(),
+            });
+            child_id = child.next_sibling;
+        }
+        out
+    }
+
     /// Get visit count distribution for training policy.
+    ///
+    /// Applies the same tier preference as `best_move`: if any root child is a
+    /// proven Win for root, the target distribution is restricted to those
+    /// (visit-weighted); if all wins are absent, proven-Loss-for-root children
+    /// are excluded so the policy head doesn't learn to put mass on suicide
+    /// moves. Only when *every* child is a proven loss do we fall back to
+    /// distributing over the loss tier.
     pub fn get_visit_distribution(&self) -> Vec<(G::Move, f32)> {
         let root = self.arena.get(self.root);
-        let mut result = Vec::new();
-        let mut total_visits = 0u32;
+        let mut tier_win: Vec<(G::Move, f32)> = Vec::new();
+        let mut tier_neutral: Vec<(G::Move, f32)> = Vec::new();
+        let mut tier_loss: Vec<(G::Move, f32)> = Vec::new();
 
         let mut child_id = root.first_child;
         while let Some(cid) = child_id {
             let child = self.arena.get(cid);
-            result.push((child.move_from_parent, child.visit_count as f32));
-            total_visits += child.visit_count;
+            let same_player = root.turn_player == child.turn_player;
+            let entry = (child.move_from_parent, child.visit_count as f32);
+            match child.proven {
+                Some(p) => match if same_player { p } else { p.flip() } {
+                    Proven::Win => tier_win.push(entry),
+                    Proven::Draw => tier_neutral.push(entry),
+                    Proven::Loss => tier_loss.push(entry),
+                },
+                None => tier_neutral.push(entry),
+            }
             child_id = child.next_sibling;
         }
 
-        if total_visits > 0 {
+        let mut result = if !tier_win.is_empty() {
+            tier_win
+        } else if !tier_neutral.is_empty() {
+            tier_neutral
+        } else {
+            tier_loss
+        };
+
+        let total: f32 = result.iter().map(|(_, v)| *v).sum();
+        if total > 0.0 {
             for item in &mut result {
-                item.1 /= total_visits as f32;
+                item.1 /= total;
             }
         }
-
         result
     }
 
@@ -731,6 +889,10 @@ impl<G: GameEngine> MctsSearch<G> {
     /// Only applies if forced exploration is enabled. Subtracts forced playouts from
     /// children that wouldn't have been chosen by normal PUCT, and prunes children
     /// reduced to <=1 visit. If forced exploration is disabled, returns unpruned distribution.
+    ///
+    /// Also applies the same proven-outcome tier filter as `get_visit_distribution`:
+    /// proven-Win-for-root children replace the whole distribution if any exist;
+    /// proven-Loss-for-root children are dropped unless they're the only option.
     pub fn get_pruned_visit_distribution(&self) -> Vec<(G::Move, f32)> {
         // Only prune if forced exploration is enabled
         let pruning_k = match &self.params.forced_exploration {
@@ -742,7 +904,7 @@ impl<G: GameEngine> MctsSearch<G> {
         let parent_visits = root.visit_count;
         let n_total = parent_visits as f32;
 
-        // Collect children: (move, raw_visits, prior, value)
+        // Collect children: (move, raw_visits, prior, value, tier)
         let eps = dir_epsilon(&self.params);
         // Root's children are evaluated from root.turn_player's perspective,
         // so use that side's effective contempt.
@@ -752,20 +914,38 @@ impl<G: GameEngine> MctsSearch<G> {
             visits: u32,
             prior: f32,
             value: f32,
+            tier: u8, // 0 = proven win for root, 1 = neutral, 2 = proven loss for root
         }
         let mut children: Vec<ChildInfo<G::Move>> = Vec::new();
         let mut child_id = root.first_child;
         while let Some(cid) = child_id {
             let child = self.arena.get(cid);
+            let same_player = root.turn_player == child.turn_player;
+            let tier = match child.proven {
+                Some(p) => match if same_player { p } else { p.flip() } {
+                    Proven::Win => 0u8,
+                    Proven::Draw => 1u8,
+                    Proven::Loss => 2u8,
+                },
+                None => 1u8,
+            };
             children.push(ChildInfo {
                 mv: child.move_from_parent,
                 visits: child.visit_count,
                 prior: child.prior(eps),
                 value: child.value(contempt),
+                tier,
             });
             child_id = child.next_sibling;
         }
 
+        if children.is_empty() {
+            return Vec::new();
+        }
+
+        // Pick the best available tier and drop everything else before pruning.
+        let best_tier = children.iter().map(|c| c.tier).min().unwrap();
+        children.retain(|c| c.tier == best_tier);
         if children.is_empty() {
             return Vec::new();
         }

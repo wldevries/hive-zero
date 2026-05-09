@@ -5,7 +5,7 @@ use rayon::prelude::*;
 
 use core_game::game::{Game as GameTrait, Outcome, Player, PolicyIndex};
 use core_game::mcts::arena::NodeId;
-use core_game::mcts::search::{CpuctStrategy, ForcedExploration, MctsSearch, RootNoise, SearchParams};
+use core_game::mcts::search::{CpuctStrategy, ForcedExploration, MctsSearch, RootChildStat, RootNoise, SearchParams};
 use core_game::selfplay_config::{MctsConfig, OpeningRandomConfig, PlayoutCapConfig};
 
 /// Self-play config for Hive. Composes the shared cross-game structs as
@@ -277,6 +277,131 @@ pub fn best_move_core(
 
     let best = search.best_move().unwrap_or_else(Move::pass);
     Ok(best)
+}
+
+/// Terminal status of a Hive root child, viewed from the *root player's* side.
+/// `WinForRoot` means playing this move wins the game outright (e.g.
+/// surrounds the opponent's queen). `LossForRoot` means it loses outright
+/// (suicide — surrounds your own queen). `Draw` covers both queens
+/// surrounded simultaneously and DrawByRepetition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HiveTerminalKind {
+    NonTerminal,
+    WinForRoot,
+    LossForRoot,
+    Draw,
+}
+
+/// Per-child diagnostic entry returned by `mcts_root_stats_core`.
+pub struct HiveChildStat {
+    pub uhp_move: String,
+    pub visit_count: u32,
+    /// Q from the root player's perspective; positive = good move for root.
+    pub value: f32,
+    /// Raw NN policy_prior; Dirichlet noise NOT mixed in.
+    pub policy_prior: f32,
+    pub terminal: HiveTerminalKind,
+}
+
+pub struct HiveRootStats {
+    pub root_visit_count: u32,
+    /// Search-improved Q from the root player's perspective.
+    pub root_value_raw: f32,
+    pub children: Vec<HiveChildStat>,
+}
+
+/// Run MCTS at `game` exactly like `best_move_core`, but instead of returning
+/// a single move, return a per-root-child snapshot for diagnostics. Reuses the
+/// same selection / batch / expansion code path so visit and Q numbers match
+/// what self-play sees. Caller controls Dirichlet noise via `params.root_noise`
+/// and forced playouts via `params.forced_exploration`.
+pub fn mcts_root_stats_core(
+    game: &Game,
+    simulations: usize,
+    params: &SearchParams,
+    leaf_batch_size: usize,
+    mut eval_fn: EvalFn<'_>,
+) -> Result<HiveRootStats, String> {
+    if game.is_game_over() {
+        return Err("Game is already over".to_string());
+    }
+    let mut probe_game = game.clone();
+    if probe_game.valid_moves().is_empty() {
+        return Err("Only pass is legal at root".to_string());
+    }
+
+    let grid_size = game.nn_grid_size;
+    let board_size = NUM_CHANNELS * grid_size * grid_size;
+    let policy_size = move_encoding::policy_size(grid_size);
+
+    let mut search = MctsSearch::<Game>::new(simulations + 64);
+    search.params = params.clone();
+
+    let mut board_buf = vec![0.0f32; board_size];
+    let mut reserve_buf = vec![0.0f32; RESERVE_SIZE];
+    board_encoding::encode_board(game, &mut board_buf, &mut reserve_buf, grid_size);
+    let (root_policy, _root_value, _root_draw) = eval_fn(&board_buf, &reserve_buf, 1)?;
+
+    search.init(game, &root_policy);
+    if let RootNoise::Dirichlet { alpha, epsilon } = params.root_noise {
+        search.apply_root_dirichlet(alpha, epsilon);
+    }
+
+    let batch = leaf_batch_size.max(1);
+    let mut done = 0usize;
+    while done < simulations {
+        let leaf_ids = search.select_leaves(batch.min(simulations - done));
+        if leaf_ids.is_empty() {
+            // Either every selected leaf was terminal-and-backpropagated, or the
+            // tree has nothing left to expand. Mirror best_move_core: stop here.
+            break;
+        }
+        let num_leaves = leaf_ids.len();
+        let mut boards = vec![0.0f32; num_leaves * board_size];
+        let mut reserves = vec![0.0f32; num_leaves * RESERVE_SIZE];
+        for (idx, &leaf_id) in leaf_ids.iter().enumerate() {
+            let (b, r) = search.encode_leaf(leaf_id);
+            boards[idx * board_size..(idx + 1) * board_size].copy_from_slice(&b);
+            reserves[idx * RESERVE_SIZE..(idx + 1) * RESERVE_SIZE].copy_from_slice(&r);
+        }
+        let (pol, vals, draws) = eval_fn(&boards, &reserves, num_leaves)?;
+        let policies: Vec<Vec<f32>> = (0..num_leaves)
+            .map(|i| pol[i * policy_size..(i + 1) * policy_size].to_vec())
+            .collect();
+        search.expand_and_backprop(&policies, &vals, &draws);
+        done += num_leaves;
+    }
+
+    let raw: Vec<RootChildStat<Move>> = search.root_child_stats();
+    let root_player = Game::color_to_player(game.turn_color);
+
+    let mut children = Vec::with_capacity(raw.len());
+    for stat in &raw {
+        let uhp_move = if stat.move_from_parent.piece.is_none() {
+            "pass".to_string()
+        } else {
+            crate::uhp::format_move_uhp(game, &stat.move_from_parent)
+        };
+        let terminal = match stat.outcome {
+            Outcome::Ongoing => HiveTerminalKind::NonTerminal,
+            Outcome::Draw => HiveTerminalKind::Draw,
+            Outcome::WonBy(p) if p == root_player => HiveTerminalKind::WinForRoot,
+            Outcome::WonBy(_) => HiveTerminalKind::LossForRoot,
+        };
+        children.push(HiveChildStat {
+            uhp_move,
+            visit_count: stat.visit_count,
+            value: stat.value,
+            policy_prior: stat.policy_prior,
+            terminal,
+        });
+    }
+
+    Ok(HiveRootStats {
+        root_visit_count: search.root_visit_count(),
+        root_value_raw: search.root_value_raw(),
+        children,
+    })
 }
 
 fn mean_std(sum: f64, sum_sq: f64, count: u64) -> (f32, f32) {
