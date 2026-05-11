@@ -1015,14 +1015,27 @@ pub fn play_selfplay_core(
             let temp = if move_num < temp_threshold { temperature } else { 0.0 };
             let mut probs: Vec<f32> = dist.iter().map(|(_, prob)| *prob).collect();
 
-            if temp == 0.0 || !is_full[index] {
+            // Fast-cap turns collapse to a one-hot at the argmax: training is
+            // masked (is_value_only=true) so the policy target is unused, and
+            // the selection branch below picks the same argmax anyway.
+            //
+            // Full-search turns with temp>0 temper-and-renormalize the raw
+            // visit distribution; the resulting probs are both the training
+            // target and the sampling distribution.
+            //
+            // Full-search turns with temp==0 keep the raw visit distribution
+            // as the training target — this matches Zertz / Yinsh and avoids
+            // collapsing the policy target to one-hot for the bulk of every
+            // game (every ply past `temp_threshold`). The selection branch
+            // below still argmaxes via its `temp == 0.0` arm.
+            if !is_full[index] {
                 let best_mv = search.best_move().unwrap();
                 let best_index = dist.iter().position(|(mv, _)| mv == &best_mv).unwrap();
                 for prob in &mut probs {
                     *prob = 0.0;
                 }
                 probs[best_index] = 1.0;
-            } else {
+            } else if temp > 0.0 {
                 for prob in &mut probs {
                     *prob = prob.powf(1.0 / temp);
                 }
