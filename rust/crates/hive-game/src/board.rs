@@ -963,4 +963,178 @@ mod tests {
             }
         }
     }
+
+    // ----- recenter / apply_shift coverage -----
+    //
+    // These exercise the shift machinery that runs on every non-pass move in
+    // self-play (`Game::play_move` -> `Board::recenter`). The default
+    // configuration uses margin=1, so the early-return is bypassed as soon as
+    // the hive grows past hex-radius 1 — meaning the recenter code path is
+    // hit on essentially every move, every game.
+
+    fn occupied_hexes(board: &Board) -> Vec<Hex> {
+        let mut hs: Vec<Hex> = board.iter_occupied().map(|(h, _)| h).collect();
+        hs.sort();
+        hs
+    }
+
+    fn snapshot_positions(board: &Board) -> [Option<(u8, u8)>; TOTAL_PIECES] {
+        board.piece_positions
+    }
+
+    #[test]
+    fn test_recenter_empty_board_is_noop() {
+        let mut board = Board::new();
+        let before = snapshot_positions(&board);
+        let shift = board.recenter(23);
+        assert_eq!(shift, (0, 0));
+        assert_eq!(board.occupied_count, 0);
+        assert_eq!(snapshot_positions(&board), before);
+    }
+
+    #[test]
+    fn test_recenter_within_view_is_noop() {
+        // margin = (23 - 23 + 2) / 2 = 1. Hex-radius 1 ring is exactly on the
+        // boundary, so a single piece at (0,0) and one neighbor stay within view.
+        let mut board = Board::new();
+        let q = Piece::new(PieceColor::White, PieceType::Queen, 1);
+        let a = Piece::new(PieceColor::White, PieceType::Ant, 1);
+        board.place_piece(q, (0, 0)).unwrap();
+        board.place_piece(a, (1, 0)).unwrap();
+
+        let before_hexes = occupied_hexes(&board);
+        let before_positions = snapshot_positions(&board);
+        let shift = board.recenter(23);
+
+        assert_eq!(shift, (0, 0), "should skip recenter when all pieces are within margin");
+        assert_eq!(occupied_hexes(&board), before_hexes);
+        assert_eq!(snapshot_positions(&board), before_positions);
+    }
+
+    #[test]
+    fn test_recenter_brings_pieces_within_view_and_preserves_geometry() {
+        // Place a 7-piece blob far from origin; default nn_grid_size=23, margin=1.
+        let mut board = Board::new();
+        let pieces = [
+            (Piece::new(PieceColor::White, PieceType::Queen, 1),   (5, 3)),
+            (Piece::new(PieceColor::White, PieceType::Ant,   1),   (6, 3)),
+            (Piece::new(PieceColor::White, PieceType::Ant,   2),   (6, 2)),
+            (Piece::new(PieceColor::White, PieceType::Spider, 1),  (5, 2)),
+            (Piece::new(PieceColor::Black, PieceType::Queen, 1),   (4, 3)),
+            (Piece::new(PieceColor::Black, PieceType::Ant,   1),   (4, 4)),
+            (Piece::new(PieceColor::Black, PieceType::Ant,   2),   (5, 4)),
+        ];
+        for (p, h) in pieces {
+            board.place_piece(p, h).unwrap();
+        }
+
+        // Pairwise offsets from the anchor piece before recenter (relative geometry).
+        let anchor_before = pieces[0].1;
+        let rel_before: Vec<(i8, i8)> = pieces.iter().map(|(_, (q, r))| {
+            (q - anchor_before.0, r - anchor_before.1)
+        }).collect();
+
+        let (dq, dr) = board.recenter(23);
+        assert_ne!((dq, dr), (0, 0), "recenter should fire when pieces are outside the NN view margin");
+
+        // After recenter: every occupied hex satisfies the in-view test.
+        let margin: i8 = 1;
+        for h in occupied_hexes(&board) {
+            let s = h.0 as i32 + h.1 as i32;
+            assert!(h.0.abs() <= margin && h.1.abs() <= margin && s.abs() <= margin as i32,
+                "piece at {:?} still outside margin {} after recenter", h, margin);
+        }
+
+        // Relative offsets between pieces are unchanged — recenter is a rigid shift.
+        let anchor_hex = board.piece_position(pieces[0].0).unwrap();
+        for ((p, _), (expected_dq, expected_dr)) in pieces.iter().zip(rel_before.iter()) {
+            let h = board.piece_position(*p).unwrap();
+            assert_eq!(h.0 - anchor_hex.0, *expected_dq, "rel q wrong for {}", p.to_uhp_string());
+            assert_eq!(h.1 - anchor_hex.1, *expected_dr, "rel r wrong for {}", p.to_uhp_string());
+        }
+
+        // The applied shift matches the change of the anchor piece's coordinates.
+        assert_eq!(anchor_hex.0 - anchor_before.0, dq);
+        assert_eq!(anchor_hex.1 - anchor_before.1, dr);
+    }
+
+    #[test]
+    fn test_recenter_idempotent_on_integer_centroid_layout() {
+        // 7 pieces with sum_q and sum_r divisible by count → integer centroid,
+        // so after one recenter the layout is exactly centered and a second
+        // recenter is a no-op (no half-integer oscillation).
+        let mut board = Board::new();
+        let pieces = [
+            (Piece::new(PieceColor::White, PieceType::Queen, 1),   (5, 3)),
+            (Piece::new(PieceColor::White, PieceType::Ant,   1),   (6, 3)),
+            (Piece::new(PieceColor::White, PieceType::Ant,   2),   (6, 2)),
+            (Piece::new(PieceColor::White, PieceType::Spider, 1),  (5, 2)),
+            (Piece::new(PieceColor::Black, PieceType::Queen, 1),   (4, 3)),
+            (Piece::new(PieceColor::Black, PieceType::Ant,   1),   (4, 4)),
+            (Piece::new(PieceColor::Black, PieceType::Ant,   2),   (5, 4)),
+        ];
+        // sum_q = 35, sum_r = 21, count = 7 → centroid (5, 3) is exact.
+        for (p, h) in pieces { board.place_piece(p, h).unwrap(); }
+
+        let first = board.recenter(23);
+        assert_eq!(first, (-5, -3));
+
+        let positions_after_first = snapshot_positions(&board);
+        let second = board.recenter(23);
+        assert_eq!(second, (0, 0), "second recenter on integer centroid must be a no-op");
+        assert_eq!(snapshot_positions(&board), positions_after_first);
+    }
+
+    #[test]
+    fn test_apply_shift_zero_is_noop() {
+        let mut board = Board::new();
+        let q = Piece::new(PieceColor::White, PieceType::Queen, 1);
+        let a = Piece::new(PieceColor::Black, PieceType::Ant, 1);
+        board.place_piece(q, (3, -2)).unwrap();
+        board.place_piece(a, (4, -2)).unwrap();
+        let before = snapshot_positions(&board);
+
+        board.apply_shift(0, 0);
+
+        assert_eq!(snapshot_positions(&board), before);
+        assert_eq!(board.piece_position(q), Some((3, -2)));
+        assert_eq!(board.piece_position(a), Some((4, -2)));
+    }
+
+    #[test]
+    fn test_apply_shift_round_trip_restores_positions_exactly() {
+        // Construct a mixed-stack board to also exercise the per-stack rebuild.
+        let mut board = Board::new();
+        let wq  = Piece::new(PieceColor::White, PieceType::Queen,  1);
+        let wb1 = Piece::new(PieceColor::White, PieceType::Beetle, 1);
+        let wa1 = Piece::new(PieceColor::White, PieceType::Ant,    1);
+        let bq  = Piece::new(PieceColor::Black, PieceType::Queen,  1);
+        let bb1 = Piece::new(PieceColor::Black, PieceType::Beetle, 1);
+        board.place_piece(wq,  (2, -1)).unwrap();
+        board.place_piece(wb1, (2, -1)).unwrap(); // stack on wQ
+        board.place_piece(wa1, (3, -1)).unwrap();
+        board.place_piece(bq,  (1,  0)).unwrap();
+        board.place_piece(bb1, (1,  0)).unwrap(); // stack on bQ
+        let before = snapshot_positions(&board);
+        let before_count = board.occupied_count;
+
+        for (dq, dr) in [(1, 0), (-2, 3), (4, -1), (0, -5)] {
+            board.apply_shift(dq, dr);
+            board.apply_shift(-dq, -dr);
+            assert_eq!(snapshot_positions(&board), before, "shift ({}, {}) did not round-trip", dq, dr);
+            assert_eq!(board.occupied_count, before_count);
+            assert_eq!(board.top_piece((2, -1)), Some(wb1), "stack order broken after shift ({}, {})", dq, dr);
+            assert_eq!(board.top_piece((1,  0)), Some(bb1), "stack order broken after shift ({}, {})", dq, dr);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "apply_shift: piece shifted out of grid bounds")]
+    fn test_apply_shift_out_of_bounds_panics() {
+        // Piece at hex (11, 0) sits at the column edge; shifting +1 in q goes off-grid.
+        let mut board = Board::new();
+        let p = Piece::new(PieceColor::White, PieceType::Queen, 1);
+        board.place_piece(p, (11, 0)).unwrap();
+        board.apply_shift(1, 0);
+    }
 }

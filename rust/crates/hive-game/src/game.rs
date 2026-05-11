@@ -1117,4 +1117,185 @@ mod tests {
             assert!(parse_and_play_uhp(&mut replay, move_str), "roundtrip failed on {move_str}");
         }
     }
+
+    // ----- play_move ↔ undo roundtrip & recenter integration -----
+
+    /// Drive a real game through `valid_moves()` for `n` plies, then undo every
+    /// move and assert `position_hash()` matches what we recorded after each
+    /// play step (and the initial hash after full unwind). This is the property
+    /// the prior single-move undo test does not check: it exercises the
+    /// recenter -> apply_shift inverse on a long, adversarial sequence.
+    fn play_and_undo_drives_n_plies(grid_size: usize, n: usize) {
+        let mut game = Game::new_with_grid_size(grid_size);
+        let initial_hash = game.position_hash();
+
+        let mut moves: Vec<Move> = Vec::with_capacity(n);
+        let mut hashes_after_play: Vec<u64> = Vec::with_capacity(n);
+
+        for ply in 0..n {
+            let legal = game.valid_moves();
+            if legal.is_empty() {
+                break;
+            }
+            // Pick the first non-pass move when one exists, otherwise the pass.
+            // valid_moves() returns moves in canonical order; the first entry
+            // is sufficient to make progress and exercises both placements and
+            // movements as the game develops.
+            let mv = *legal.iter().find(|m| !m.is_pass()).unwrap_or(&legal[0]);
+            game.play_move(&mv).unwrap_or_else(|e| {
+                panic!("play_move failed at ply {ply}: {e}");
+            });
+            moves.push(mv);
+            hashes_after_play.push(game.position_hash());
+            if game.is_game_over() {
+                break;
+            }
+        }
+        assert!(moves.len() >= 12, "expected to drive at least 12 plies, got {}", moves.len());
+
+        // Walk back, asserting hashes match exactly at every checkpoint.
+        for i in (0..moves.len()).rev() {
+            assert_eq!(
+                game.position_hash(),
+                hashes_after_play[i],
+                "hash drift before undoing move #{i}",
+            );
+            game.undo();
+        }
+        assert_eq!(game.position_hash(), initial_hash, "final unwound hash != initial");
+        assert_eq!(game.move_count, 0);
+        assert_eq!(game.state, GameState::NotStarted);
+    }
+
+    #[test]
+    fn test_play_undo_long_sequence_default_grid() {
+        // Default grid: nn_grid_size=23, margin=1 → recenter fires almost every ply.
+        play_and_undo_drives_n_plies(23, 60);
+    }
+
+    #[test]
+    fn test_play_undo_long_sequence_small_grid() {
+        // Smaller view: nn_grid_size=7, margin=9. recenter fires less often,
+        // but apply_shift is still exercised on the few plies that trigger it.
+        play_and_undo_drives_n_plies(7, 40);
+    }
+
+    /// Construct a near-terminal position where the surrounding move forces a
+    /// recenter (anchor hex offset enough to push the post-move hex-radius past
+    /// margin=1), then play the final move via `play_move`. Assert the win is
+    /// detected *after* recenter has shifted the queen back near origin —
+    /// `check_game_end` operates on the post-recenter board.
+    #[test]
+    fn test_play_move_detects_surround_after_recenter() {
+        // Black queen with five white pieces around its perimeter; one empty
+        // neighbor at (5,4). White ant at (6,4) can slide into (5,4) on
+        // white's turn, completing the surround.
+        //
+        // Anchor offset (4..6, 2..4) guarantees post-move hex-radius > margin=1,
+        // so play_move triggers a non-zero recenter before check_game_end runs.
+        let bq  = Piece::new(PieceColor::Black, PieceType::Queen, 1);
+        let wa1 = Piece::new(PieceColor::White, PieceType::Ant,   1);  // (6,4) → slides to (5,4)
+        let wa2 = Piece::new(PieceColor::White, PieceType::Ant,   2);  // surrounder
+        let ws1 = Piece::new(PieceColor::White, PieceType::Spider, 1); // surrounder
+        let ws2 = Piece::new(PieceColor::White, PieceType::Spider, 2); // surrounder
+        let wb1 = Piece::new(PieceColor::White, PieceType::Beetle, 1); // surrounder
+        let wb2 = Piece::new(PieceColor::White, PieceType::Beetle, 2); // surrounder
+
+        let mut game = Game::test_position(
+            &[
+                (bq,  (5, 3)),
+                (wa2, (6, 3)),
+                (ws1, (6, 2)),
+                (ws2, (5, 2)),
+                (wb1, (4, 3)),
+                (wb2, (4, 4)),
+                (wa1, (6, 4)), // moving piece, currently NOT a queen neighbor
+            ],
+            PieceColor::White,
+            13,
+            23,
+        );
+
+        assert_eq!(game.state, GameState::InProgress);
+        assert!(!game.is_game_over());
+
+        // Play the surrounding move via the full play_move pipeline (not
+        // direct board mutation). After this completes, recenter should have
+        // fired and check_game_end should report WhiteWins.
+        let surround = Move::movement(wa1, (6, 4), (5, 4));
+        game.play_move(&surround).expect("play_move should accept move");
+
+        assert_eq!(game.state, GameState::WhiteWins,
+            "surround via play_move must be detected after recenter");
+
+        // The recentered shift is recorded for undo and matches the centroid
+        // computation: sum_q = 5+6+6+5+4+4+5 = 35, sum_r = 3+3+2+2+3+4+4 = 21,
+        // count = 7 → shift = (-5, -3).
+        assert_eq!(game.last_recenter_shift(), (-5, -3));
+
+        // Black queen now sits at the origin and all six neighbors are occupied.
+        assert_eq!(game.board.piece_position(bq), Some((0, 0)));
+        for n in core_game::hex::hex_neighbors((0, 0)) {
+            assert!(game.board.is_occupied(n), "neighbor {:?} should be occupied", n);
+        }
+
+        // Undo restores the pre-surround position exactly.
+        game.undo();
+        assert_eq!(game.state, GameState::InProgress);
+        assert_eq!(game.board.piece_position(bq),  Some((5, 3)));
+        assert_eq!(game.board.piece_position(wa1), Some((6, 4)));
+        assert_eq!(game.board.piece_position(wa2), Some((6, 3)));
+        for n in core_game::hex::hex_neighbors((5, 3)) {
+            // (5,4) is the empty neighbor again after undo.
+            let occ = game.board.is_occupied(n);
+            if n == (5, 4) {
+                assert!(!occ, "(5,4) should be empty after undo");
+            } else {
+                assert!(occ, "neighbor {:?} should still be occupied after undo", n);
+            }
+        }
+    }
+
+    /// A placement just past the recenter margin should be remapped to the
+    /// post-recenter cell — verify both the recorded shift and the new piece
+    /// coordinates. This catches any drift between the destination encoded by
+    /// the move and the destination actually visible on the board after
+    /// `play_move` returns.
+    #[test]
+    fn test_play_move_placement_at_recenter_boundary_remaps_correctly() {
+        // Default nn_grid_size=23, margin=1.
+        // Pre-state: wQ at (1, 0), bQ at (1, 1). Both within hex-radius 1.
+        let wq = Piece::new(PieceColor::White, PieceType::Queen, 1);
+        let bq = Piece::new(PieceColor::Black, PieceType::Queen, 1);
+        let wa1 = Piece::new(PieceColor::White, PieceType::Ant, 1);
+
+        let mut game = Game::test_position(
+            &[(wq, (1, 0)), (bq, (1, 1))],
+            PieceColor::White,
+            2,
+            23,
+        );
+
+        // Placing wA1 at (2, 0) pushes the hive to span q in {1, 2} → max|q|=2
+        // exceeds margin=1, so recenter must fire.
+        let place = Move::placement(wa1, (2, 0));
+        game.play_move(&place).expect("placement should succeed");
+
+        // Centroid: sum_q = 1+1+2 = 4, sum_r = 0+1+0 = 1, count = 3.
+        // centroid_q = -((4+1)/3) = -1, centroid_r = -((1+1)/3) = 0.
+        assert_eq!(game.last_recenter_shift(), (-1, 0));
+
+        // Post-recenter coordinates: every piece is shifted by (-1, 0).
+        assert_eq!(game.board.piece_position(wq),  Some((0, 0)));
+        assert_eq!(game.board.piece_position(bq),  Some((0, 1)));
+        assert_eq!(game.board.piece_position(wa1), Some((1, 0)),
+            "newly placed piece must be at the post-recenter cell, not the pre-recenter (2,0)");
+
+        // Undo reverses the shift exactly.
+        game.undo();
+        assert_eq!(game.board.piece_position(wq),  Some((1, 0)));
+        assert_eq!(game.board.piece_position(bq),  Some((1, 1)));
+        assert_eq!(game.board.piece_position(wa1), None, "ant must be back in reserve after undo");
+        assert!(game.reserve_has(wa1));
+    }
 }
