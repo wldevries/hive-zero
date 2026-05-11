@@ -950,11 +950,24 @@ impl<G: GameEngine> MctsSearch<G> {
             return Vec::new();
         }
 
-        // Find the best child (most visits)
-        let best_idx = children.iter().enumerate()
-            .max_by_key(|(_, c)| c.visits)
-            .map(|(i, _)| i)
-            .unwrap();
+        // Find the best child — visits-then-value, first-encountered wins on
+        // full tie. Must match `best_move()`'s tiebreak so the move it picks
+        // is always present in the distribution returned below (otherwise
+        // pruning can drop a tied sibling that best_move would have selected
+        // by value, leaving a hard-to-reproduce panic at the call site).
+        let best_idx = {
+            let mut idx = 0;
+            for i in 1..children.len() {
+                let c = &children[i];
+                let b = &children[idx];
+                let is_better = c.visits > b.visits
+                    || (c.visits == b.visits && c.value > b.value);
+                if is_better {
+                    idx = i;
+                }
+            }
+            idx
+        };
         let best_visits = children[best_idx].visits;
         let best_value = children[best_idx].value;
 
@@ -1291,5 +1304,101 @@ mod tests {
         let rv = search.root_value();
         assert!(rv > 0.5,
             "root_value should be ~+1 for a winning position, got {}", rv);
+    }
+
+    /// `best_move()` and `get_pruned_visit_distribution()` must agree on which
+    /// child is "best" — otherwise pruning can drop the child best_move picks
+    /// (via its value tiebreak) and downstream callers that index into the
+    /// distribution will panic. Hand-build a tied-visit-different-value state
+    /// to exercise the tiebreak; pre-fix, get_pruned uses visits-only via
+    /// `max_by_key` and disagrees with best_move on which sibling wins.
+    #[test]
+    fn best_move_is_member_of_pruned_visit_distribution_under_ties() {
+        // Depth=2 so neither root child is terminal — both stay in the
+        // "unproven" tier=1 and we can compare them on visits + value alone.
+        // At depth=1 both children would be terminal and the proven-tier
+        // translation would put them in different tiers, side-stepping the
+        // pruning code path we want to exercise.
+        let game = ChainGame::new(2);
+        let mut search = MctsSearch::<ChainGame>::new(64);
+        // Soft forced exploration so get_pruned_visit_distribution applies
+        // its pruning logic. pruning_k is intentionally large so the
+        // subtraction loop can reduce a 5-visit child all the way to 1.
+        search.params = SearchParams::new(
+            CpuctStrategy::Constant { c_puct: 1.5 },
+            ForcedExploration::Soft { selection_k: 0.5, pruning_k: 10.0 },
+            RootNoise::None,
+        );
+
+        let policy = vec![0.5f32; game.policy_size()];
+        search.init(&game, &policy);
+
+        // Two select+expand rounds to ensure root is expanded with both
+        // children present (one leaf may be returned per call).
+        for _ in 0..4 {
+            let leaves = search.select_leaves(1);
+            if leaves.is_empty() { break; }
+            let n = leaves.len();
+            let policies: Vec<Vec<f32>> = (0..n)
+                .map(|_| vec![0.0f32; game.policy_size()])
+                .collect();
+            let values = vec![0.0f32; n];
+            search.expand_and_backprop(&policies, &values, &[]);
+        }
+
+        // Hand-set the two children to tied visit counts with different
+        // values. value = value_sum / visit_count (no contempt by default).
+        let (child_a, child_b) = {
+            let root = search.arena.get(search.root);
+            let a = root.first_child.expect("root must have children");
+            let b = search.arena.get(a).next_sibling.expect("root must have two children");
+            (a, b)
+        };
+        // Tied visit counts, but mirrored: child_a has high value + low prior,
+        // child_b has low value + high prior. With this setup:
+        //   - best_move iterates and picks child_a (encountered first, then
+        //     no strictly-better successor — child_b's value < child_a's).
+        //   - buggy max_by_key picks child_b (last of the ties).
+        //   - High prior on child_b makes its best_puct dominate, so the
+        //     pruning subtraction loop can knock child_a (low prior → small
+        //     exploration term at low visits) down to 1 visit and prune it.
+        //   - Result: best_move returns child_a but dist contains only child_b.
+        //
+        // Also clear `proven` on both children: a small search at this depth
+        // will have propagated Win up at least one branch, which would put
+        // the children in different tiers and side-step the pruning we want
+        // to exercise.
+        {
+            let a = search.arena.get_mut(child_a);
+            a.visit_count = 5;
+            a.value_sum = 5.0;        // value = 1.0
+            a.draw_sum = 0.0;
+            a.policy_prior = 0.01;
+            a.dirichlet_noise = 0.0;
+            a.proven = None;
+        }
+        {
+            let b = search.arena.get_mut(child_b);
+            b.visit_count = 5;
+            b.value_sum = 0.0;        // value = 0.0
+            b.draw_sum = 0.0;
+            b.policy_prior = 0.99;
+            b.dirichlet_noise = 0.0;
+            b.proven = None;
+        }
+        // Root visit count needs to be high enough that the pruning math
+        // (n_forced ∝ sqrt(prior * root_visits)) can drop a tied child.
+        {
+            let r = search.arena.get_mut(search.root);
+            r.visit_count = 100;
+        }
+
+        let best = search.best_move().expect("best_move must return something");
+        let dist = search.get_pruned_visit_distribution();
+        assert!(
+            dist.iter().any(|(mv, _)| *mv == best),
+            "best_move {:?} not present in pruned distribution {:?}",
+            best, dist
+        );
     }
 }
