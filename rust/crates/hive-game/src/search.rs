@@ -1029,8 +1029,19 @@ pub fn play_selfplay_core(
             // game (every ply past `temp_threshold`). The selection branch
             // below still argmaxes via its `temp == 0.0` arm.
             if !is_full[index] {
-                let best_mv = search.best_move().unwrap();
-                let best_index = dist.iter().position(|(mv, _)| mv == &best_mv).unwrap();
+                // Argmax over `probs` (the visit distribution we'll train on),
+                // NOT `search.best_move()`. The two can disagree because they
+                // break ties differently: best_move uses visits-then-value,
+                // get_pruned_visit_distribution uses visits-only and then
+                // applies forced-playout pruning, so the move best_move picks
+                // can have been pruned out of `dist` entirely (seen on fast
+                // turns where many children share a tied visit count).
+                let best_index = probs
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    .map(|(i, _)| i)
+                    .unwrap();
                 for prob in &mut probs {
                     *prob = 0.0;
                 }
