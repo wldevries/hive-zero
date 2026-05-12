@@ -515,13 +515,17 @@ class Trainer:
         per_sample_policy = per_sample_policy * has_target.float()
 
         policy_weight = (~vo_mask).float()
-        policy_loss = (per_sample_policy * policy_weight).mean()
+        # Normalize by active-sample count, not full batch: .mean() ties the
+        # policy gradient (and the logged number) to the mask fraction, so
+        # --playout-cap-p secretly scales the effective policy LR. Sum-over-
+        # active matches AlphaZero/KataGo and decouples LR from masking.
+        policy_loss = (per_sample_policy * policy_weight).sum() / policy_weight.sum().clamp(min=1.0)
 
         wdl_target = _scalar_to_wdl(value_target.squeeze(1))
         log_wdl = torch.log_softmax(wdl_logits.float(), dim=1)
         per_sample_value = -(wdl_target * log_wdl).sum(dim=1)
         value_weight = (~po_mask).float()
-        value_loss = (per_sample_value * value_weight).mean()
+        value_loss = (per_sample_value * value_weight).sum() / value_weight.sum().clamp(min=1.0)
 
         aux_mse = (aux - aux_target) ** 2
         qd_loss = aux_mse[:, 0:2].mean()
