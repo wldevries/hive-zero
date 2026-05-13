@@ -36,10 +36,11 @@ class HiveNet(nn.Module):
     Reserve vector is broadcast spatially and concatenated before the trunk.
     SpatialAttention layers additionally receive it as an adaLN-Zero conditioning signal.
 
-    Policy heads (concatenated flat output):
-        place_head: Conv1×1(C → 5, G, G)   placement logits per piece type
-        q_head:     Conv1×1(C → D, G, G)   Q embeddings for movement source
-        k_head:     Conv1×1(C → D, G, G)   K embeddings for movement destination
+    Policy heads (each with its own per-cell pre-MLP, then a final projection;
+    outputs are flattened and concatenated):
+        place: Conv1×1(C → C) + BN + ReLU → Conv1×1(C → 5)   placement logits per piece type
+        Q:     Conv1×1(C → C) + BN + ReLU → Conv1×1(C → D)   embeddings for movement source
+        K:     Conv1×1(C → C) + BN + ReLU → Conv1×1(C → D)   embeddings for movement destination
       Output: (batch, (5+2D)×G²) = [place | Q | K]
       Movement prior: Q[src] · K[dst] / sqrt(D)
 
@@ -81,8 +82,17 @@ class HiveNet(nn.Module):
                     raise ValueError(f"Unknown trunk layer type: {layer_type!r}")
 
         self.num_policy_channels = NUM_POLICY_CHANNELS
-        self.policy_conv = nn.Conv2d(channels, channels, 1, bias=False)
-        self.policy_bn = nn.BatchNorm2d(channels)
+        # Each policy head gets its own per-cell MLP (Conv1x1 + BN + ReLU)
+        # before its final projection. Place / Q / K want different features
+        # (destination quality vs source-side mover semantics vs destination-
+        # side mover semantics), so giving each its own pre-projection lets
+        # them specialise instead of fighting over a single shared layer.
+        self.policy_place_pre_conv = nn.Conv2d(channels, channels, 1, bias=False)
+        self.policy_place_pre_bn   = nn.BatchNorm2d(channels)
+        self.policy_q_pre_conv     = nn.Conv2d(channels, channels, 1, bias=False)
+        self.policy_q_pre_bn       = nn.BatchNorm2d(channels)
+        self.policy_k_pre_conv     = nn.Conv2d(channels, channels, 1, bias=False)
+        self.policy_k_pre_bn       = nn.BatchNorm2d(channels)
         self.policy_place = nn.Conv2d(channels, NUM_PLACE_CHANNELS, 1)
         self.policy_q     = nn.Conv2d(channels, bilinear_dim, 1)
         self.policy_k     = nn.Conv2d(channels, bilinear_dim, 1)
@@ -122,10 +132,12 @@ class HiveNet(nn.Module):
             else:
                 x = layer(x)
 
-        p = F.relu(self.policy_bn(self.policy_conv(x)))
-        place = self.policy_place(p).flatten(1)
-        q     = self.policy_q(p).flatten(1)
-        k     = self.policy_k(p).flatten(1)
+        place_p = F.relu(self.policy_place_pre_bn(self.policy_place_pre_conv(x)))
+        q_p     = F.relu(self.policy_q_pre_bn(self.policy_q_pre_conv(x)))
+        k_p     = F.relu(self.policy_k_pre_bn(self.policy_k_pre_conv(x)))
+        place = self.policy_place(place_p).flatten(1)
+        q     = self.policy_q(q_p).flatten(1)
+        k     = self.policy_k(k_p).flatten(1)
         policy_logits = torch.cat([place, q, k], dim=1)
 
         v = F.relu(self.value_bn(self.value_conv(x)))

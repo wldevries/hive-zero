@@ -14,10 +14,12 @@ graph TD
     RB --> TRUNK["Trunk Output<br/>(B, C, G, G)"]
     RV -.->|"adaLN cond<br/>(attn blocks only)"| RB
 
-    TRUNK --> PC["Conv1×1(C → C) + BN + ReLU"]
-    PC --> PPL["Conv1×1(C → 5)<br/>place head (B, 5, G, G)"]
-    PC --> PQ["Conv1×1(C → D)<br/>Q head (B, D, G, G)"]
-    PC --> PK["Conv1×1(C → D)<br/>K head (B, D, G, G)"]
+    TRUNK --> PCP["Conv1×1(C → C) + BN + ReLU<br/>(place pre-MLP)"]
+    PCP --> PPL["Conv1×1(C → 5)<br/>place head (B, 5, G, G)"]
+    TRUNK --> PCQ["Conv1×1(C → C) + BN + ReLU<br/>(Q pre-MLP)"]
+    PCQ --> PQ["Conv1×1(C → D)<br/>Q head (B, D, G, G)"]
+    TRUNK --> PCK["Conv1×1(C → C) + BN + ReLU<br/>(K pre-MLP)"]
+    PCK --> PK["Conv1×1(C → D)<br/>K head (B, D, G, G)"]
     PPL --> PFLAT["Concat + Flatten<br/>(B, (5+2D)·G²)"]:::output
     PQ --> PFLAT
     PK --> PFLAT
@@ -96,15 +98,17 @@ See the JSON files in `configs/hive/` for the maintained configurations (`small`
 
 ## Policy Head (bilinear Q·K)
 
-Three output heads off a shared conv+BN layer, concatenated into a flat vector:
+Three output heads, each with its own per-cell pre-MLP (`Conv1×1(C → C) + BN + ReLU`) followed by a final projection. Outputs are flattened and concatenated:
 
 ```
-Conv2d(C → C, 1×1, bias=False) + BN + ReLU   → (B, C, G, G)
-  ├── Conv2d(C → 5, 1×1)  place head         → (B, 5, G, G)   [placement: piece_type × dest]
-  ├── Conv2d(C → D, 1×1)  Q head             → (B, D, G, G)   [movement source embeddings]
-  └── Conv2d(C → D, 1×1)  K head             → (B, D, G, G)   [movement dest embeddings]
-Concat + Flatten                             → (B, (5+2D)·G²)
+trunk (B, C, G, G)
+  ├── Conv2d(C → C, 1×1, bias=False) + BN + ReLU → Conv2d(C → 5, 1×1)   place  → (B, 5, G, G)   [placement: piece_type × dest]
+  ├── Conv2d(C → C, 1×1, bias=False) + BN + ReLU → Conv2d(C → D, 1×1)   Q      → (B, D, G, G)   [movement source embeddings]
+  └── Conv2d(C → C, 1×1, bias=False) + BN + ReLU → Conv2d(C → D, 1×1)   K      → (B, D, G, G)   [movement dest embeddings]
+Concat + Flatten                                                                → (B, (5+2D)·G²)
 ```
+
+Each head is therefore a per-cell 2-layer MLP with hidden width `C`. Place, Q, and K want quite different per-cell features (destination quality vs source-side mover semantics vs destination-side mover semantics), so the pre-MLPs are not shared — that lets each specialise instead of fighting over a single shared projection. Cost is small: each pre-MLP adds `C²` weights (~16k at C=128).
 
 **D = `BILINEAR_DIM` = 32** (embedding dimension for Q·K movement head; defined in [hive/encoding/move_encoder.py](../hive/encoding/move_encoder.py)).
 
@@ -202,7 +206,7 @@ Both scales default to 1.0 and are CLI-tunable (`--value-loss-scale`, `--aux-los
 
 | File | Channels | Grid | Trunk |
 | ---- | -------- | ---- | ----- |
-| `small.json` | 64 | 17 | 6×res |
+| `small.json` | 64 | 17 | 6×res, gpba |
 | `medium.json` *(default)* | 128 | 17 | 6×res, gpba, 6×res, gpba |
 | `medium-attn.json` | 128 | 17 | 6×res, gpba, 4×res, attn, 2×res, gpba |
 | `large.json` | 192 | 17 | 6×res, gpba, 6×res, gpba, 4×res, attn |
@@ -213,9 +217,9 @@ All configs use `bilinear_dim = 32`. Param counts depend on the exact trunk; the
 - **Per `res` block**: `2·C²·9` weights (two 3×3 convs)
 - **Per `gpba` block**: `2C·C + C·C ≈ 3C²` weights (negligible)
 - **Per `attn` block** *(default 4 heads)*: `~3C² + C² + 2·(C·2C) = 8C²` weights for QKV + out_proj + 2-layer FFN, plus the adaLN projection `cond_dim·6C = 60C`
-- **Policy head**: `C² + 5C + 2·D·C = C² + (5 + 64)·C` weights
+- **Policy head**: `3·C² + 5C + 2·D·C = 3C² + (5 + 64)·C` weights (one `C²` per pre-MLP × 3 heads, plus the three final projections)
 - **Value head**: `C + 256·G² + 256·3` weights
 - **Aux head**: `C + 64·G² + 64·6` weights
 
 For example, `medium` (`C=128, G=17, D=32`, trunk = 12 res + 2 gpba) is on the order of:
-`34·128·9 + 12·(2·128²·9) + 2·3·128² + 128² + 69·128 + 128 + 256·289 + 768 + 128 + 64·289 + 384 ≈ 3.7M parameters`.
+`34·128·9 + 12·(2·128²·9) + 2·3·128² + 3·128² + 69·128 + 128 + 256·289 + 768 + 128 + 64·289 + 384 ≈ 3.7M parameters`.
