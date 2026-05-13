@@ -3,6 +3,7 @@
   "grid_size": 17,
   "bilinear_dim": 32,
   "trunk": [
-    {"type": "res", "count": 6}
+    {"type": "res", "count": 6},
+    {"type": "gpba"}
   ]
 }
