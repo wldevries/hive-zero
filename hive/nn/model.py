@@ -47,6 +47,10 @@ class HiveNet(nn.Module):
     Value head:  conv → flatten → FC(256) → softmax(3)  [W, D, L]
     Auxiliary head: conv → flatten → FC(64) → sigmoid(6)
         [my_qd, opp_qd, my_queen_escape, opp_queen_escape, my_mobility, opp_mobility]
+    Source-marginal aux head: Conv1×1(C → 1) → flatten → (B, G²) logits
+        Predicts per-cell probability that the cell is the source of a move,
+        targeting the MCTS source marginal Σ_dst π(src, dst). Pure auxiliary —
+        not consumed by MCTS, dropped from the ONNX export.
     """
 
     def __init__(self, channels: int = 64, grid_size: int = DEFAULT_GRID_SIZE,
@@ -107,6 +111,9 @@ class HiveNet(nn.Module):
         self.qd_fc1 = nn.Linear(grid_size * grid_size, 64)
         self.qd_fc2 = nn.Linear(64, 6)
 
+        # Source-marginal aux head: one scalar logit per cell.
+        self.src_head = nn.Conv2d(channels, 1, 1)
+
     def forward(self, board_tensor: torch.Tensor, reserve_vector: torch.Tensor):
         """
         Args:
@@ -120,6 +127,10 @@ class HiveNet(nn.Module):
                            wrapper softmaxes before export so ORT consumers
                            (Rust) still see probabilities.
             aux:           (batch, 6) sigmoid
+            src_logits:    (batch, G²) raw per-cell logits for the source-
+                           marginal aux task. Training applies BCE-with-logits
+                           against scatter-add of movement probs by src cell.
+                           Dropped from ONNX export.
         """
         g = board_tensor.size(-1)
         r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, g, g)
@@ -150,7 +161,9 @@ class HiveNet(nn.Module):
         qd = F.relu(self.qd_fc1(qd))
         aux = torch.sigmoid(self.qd_fc2(qd))
 
-        return policy_logits, wdl_logits, aux
+        src_logits = self.src_head(x).flatten(1)
+
+        return policy_logits, wdl_logits, aux, src_logits
 
 
 def create_model(model_config: dict | None = None) -> HiveNet:
@@ -194,7 +207,8 @@ class _OnnxExportWrapper(nn.Module):
         self.model = model
 
     def forward(self, board: torch.Tensor, reserve: torch.Tensor):
-        policy, wdl_logits, aux = self.model(board, reserve)
+        # src_logits is training-only aux; drop it from the ONNX surface.
+        policy, wdl_logits, aux, _src = self.model(board, reserve)
         wdl = F.softmax(wdl_logits, dim=1)
         return policy, wdl, aux
 

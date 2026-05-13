@@ -531,11 +531,13 @@ class SelfPlayTrainer:
                     qd_s = f"{losses.get('qd_loss', 0):.4f}"
                     qe_s = f"{losses.get('qe_loss', 0):.4f}"
                     mob_s = f"{losses.get('mob_loss', 0):.4f}"
+                    src_s = f"{losses.get('src_loss', 0):.4f}"
                     print(
                         f"  Warmup epoch {epoch + 1}/{buffer_warmup_epochs}: "
                         f"loss={_cr(total_s)} (policy={_cy(policy_s)}, "
                         f"value={_cy(value_s)}, qd={_cy(qd_s)}, "
-                        f"qe={_cy(qe_s)}, mob={_cy(mob_s)}, lr={lr})"
+                        f"qe={_cy(qe_s)}, mob={_cy(mob_s)}, "
+                        f"src={_cy(src_s)}, lr={lr})"
                     )
                 # Persist warmed-up model so a Ctrl-C before gen 1 isn't lost.
                 metadata = {**train_params, "lr": self.trainer._current_lr}
@@ -891,10 +893,12 @@ class SelfPlayTrainer:
                     qd_s = f"{losses.get('qd_loss', 0):.4f}"
                     qe_s = f"{losses.get('qe_loss', 0):.4f}"
                     mob_s = f"{losses.get('mob_loss', 0):.4f}"
+                    src_s = f"{losses.get('src_loss', 0):.4f}"
                     print(
                         f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
                         f"(policy={_cy(policy_s)}, value={_cy(value_s)}, "
-                        f"qd={_cy(qd_s)}, qe={_cy(qe_s)}, mob={_cy(mob_s)}, lr={lr})"
+                        f"qd={_cy(qd_s)}, qe={_cy(qe_s)}, mob={_cy(mob_s)}, "
+                        f"src={_cy(src_s)}, lr={lr})"
                     )
             except KeyboardInterrupt:
                 print("\n  Ctrl-C during training, saving model...")
