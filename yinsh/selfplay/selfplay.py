@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc
+from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc, bold_white
 
 from shared.lr_scheduler import LRScheduler
 from shared.optimizer_defaults import optimizer_state_compatible, resolve_resumed_lr
@@ -366,9 +366,9 @@ class SelfPlayTrainer:
 
             ss = result.search_stats
             print(
-                f"  MCTS: top-1 {ss.top1_mean:.2f}±{ss.top1_std:.2f}  "
-                f"depth {ss.depth_mean:.1f}±{ss.depth_std:.1f}  "
-                f"moves {ss.valid_moves_mean:.1f}±{ss.valid_moves_std:.1f}"
+                f"  MCTS: top-1 {bold_white(f'{ss.top1_mean:.2f}')}±{bold_white(f'{ss.top1_std:.2f}')}  "
+                f"depth {bold_white(f'{ss.depth_mean:.1f}')}±{bold_white(f'{ss.depth_std:.1f}')}  "
+                f"moves {bold_white(f'{ss.valid_moves_mean:.1f}')}±{bold_white(f'{ss.valid_moves_std:.1f}')}"
             )
 
             if playout_cap.p > 0:

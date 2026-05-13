@@ -26,7 +26,7 @@ LOG_HEADER = (
     "mcts_top1_mean,mcts_top1_std,mcts_depth_mean,mcts_depth_std,mcts_moves_mean,mcts_moves_std\n"
 )
 
-from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc
+from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc, bold_white
 
 from ..nn.model import create_model, export_onnx, load_checkpoint, save_checkpoint, _describe_trunk
 from ..nn.training import HiveDataset, Trainer
@@ -810,9 +810,9 @@ class SelfPlayTrainer:
                 )
             ss = result.search_stats
             print(
-                f"  MCTS: top-1 {ss.top1_mean:.2f}±{ss.top1_std:.2f}  "
-                f"depth {ss.depth_mean:.1f}±{ss.depth_std:.1f}  "
-                f"moves {ss.valid_moves_mean:.1f}±{ss.valid_moves_std:.1f}"
+                f"  MCTS: top-1 {bold_white(f'{ss.top1_mean:.2f}')}±{bold_white(f'{ss.top1_std:.2f}')}  "
+                f"depth {bold_white(f'{ss.depth_mean:.1f}')}±{bold_white(f'{ss.depth_std:.1f}')}  "
+                f"moves {bold_white(f'{ss.valid_moves_mean:.1f}')}±{bold_white(f'{ss.valid_moves_std:.1f}')}"
             )
             if result.calibration_would_resign > 0:
                 print(
