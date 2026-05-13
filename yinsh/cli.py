@@ -55,8 +55,17 @@ def main():
                    help="Stepped LR schedule, e.g. '0:0.1,20:0.02'. Overrides --lr.")
     t.add_argument("--replay-window", type=int, default=8)
     t.add_argument("--checkpoint-every", type=int, default=10)
-    t.add_argument("--playout-cap-p", type=float, default=0.0)
-    t.add_argument("--fast-cap", type=int, default=30)
+    t.add_argument(
+        "--playout-cap-p", type=float, default=0.0,
+        help="KataGo playout cap randomization: probability of a FULL search per turn. "
+             "The remaining (1-p) turns use --fast-cap sims and train value only. "
+             "KataGo paper §3.1 uses p=0.25 (0=disabled).",
+    )
+    t.add_argument(
+        "--fast-cap", type=int, default=30,
+        help="Simulations per fast-search turn under playout cap randomization "
+             "(KataGo's `n`; default: 30). Ignored when --playout-cap-p=0.",
+    )
     t.add_argument("--temperature", type=float, default=1.0)
     t.add_argument("--temp-threshold", type=int, default=20)
     t.add_argument("--c-puct", type=float, default=1.5)

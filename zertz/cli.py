@@ -57,8 +57,17 @@ def main():
     )
     train_parser.add_argument("--replay-window", type=int, default=8)
     train_parser.add_argument("--checkpoint-every", type=int, default=10)
-    train_parser.add_argument("--playout-cap-p", type=float, default=0.0)
-    train_parser.add_argument("--fast-cap", type=int, default=20)
+    train_parser.add_argument(
+        "--playout-cap-p", type=float, default=0.0,
+        help="KataGo playout cap randomization: probability of a FULL search per turn. "
+             "The remaining (1-p) turns use --fast-cap sims and train value only. "
+             "KataGo paper §3.1 uses p=0.25 (0=disabled).",
+    )
+    train_parser.add_argument(
+        "--fast-cap", type=int, default=20,
+        help="Simulations per fast-search turn under playout cap randomization "
+             "(KataGo's `n`; default: 20). Ignored when --playout-cap-p=0.",
+    )
     train_parser.add_argument("--temperature", type=float, default=1.0,
                               help="MCTS temperature for move selection (default: 1.0)")
     train_parser.add_argument("--temp-threshold", type=int, default=10,

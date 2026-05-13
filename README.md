@@ -69,8 +69,8 @@ Key training flags:
 | `--blocks` | 6 | Residual blocks in network |
 | `--channels` | 64 | Channels in network |
 | `--max-moves` | 200 | Max moves per game |
-| `--playout-cap-p` | 0.0 | Probability of full search per turn (KataGo-style, 0=disabled) |
-| `--fast-cap` | 20 | Simulations for fast-search turns when playout cap is enabled |
+| `--playout-cap-p` | 0.0 | Probability of full search per turn (KataGo's `p`; 0=disabled, 0.25=paper default) |
+| `--fast-cap` | 20 | Simulations for fast-search turns (KataGo's `n`; ignored when `--playout-cap-p=0`) |
 | `--checkpoint-every` | 10 | Save checkpoint every N iterations |
 | `--checkpoint-eval` | off | Enable self-play eval at each checkpoint |
 | `--time-limit` | None | Stop after N minutes |
@@ -162,8 +162,8 @@ Key training flags:
 | `--channels` | 64 | Network channels |
 | `--games` | 20 | Self-play games per iteration |
 | `--simulations` | 100 | MCTS simulations per move |
-| `--playout-cap-p` | 0.0 | Fraction of full-search turns (KataGo-style) |
-| `--fast-cap` | 20 | Simulations for fast-search turns |
+| `--playout-cap-p` | 0.0 | Probability of full search per turn (KataGo's `p`; 0=disabled, 0.25=paper default) |
+| `--fast-cap` | 20 | Simulations for fast-search turns (KataGo's `n`; ignored when `--playout-cap-p=0`) |
 | `--play-batch-sims` | 2 | MCTS rounds per GPU inference call |
 | `--temp-threshold` | 30 | Move number after which temperature drops to 0 |
 | `--augment-symmetry` / `--no-augment-symmetry` | on | Apply D6 hex symmetry augmentation (12× data) |
@@ -227,8 +227,8 @@ Key training flags:
 | `--simulations` | 200 | MCTS simulations per move |
 | `--max-moves` | 400 | Max moves per game |
 | `--replay-window` | 8 | Replay buffer size (in generations) |
-| `--playout-cap-p` | 0.0 | Fraction of full-search turns (KataGo-style) |
-| `--fast-cap` | 30 | Simulations for fast-search turns |
+| `--playout-cap-p` | 0.0 | Probability of full search per turn (KataGo's `p`; 0=disabled, 0.25=paper default) |
+| `--fast-cap` | 30 | Simulations for fast-search turns (KataGo's `n`; ignored when `--playout-cap-p=0`) |
 | `--play-batch-sims` | 8 | MCTS rounds per GPU inference call |
 | `--temp-threshold` | 20 | Move number after which temperature drops to 0 |
 | `--augment-symmetry` / `--no-augment-symmetry` | on | Apply D6 hex symmetry augmentation |

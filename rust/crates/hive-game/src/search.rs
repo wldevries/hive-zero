@@ -862,6 +862,19 @@ pub fn play_selfplay_core(
             }
         }
 
+        // Disable forced playouts on fast turns: their policy target is
+        // discarded (value-only training), and the tied-visit pruning quirk
+        // can mis-select the played move from a low-N distribution.
+        if forced_playouts {
+            for (index, &game_index) in mcts_games.iter().enumerate() {
+                searches[game_index].params.forced_exploration = if is_full[index] {
+                    ForcedExploration::Soft { selection_k: 0.5, pruning_k: 2.0 }
+                } else {
+                    ForcedExploration::None
+                };
+            }
+        }
+
         let per_game_caps: Vec<usize> = is_full
             .iter()
             .map(|&full| if full { simulations } else { fast_cap })

@@ -133,13 +133,16 @@ def main():
         "--playout-cap-p",
         type=float,
         default=0.0,
-        help="Playout cap randomization: probability of full search per turn (0=disabled, 0.25=recommended)",
+        help="KataGo playout cap randomization: probability of a FULL search per turn. "
+             "The remaining (1-p) turns use --fast-cap sims and train value only. "
+             "KataGo paper §3.1 uses p=0.25 (0=disabled).",
     )
     train_parser.add_argument(
         "--fast-cap",
         type=int,
         default=20,
-        help="Simulations for fast-search turns when playout cap is enabled (default: 20)",
+        help="Simulations per fast-search turn under playout cap randomization "
+             "(KataGo's `n`; default: 20). Ignored when --playout-cap-p=0.",
     )
     train_parser.add_argument(
         "--forced-playouts",
