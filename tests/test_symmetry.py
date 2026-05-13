@@ -136,7 +136,7 @@ class TestDatasetAugmentation:
         ds.augment_symmetry = True
         (b, rv, p_idx, p_prob, n_p,
          m_src, m_dst, m_prob, n_m,
-         v, vo, po, aux) = ds[0]
+         v, _root_q, vo, po, aux) = ds[0]
         assert b.shape == (NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
         assert rv.shape == (RESERVE_SIZE,)
         assert p_idx.shape == (MAX_PLACEMENTS,)

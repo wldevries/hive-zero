@@ -88,7 +88,7 @@ def test_selfplay_with_bot_produces_decisive_games():
     (
         _boards, _reserves,
         (_place_idx, place_probs, num_placements),
-        values, vo, _po, _aux,
+        values, _root_q, vo, _po, _aux,
         (_movement_src, _movement_dst, movement_probs, num_movements),
     ) = result.training_data()
     assert sum(vo) == 0, (

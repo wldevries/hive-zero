@@ -118,7 +118,7 @@ def test_dataset_augmentation_preserves_sums(engine_zero):
         num_games=1, simulations=4, c_puct=1.5, play_batch_size=1,
     )
     result = session.play_games(eval_fn)
-    boards, _, policies, _, _, _ = result.training_data()
+    boards, _, policies, _, _, _, _ = result.training_data()
     boards = np.asarray(boards)
     policies = np.asarray(policies)
     assert boards.shape[0] > 0
@@ -190,7 +190,7 @@ def test_smoke_selfplay_then_train(engine_zero):
     result = session.play_games(eval_fn)
     assert result.num_samples > 0
 
-    boards, reserves, policies, values, value_only, phase_flags = result.training_data()
+    boards, reserves, policies, values, _root_q, value_only, phase_flags = result.training_data()
     boards = np.asarray(boards)
     assert boards.shape[1] == NUM_CHANNELS * GRID_SIZE * GRID_SIZE
     assert np.asarray(reserves).shape[1] == RESERVE_SIZE
