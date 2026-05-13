@@ -97,6 +97,14 @@ def main():
     train_parser.add_argument(
         "--epochs", type=int, default=1, help="Training epochs per generation"
     )
+    train_parser.add_argument(
+        "--buffer-warmup-epochs",
+        type=int,
+        default=0,
+        help="Before the first self-play generation, run N training epochs on "
+             "the existing replay buffer. No-op if the buffer is empty. "
+             "Useful after pretrain or when resuming with a populated buffer.",
+    )
     train_parser.add_argument("--training-batch-size", type=int, default=512)
     train_parser.add_argument(
         "--name", type=str, default="hive",
@@ -646,6 +654,7 @@ def main():
             num_generations=args.generations,
             games_per_gen=args.games,
             epochs_per_gen=args.epochs,
+            buffer_warmup_epochs=args.buffer_warmup_epochs,
             batch_size=args.training_batch_size,
             max_moves=args.max_moves,
             time_limit_minutes=args.time_limit,

@@ -404,6 +404,7 @@ class SelfPlayTrainer:
         num_generations: int | None = None,
         games_per_gen: int = 10,
         epochs_per_gen: int = 1,
+        buffer_warmup_epochs: int = 0,
         batch_size: int = 64,
         max_moves: int = 200,
         time_limit_minutes: float | None = None,
@@ -504,6 +505,42 @@ class SelfPlayTrainer:
             buf_dir=resolved_buf_dir,
         )
         replay_buffer.augment_symmetry = augment_symmetry
+
+        # Optional warmup: train on the existing replay buffer before the
+        # first self-play generation. Useful when resuming with a populated
+        # buffer or after a pretrain run wrote into replay.h5.
+        if buffer_warmup_epochs > 0:
+            if replay_buffer.raw_size == 0:
+                print(f"\n=== {_cc(self.model_name)}  Buffer warmup skipped (empty buffer) ===")
+            else:
+                print(
+                    f"\n=== {_cc(self.model_name)}  Buffer warmup: "
+                    f"{buffer_warmup_epochs} epoch(s) on {replay_buffer.raw_size} samples ==="
+                )
+                for epoch in range(buffer_warmup_epochs):
+                    losses = self.trainer.train_epoch(
+                        replay_buffer,
+                        batch_size=batch_size,
+                        value_loss_scale=value_loss_scale,
+                        aux_loss_scale=aux_loss_scale,
+                    )
+                    lr = self.trainer._current_lr
+                    total_s = f"{losses['total_loss']:.4f}"
+                    policy_s = f"{losses['policy_loss']:.4f}"
+                    value_s = f"{losses['value_loss']:.4f}"
+                    qd_s = f"{losses.get('qd_loss', 0):.4f}"
+                    qe_s = f"{losses.get('qe_loss', 0):.4f}"
+                    mob_s = f"{losses.get('mob_loss', 0):.4f}"
+                    print(
+                        f"  Warmup epoch {epoch + 1}/{buffer_warmup_epochs}: "
+                        f"loss={_cr(total_s)} (policy={_cy(policy_s)}, "
+                        f"value={_cy(value_s)}, qd={_cy(qd_s)}, "
+                        f"qe={_cy(qe_s)}, mob={_cy(mob_s)}, lr={lr})"
+                    )
+                # Persist warmed-up model so a Ctrl-C before gen 1 isn't lost.
+                metadata = {**train_params, "lr": self.trainer._current_lr}
+                save_checkpoint(self.model, self.model_path, self.start_generation,
+                                metadata, optimizer=self.trainer.optimizer)
 
         # Opening book: load boardspace game sequences if configured
         opening_book: list[list[str]] = []
