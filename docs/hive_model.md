@@ -5,28 +5,29 @@
 ```mermaid
 graph TD
     BT["Board Tensor<br/>(B, 24, G, G)"]:::input --> CAT["Concat"]
-    RV["Reserve Vector<br/>(B, 10)"]:::input --> BC["Broadcast to (B, 10, G, G)"]
+    RV["Reserve Vector<br/>(B, 10)"]:::input --> BC["Broadcast → (B, 10, G, G)"]
     BC --> CAT
     CAT --> INPUT["(B, 34, G, G)"]
 
-    INPUT --> IC["Input Conv2d(34 → C, 3x3) + BN + ReLU"]
-    IC --> RB["N × ResBlock<br/>Conv3x3 + BN + ReLU + Conv3x3 + BN + skip"]
+    INPUT --> IC["Input Conv2d(34 → C, 3×3, pad=1) + BN + ReLU"]
+    IC --> RB["Trunk<br/>configurable sequence of<br/>res / gpba / attn blocks"]
     RB --> TRUNK["Trunk Output<br/>(B, C, G, G)"]
+    RV -.->|"adaLN cond<br/>(attn blocks only)"| RB
 
-    TRUNK --> PC["Conv1x1(C → C) + BN + ReLU"]
-    PC --> PPL["Conv1x1(C → 5)<br/>place head (B, 5, G, G)"]
-    PC --> PQ["Conv1x1(C → D)<br/>Q head (B, D, G, G)"]
-    PC --> PK["Conv1x1(C → D)<br/>K head (B, D, G, G)"]
+    TRUNK --> PC["Conv1×1(C → C) + BN + ReLU"]
+    PC --> PPL["Conv1×1(C → 5)<br/>place head (B, 5, G, G)"]
+    PC --> PQ["Conv1×1(C → D)<br/>Q head (B, D, G, G)"]
+    PC --> PK["Conv1×1(C → D)<br/>K head (B, D, G, G)"]
     PPL --> PFLAT["Concat + Flatten<br/>(B, (5+2D)·G²)"]:::output
     PQ --> PFLAT
     PK --> PFLAT
 
-    TRUNK --> VC["Conv1x1(C → 1) + BN + ReLU"]
+    TRUNK --> VC["Conv1×1(C → 1) + BN + ReLU"]
     VC --> VF["Flatten → (B, G·G)"]
-    VF --> VFC["Linear(G·G → 256) + ReLU<br/>Linear(256 → 1) + tanh"]
-    VFC --> VOUT["Value<br/>(B, 1)"]:::output
+    VF --> VFC["Linear(G·G → 256) + ReLU<br/>Linear(256 → 3)"]
+    VFC --> VOUT["WDL logits<br/>(B, 3)"]:::output
 
-    TRUNK --> AC["Conv1x1(C → 1) + BN + ReLU"]
+    TRUNK --> AC["Conv1×1(C → 1) + BN + ReLU"]
     AC --> AF["Flatten → (B, G·G)"]
     AF --> AFC["Linear(G·G → 64) + ReLU<br/>Linear(64 → 6) + sigmoid"]
     AFC --> AOUT["Auxiliary<br/>(B, 6)"]:::output
@@ -37,10 +38,10 @@ graph TD
 
 ## Input
 
-Tensor dimensions use `(B, ...)` notation where B = batch size.
+Tensor dimensions use `(B, ...)` notation where B = batch size. `G` is the encoding grid size (odd, configurable; the physical board is always 23×23, but the NN encoding can be smaller).
 
 ### Board tensor: `(B, 24, G, G)`
-24 channels on a GxG grid (default G=23, configurable, must be odd). Flat-top axial hex coordinates centered on the grid. All channels are current-player-relative. Piece channels use type identity (no per-individual numbering).
+24 channels on a G×G grid. Flat-top axial hex coordinates centered on the grid. All channels are current-player-relative. Piece channels use type identity (no per-individual numbering).
 
 | Channels | Content |
 |----------|---------|
@@ -65,114 +66,156 @@ Current-player-relative piece counts remaining in hand.
 
 ## Trunk
 
-Reserve vector is broadcast spatially and concatenated with the board tensor before the trunk:
-`(B, 24, G, G)` + `(B, 10, G, G)` → `(B, 34, G, G)`
+The reserve vector is broadcast spatially and concatenated with the board tensor before the trunk:
+`(B, 24, G, G)` + `(B, 10, G, G)` → `(B, 34, G, G)`.
 
 ```
-Input Conv2d(34 -> C, 3x3, pad=1) + BN + ReLU
+Input Conv2d(34 → C, 3×3, pad=1, bias=False) + BN + ReLU
   |
-N x ResBlock:
-  Conv2d(C -> C, 3x3, pad=1) + BN + ReLU
-  Conv2d(C -> C, 3x3, pad=1) + BN
-  + skip connection + ReLU
+trunk: ordered sequence of layers, each one of:
+  res   — ResBlock
+  gpba  — GlobalPoolBias  (KataGo-style global context)
+  attn  — SpatialAttention (multi-head self-attention with adaLN-Zero,
+                            conditioned on the raw reserve vector)
 ```
-Output: `(B, C, G, G)`
+Output: `(B, C, G, G)`.
 
-Default config: **C=128, N=10** (10 residual blocks, 128 channels)
+The trunk is described by a `trunk` list in the model config (each entry has a `type` and an optional `count`), e.g.:
+
+```json
+[{"type": "res", "count": 6}, {"type": "gpba"}, {"type": "res", "count": 6}, {"type": "gpba"}]
+```
+
+See the JSON files in `configs/hive/` for the maintained configurations (`small`, `medium`, `medium-attn`, `large`).
+
+### Trunk block details
+
+- **res** — two `Conv2d(C → C, 3×3, pad=1, bias=False) + BN`, ReLU after the first, residual add then ReLU after the second.
+- **gpba** — global mean+max pool over H×W → `FC(2C → C) + ReLU` → `FC(C → C)` (zero-initialised) → broadcast as a per-channel bias added back to every spatial cell. Starts as identity; learns whole-board context without quadratic cost.
+- **attn** — multi-head self-attention (default 4 heads) over the H·W spatial tokens, with a feed-forward block. Uses adaLN-Zero modulation conditioned on the reserve vector: the reserve is projected to per-channel `(scale, shift, gate)` for both the attention and FFN sub-blocks; gates are zero-initialised so the block starts as identity. This is the only place the raw reserve vector re-enters the network after the input concat.
 
 ## Policy Head (bilinear Q·K)
 
 Three output heads off a shared conv+BN layer, concatenated into a flat vector:
 
 ```
-Conv2d(C -> C, 1x1) + BN + ReLU           -> (B, C, G, G)
-  ├── Conv2d(C -> 5, 1x1)  place head     -> (B, 5, G, G)   [placement: piece_type × dest]
-  ├── Conv2d(C -> D, 1x1)  Q head         -> (B, D, G, G)   [movement source embeddings]
-  └── Conv2d(C -> D, 1x1)  K head         -> (B, D, G, G)   [movement dest embeddings]
-Concat + Flatten                          -> (B, (5+2D)*G²)
+Conv2d(C → C, 1×1, bias=False) + BN + ReLU   → (B, C, G, G)
+  ├── Conv2d(C → 5, 1×1)  place head         → (B, 5, G, G)   [placement: piece_type × dest]
+  ├── Conv2d(C → D, 1×1)  Q head             → (B, D, G, G)   [movement source embeddings]
+  └── Conv2d(C → D, 1×1)  K head             → (B, D, G, G)   [movement dest embeddings]
+Concat + Flatten                             → (B, (5+2D)·G²)
 ```
 
-**D = BILINEAR_DIM = 8** (embedding dimension for Q·K movement head)
+**D = `BILINEAR_DIM` = 32** (embedding dimension for Q·K movement head; defined in [hive/encoding/move_encoder.py](../hive/encoding/move_encoder.py)).
 
 ### Policy layout (flat vector of size (5+2D)·G²)
 
+Heads are flattened in **channel-major** order: `flat[b, c·G² + cell]`. The Rust MCTS reads with the same stride (see `search.rs` `DotProduct: q_offset + d·G² + src_cell`).
+
 | Range | Head | Content |
 |-------|------|---------|
-| `[0 .. 5·G²)` | place | Placement logits: `type_idx * G² + dest_cell` |
-| `[5·G² .. (5+D)·G²)` | Q | Source embeddings: `d * G² + src_cell` for d in [0, D) |
-| `[(5+D)·G² .. (5+2D)·G²)` | K | Dest embeddings: `d * G² + dst_cell` for d in [0, D) |
+| `[0 .. 5·G²)` | place | Placement logits: `type_idx · G² + dest_cell` |
+| `[5·G² .. (5+D)·G²)` | Q | Source embeddings: `d · G² + src_cell` for `d` in `[0, D)` |
+| `[(5+D)·G² .. (5+2D)·G²)` | K | Dest embeddings: `d · G² + dst_cell` for `d` in `[0, D)` |
 
-Default policy size (D=8, G=17): 21 × 17 × 17 = **6,069**
+Total channels = `5 + 2·32 = 69`. At G=17 the flat policy has `69·17·17 = 19,941` entries; at G=23, `69·23·23 = 36,501`.
 
 ### MCTS prior computation
-- **Placement**(type, dest): `prior = place_logits[type * G² + dest_cell]`
-- **Movement**(src, dest): `prior = Q[src] · K[dst] / sqrt(D)`
-  where `Q[src] = (policy[5·G² + 0·G² + src], ..., policy[5·G² + (D-1)·G² + src])` — a D-dim vector.
+- **Placement**(type, dest): `prior = place_logits[type · G² + dest_cell]`
+- **Movement**(src, dest): `prior = Q[src] · K[dst] / sqrt(D)` where `Q[src]` is the D-dim vector `(policy[5·G² + d·G² + src] for d in 0..D)` and `K[dst]` is the analogous slice from the K section.
 
-The bilinear formulation allows arbitrary rank-D joint distributions over (src, dst) pairs, eliminating the rank-1 independence assumption of the old factorized head.
+The bilinear formulation allows arbitrary rank-D joint distributions over (src, dst) pairs, eliminating the rank-1 independence assumption of the older factorized head.
 
 ### Policy loss
-- **Placement**: soft cross-entropy over the 5·G² placement logits.
+
+- **Placement**: soft cross-entropy over the legal placement logits gathered out of the 5·G² placement section.
 - **Movement**: soft cross-entropy over bilinear scores for all legal (src, dst) pairs. Training targets are sparse joint visit-count distributions — **not** marginalized into separate src/dst slices. Positions with no movement (pure placement turn) contribute zero movement loss.
 
-## Value Head
+Place and movement targets are concatenated and softmaxed jointly per position, so the loss is a single soft cross-entropy over the union of legal placements and legal moves.
 
-Operates directly on the trunk output (reserve info already in trunk via input).
+## Value Head (WDL)
+
+Operates directly on the trunk output (reserve info is already in the trunk via the input concat).
 
 ```
-Conv2d(C -> 1, 1x1) + BN + ReLU           -> (B, 1, G, G)
-Flatten                                   -> (B, G*G)
-Linear(G*G -> 256) + ReLU                 -> (B, 256)
-Linear(256 -> 1) + tanh                   -> (B, 1)
+Conv2d(C → 1, 1×1, bias=False) + BN + ReLU   → (B, 1, G, G)
+Flatten                                      → (B, G·G)
+Linear(G·G → 256) + ReLU                     → (B, 256)
+Linear(256 → 3)                              → (B, 3)   [W, D, L logits]
 ```
-Output range: `[-1, 1]`
+
+The model returns **raw WDL logits**. Training applies `log_softmax` for stability. The ONNX export wrapper (`_OnnxExportWrapper` in [hive/nn/model.py](../hive/nn/model.py)) softmaxes before export, so Rust/ORT consumers see probabilities. Contempt is applied Rust-side as `W − L − contempt · D`.
 
 ### Value loss
-MSE: `(predicted - target)^2`
+Soft cross-entropy between the predicted WDL and a target distribution derived from the scalar value target `v ∈ [-1, 1]`:
+
+```
+W = max(v, 0)
+L = max(-v, 0)
+D = 1 - W - L
+```
+
+So `v = +1` → `(1, 0, 0)`, `v = -1` → `(0, 0, 1)`, `v = 0` → `(0, 1, 0)`, and intermediate values interpolate linearly between draw and a decisive outcome. (Defined as `_scalar_to_wdl` in [hive/nn/training.py](../hive/nn/training.py).)
 
 ## Auxiliary Head
-Separate pathway off the trunk (not shared with value head). Predicts per-position game metrics for both players.
+Separate pathway off the trunk (not shared with the value head). Predicts six per-position game metrics and provides gradient signal on every position even when `value_target` is masked.
 
 ```
-Conv2d(C -> 1, 1x1) + BN + ReLU           -> (B, 1, G, G)
-Flatten                                   -> (B, G*G)
-Linear(G*G -> 64) + ReLU                  -> (B, 64)
-Linear(64 -> 6) + sigmoid                 -> (B, 6)
+Conv2d(C → 1, 1×1, bias=False) + BN + ReLU   → (B, 1, G, G)
+Flatten                                      → (B, G·G)
+Linear(G·G → 64) + ReLU                      → (B, 64)
+Linear(64 → 6) + sigmoid                     → (B, 6)
 ```
-Output range: `[0, 1]` per output.
+Output range: `[0, 1]` per output. Targets are computed in Rust ([rust/crates/hive-game/src/game.rs](../rust/crates/hive-game/src/game.rs)) and recorded per training sample.
 
-| Output | Content | Computation |
-|--------|---------|-------------|
-| 0 | Current player queen danger | neighbors/6 + beetle-on-top bonus |
-| 1 | Opponent queen danger | neighbors/6 + beetle-on-top bonus |
-| 2 | Current player queen escape | legal slide destinations / 6 |
-| 3 | Opponent queen escape | legal slide destinations / 6 |
-| 4 | Current player mobility | fraction of pieces with >= 1 legal move |
-| 5 | Opponent mobility | fraction of pieces with >= 1 legal move |
+| Output | Content | Target computation |
+| ------ | ------- | ------------------ |
+| 0 | Current player queen danger | `QUEEN_DANGER_TABLE[min(occupied_neighbors + beetle_on_top, 6)]` (exponential lookup; an enemy beetle on top of the queen counts as one extra virtual neighbour). 0 if queen not yet placed. |
+| 1 | Opponent queen danger | Same, for the opponent. |
+| 2 | Current player queen escape | `min(legal_slide_destinations / 2, 1.0)`; 0 if the queen is buried (beetle on top) or pinned (single-stack articulation point). The "/2" reflects that most perimeter pieces have ~2 slide options. |
+| 3 | Opponent queen escape | Same, for the opponent. |
+| 4 | Current player mobility | Fraction of (on-board + reserve) pieces that have ≥ 1 legal move/placement. |
+| 5 | Opponent mobility | Same, for the opponent. |
 
 ### Auxiliary loss
-MSE, always active (not masked). Provides gradient signal on every position.
+MSE per output, summed in three pair-grouped terms: `qd_loss = mean(MSE[0:2])`, `qe_loss = mean(MSE[2:4])`, `mob_loss = mean(MSE[4:6])`, then `aux_loss = qd_loss + qe_loss + mob_loss`. Always active — never masked.
 
 ## Total Loss
 ```
-loss = policy_loss + value_loss + aux_loss
+loss = policy_loss + value_loss_scale · value_loss + aux_loss_scale · aux_loss
 ```
+Both scales default to 1.0 and are CLI-tunable (`--value-loss-scale`, `--aux-loss-scale`).
 
 ## Training Config
 | Parameter | Value |
 |-----------|-------|
 | Optimizer | SGD + momentum 0.9 |
-| Learning rate | 0.02 (constant) |
+| Learning rate | 0.02 (constant; tunable via `--lr`) |
 | Epochs per iteration | 1 |
-| Grid size | 17 (covers all observed boardspace games, max diameter 15) |
-| c_puct | 1.5 |
+| Default model config | `configs/hive/medium.json` (channels=128, grid_size=17, trunk = 6×res, gpba, 6×res, gpba) |
+| Encoding grid size | Configurable, must be odd; ≤ physical 23×23. 17 covers all observed boardspace games (max diameter 15). |
+| `BILINEAR_DIM` | 32 |
+| Symmetry augmentation | D6 (12 transforms), on by default |
 | Playout cap randomization | Yes (KataGo-style) |
 
-## Parameter Count (C=128, N=10, G=17, D=8)
-- Input conv: 34 × 128 × 3 × 3 = 39,168
-- Per ResBlock: 2 × (128 × 128 × 3 × 3) = 294,912 → 10 blocks = 2,949,120
-- BatchNorm (trunk): (128 × 2) × (10+1) = 2,816
-- Policy head: Conv(128→128×1×1)=16,384 + BN(128)=256 + place(128→5)=645 + Q(128→8)=1,032 + K(128→8)=1,032 = 19,349
-- Value head: 128×1×1 + 289×256 + 256×1 + BN = 128 + 73,984 + 256 + 2 = 74,370
-- Aux head: 128×1×1 + 289×64 + 64×6 + BN = 128 + 18,496 + 384 + 2 = 19,010
-- **Total: ~3.1M parameters**
+## Configurations (`configs/hive/`)
+
+| File | Channels | Grid | Trunk |
+| ---- | -------- | ---- | ----- |
+| `small.json` | 64 | 17 | 6×res |
+| `medium.json` *(default)* | 128 | 17 | 6×res, gpba, 6×res, gpba |
+| `medium-attn.json` | 128 | 17 | 6×res, gpba, 4×res, attn, 2×res, gpba |
+| `large.json` | 192 | 17 | 6×res, gpba, 6×res, gpba, 4×res, attn |
+
+All configs use `bilinear_dim = 32`. Param counts depend on the exact trunk; the dominant terms are:
+
+- **Input conv**: `34·C·9` weights
+- **Per `res` block**: `2·C²·9` weights (two 3×3 convs)
+- **Per `gpba` block**: `2C·C + C·C ≈ 3C²` weights (negligible)
+- **Per `attn` block** *(default 4 heads)*: `~3C² + C² + 2·(C·2C) = 8C²` weights for QKV + out_proj + 2-layer FFN, plus the adaLN projection `cond_dim·6C = 60C`
+- **Policy head**: `C² + 5C + 2·D·C = C² + (5 + 64)·C` weights
+- **Value head**: `C + 256·G² + 256·3` weights
+- **Aux head**: `C + 64·G² + 64·6` weights
+
+For example, `medium` (`C=128, G=17, D=32`, trunk = 12 res + 2 gpba) is on the order of:
+`34·128·9 + 12·(2·128²·9) + 2·3·128² + 128² + 69·128 + 128 + 256·289 + 768 + 128 + 64·289 + 384 ≈ 3.7M parameters`.
