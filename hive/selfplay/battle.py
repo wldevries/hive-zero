@@ -10,19 +10,11 @@ import statistics
 import subprocess
 import time
 
-import colorama
 import numpy as np
 import torch
 from tqdm import tqdm
 
-colorama.init()
-_RESET = colorama.Style.RESET_ALL
-_BRIGHT = colorama.Style.BRIGHT
-_cg = lambda v: f"{colorama.Fore.GREEN}{_BRIGHT}{v}{_RESET}"
-_cy = lambda v: f"{colorama.Fore.YELLOW}{_BRIGHT}{v}{_RESET}"
-_cr = lambda v: f"{colorama.Fore.RED}{_BRIGHT}{v}{_RESET}"
-_cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
-_cm = lambda v: f"{colorama.Fore.MAGENTA}{_BRIGHT}{v}{_RESET}"
+from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc, cm as _cm
 
 from ..nn.model import load_checkpoint
 

@@ -7,18 +7,11 @@ import statistics
 import time
 from typing import Optional
 
-import colorama
 import numpy as np
 import torch
 from tqdm import tqdm
 
-colorama.init()
-_RESET = colorama.Style.RESET_ALL
-_BRIGHT = colorama.Style.BRIGHT
-_cg = lambda v: f"{colorama.Fore.GREEN}{_BRIGHT}{v}{_RESET}"
-_cy = lambda v: f"{colorama.Fore.YELLOW}{_BRIGHT}{v}{_RESET}"
-_cr = lambda v: f"{colorama.Fore.RED}{_BRIGHT}{v}{_RESET}"
-_cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
+from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc, cm as _cm
 
 from shared.lr_scheduler import LRScheduler
 from shared.optimizer_defaults import resolve_resumed_lr
@@ -319,8 +312,8 @@ def _print_boards_grid(boards_with_outcome, cols=9):
 
     boards_with_outcome: list of (board[9], outcome) where outcome is 0=draw, 1=X, 2=O.
     """
-    _x = f"{colorama.Fore.MAGENTA}{_BRIGHT}X{_RESET}"
-    _o = f"{colorama.Fore.CYAN}{_BRIGHT}O{_RESET}"
+    _x = _cm("X")
+    _o = _cc("O")
     CELL = {0: '\u00b7', 1: _x, 2: _o}
     # Pre-padded to 5 visible chars to avoid ANSI breaking format specs
     OUTCOME_LABEL = {0: '  =  ', 1: f'  {_x}  ', 2: f'  {_o}  '}

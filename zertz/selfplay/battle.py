@@ -11,19 +11,11 @@ import statistics
 import time
 from dataclasses import dataclass, field
 
-import colorama
 import numpy as np
 import torch
 from tqdm import tqdm
 
-colorama.init()
-_RESET = colorama.Style.RESET_ALL
-_BRIGHT = colorama.Style.BRIGHT
-_cg = lambda v: f"{colorama.Fore.GREEN}{_BRIGHT}{v}{_RESET}"
-_cy = lambda v: f"{colorama.Fore.YELLOW}{_BRIGHT}{v}{_RESET}"
-_cr = lambda v: f"{colorama.Fore.RED}{_BRIGHT}{v}{_RESET}"
-_cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
-_cm = lambda v: f"{colorama.Fore.MAGENTA}{_BRIGHT}{v}{_RESET}"
+from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc, cm as _cm, styled
 
 from ..nn.model import load_checkpoint
 
@@ -164,10 +156,6 @@ def _print_battle_results(
     max_len = max(lengths) if lengths else 0
 
     decisive = w1 + w2
-    _CW = "\x1b[38;2;255;160;50m"
-    _CG = "\x1b[38;2;100;180;255m"
-    _CB = "\x1b[38;2;255;60;180m"
-    _CC = "\x1b[38;2;80;220;80m"
 
     print(f"\n{'='*60}")
     print(f"  Results ({total} games, {elapsed:.0f}s)")
@@ -183,13 +171,13 @@ def _print_battle_results(
     if decisive > 0:
         print(f"  Win conditions (of {decisive} decisive games):")
         for label, color, count in [
-            ("white", _CW, stats.wins_white),
-            ("grey",  _CG, stats.wins_grey),
-            ("black", _CB, stats.wins_black),
-            ("combo", _CC, stats.wins_combo),
+            ("white", "#ffa032", stats.wins_white),
+            ("grey",  "#64b4ff", stats.wins_grey),
+            ("black", "#ff3cb4", stats.wins_black),
+            ("combo", "#50dc50", stats.wins_combo),
         ]:
             pct = count / decisive * 100
-            print(f"    {color}{label}{_RESET}: {count} ({pct:.0f}%)")
+            print(f"    {styled(label, color)}: {count} ({pct:.0f}%)")
     print()
     print(f"  Game length: avg={avg_len:.1f}  med={med_len}  min={min_len}  max={max_len}")
 

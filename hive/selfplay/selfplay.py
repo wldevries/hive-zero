@@ -26,21 +26,7 @@ LOG_HEADER = (
     "mcts_top1_mean,mcts_top1_std,mcts_depth_mean,mcts_depth_std,mcts_moves_mean,mcts_moves_std\n"
 )
 
-import colorama
-
-colorama.init()
-_RESET = colorama.Style.RESET_ALL
-_BRIGHT = colorama.Style.BRIGHT
-
-
-def _c(val, color: str) -> str:
-    return f"{color}{_BRIGHT}{val}{_RESET}"
-
-
-_cg = lambda v: _c(v, colorama.Fore.GREEN)  # wins
-_cy = lambda v: _c(v, colorama.Fore.YELLOW)  # draws / secondary losses
-_cr = lambda v: _c(v, colorama.Fore.RED)  # total loss / losses in eval
-_cc = lambda v: _c(v, colorama.Fore.CYAN)  # scores / percentages
+from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc
 
 from ..nn.model import create_model, export_onnx, load_checkpoint, save_checkpoint, _describe_trunk
 from ..nn.training import HiveDataset, Trainer

@@ -24,15 +24,9 @@ import time
 import zipfile
 from typing import Optional
 
-import colorama
 import numpy as np
 
-colorama.init()
-_R = colorama.Style.RESET_ALL
-_B = colorama.Style.BRIGHT
-_cr = lambda v: f"{colorama.Fore.RED}{_B}{v}{_R}"      # total loss
-_cy = lambda v: f"{colorama.Fore.YELLOW}{_B}{v}{_R}"   # policy / value loss
-_cc = lambda v: f"{colorama.Fore.CYAN}{_B}{v}{_R}"     # chunk / epoch labels
+from shared.console import cr as _cr, cy as _cy, cc as _cc
 
 PRETRAIN_LOG_HEADER = (
     "chunk,chunk_in_epoch,chunk_games,mini_epoch,epoch,"

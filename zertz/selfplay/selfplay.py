@@ -7,18 +7,11 @@ import statistics
 import time
 from typing import Optional
 
-import colorama
 import numpy as np
 import torch
 from tqdm import tqdm
 
-colorama.init()
-_RESET = colorama.Style.RESET_ALL
-_BRIGHT = colorama.Style.BRIGHT
-_cg = lambda v: f"{colorama.Fore.GREEN}{_BRIGHT}{v}{_RESET}"
-_cy = lambda v: f"{colorama.Fore.YELLOW}{_BRIGHT}{v}{_RESET}"
-_cr = lambda v: f"{colorama.Fore.RED}{_BRIGHT}{v}{_RESET}"
-_cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
+from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc, bold_white, styled
 
 from shared.lr_scheduler import LRScheduler
 from shared.optimizer_defaults import optimizer_state_compatible, resolve_resumed_lr
@@ -263,20 +256,15 @@ class SelfPlayTrainer:
                 avg = sum(lengths) / len(lengths)
                 med = _median(lengths)
                 mn, mx = min(lengths), max(lengths)
-                print(f"  Game length:  min=\033[1;37m{mn}\033[0m  avg=\033[1;37m{avg:.1f}\033[0m  med=\033[1;37m{med}\033[0m  max=\033[1;37m{mx}\033[0m")
+                print(f"  Game length:  min={bold_white(mn)}  avg={bold_white(f'{avg:.1f}')}  med={bold_white(med)}  max={bold_white(mx)}")
 
             decisive_total = result.wins_white + result.wins_grey + result.wins_black + result.wins_combo
             if decisive_total > 0:
-                _CW = "\x1b[38;2;255;160;50m"   # orange     — white balls
-                _CG = "\x1b[38;2;100;180;255m"  # steel blue — grey balls
-                _CB = "\x1b[38;2;255;60;180m"   # hot pink   — black balls
-                _CC = "\x1b[38;2;80;220;80m"    # green      — combo
-                def _wc(c, n): return f"{c}{n}{_RESET}"
                 print(
-                    f"  Win cons: white={_wc(_CW, result.wins_white)}"
-                    f"  grey={_wc(_CG, result.wins_grey)}"
-                    f"  black={_wc(_CB, result.wins_black)}"
-                    f"  combo={_wc(_CC, result.wins_combo)}"
+                    f"  Win cons: white={styled(result.wins_white, '#ffa032')}"  # orange
+                    f"  grey={styled(result.wins_grey, '#64b4ff')}"               # steel blue
+                    f"  black={styled(result.wins_black, '#ff3cb4')}"             # hot pink
+                    f"  combo={styled(result.wins_combo, '#50dc50')}"             # green
                 )
 
             ss = result.search_stats

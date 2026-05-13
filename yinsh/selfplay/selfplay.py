@@ -7,18 +7,11 @@ import statistics
 import time
 from typing import Optional
 
-import colorama
 import numpy as np
 import torch
 from tqdm import tqdm
 
-colorama.init()
-_RESET = colorama.Style.RESET_ALL
-_BRIGHT = colorama.Style.BRIGHT
-_cg = lambda v: f"{colorama.Fore.GREEN}{_BRIGHT}{v}{_RESET}"
-_cy = lambda v: f"{colorama.Fore.YELLOW}{_BRIGHT}{v}{_RESET}"
-_cr = lambda v: f"{colorama.Fore.RED}{_BRIGHT}{v}{_RESET}"
-_cc = lambda v: f"{colorama.Fore.CYAN}{_BRIGHT}{v}{_RESET}"
+from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc
 
 from shared.lr_scheduler import LRScheduler
 from shared.optimizer_defaults import optimizer_state_compatible, resolve_resumed_lr
