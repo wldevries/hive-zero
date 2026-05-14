@@ -2,6 +2,7 @@
 name = "zertz-game"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
 
 [features]
 # "replay" gates the zip-based boardspace game loader (C deps: bzip2, lzma, zstd).
