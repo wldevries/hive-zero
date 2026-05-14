@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::{Tensor, TensorRef};
 
 // ---------------------------------------------------------------------------
 // Inference traits (game-specific)
@@ -60,6 +60,14 @@ pub struct ZertzInferenceResult {
 /// ONNX Runtime inference engine for Hive.
 pub struct HiveOrtEngine {
     session: Session,
+
+    // Per-call wall-clock accumulators, drained from outside via `phase_times`.
+    // `t_input`: Tensor::from_array allocations + the boards/reserves to_vec copies.
+    // `t_run`: session.run (host↔device transfer + GPU compute + ORT marshaling).
+    // `t_extract`: try_extract_tensor + the policy/wdl output copies.
+    t_input: Duration,
+    t_run: Duration,
+    t_extract: Duration,
 }
 
 impl HiveInference for HiveOrtEngine {
@@ -72,7 +80,7 @@ impl HiveInference for HiveOrtEngine {
         grid_size: usize,
         reserve_size: usize,
     ) -> Result<HiveInferenceResult, Box<dyn std::error::Error + Send + Sync>> {
-        self.infer(boards.to_vec(), reserves.to_vec(), batch_size, num_channels, grid_size, reserve_size)
+        self.infer(boards, reserves, batch_size, num_channels, grid_size, reserve_size)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 }
@@ -144,7 +152,19 @@ impl HiveOrtEngine {
                     .build(),
             ])?
             .commit_from_file(onnx_path)?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            t_input: Duration::ZERO,
+            t_run: Duration::ZERO,
+            t_extract: Duration::ZERO,
+        })
+    }
+
+    /// Drain the accumulated per-phase wall-clock times for diagnostics.
+    /// Caller is expected to read this once after the self-play session
+    /// completes.
+    pub fn phase_times(&self) -> (Duration, Duration, Duration) {
+        (self.t_input, self.t_run, self.t_extract)
     }
 
     /// Run inference on a batch of boards and reserves.
@@ -153,36 +173,47 @@ impl HiveOrtEngine {
     /// - `reserves`: f32 data, shape [B, RESERVE_SIZE] flattened
     /// - `batch_size`: B
     /// - `num_channels`, `grid_size`, `reserve_size`: tensor dimensions
+    ///
+    /// Uses `TensorRef::from_array_view` so the input slices are borrowed
+    /// rather than copied into an owned `Vec<f32>` — the only host→device
+    /// copy is the one ORT performs inside `session.run` itself.
     pub fn infer(
         &mut self,
-        boards: Vec<f32>,
-        reserves: Vec<f32>,
+        boards: &[f32],
+        reserves: &[f32],
         batch_size: usize,
         num_channels: usize,
         grid_size: usize,
         reserve_size: usize,
     ) -> Result<HiveInferenceResult, ort::Error> {
-        let board_tensor = Tensor::from_array((
+        let t0 = Instant::now();
+        let board_tensor = TensorRef::from_array_view((
             [batch_size, num_channels, grid_size, grid_size],
             boards,
         ))?;
-        let reserve_tensor = Tensor::from_array((
+        let reserve_tensor = TensorRef::from_array_view((
             [batch_size, reserve_size],
             reserves,
         ))?;
+        self.t_input += t0.elapsed();
 
+        let t1 = Instant::now();
         let outputs = self.session.run(ort::inputs![
             "board" => board_tensor,
             "reserve" => reserve_tensor,
         ])?;
+        self.t_run += t1.elapsed();
 
+        let t2 = Instant::now();
         let (_, policy_data) = outputs["policy"].try_extract_tensor::<f32>()?;
         let (_, wdl_data) = outputs["wdl"].try_extract_tensor::<f32>()?;
 
-        Ok(HiveInferenceResult {
+        let result = HiveInferenceResult {
             policy: policy_data.to_vec(),
             wdl: wdl_data.to_vec(),
-        })
+        };
+        self.t_extract += t2.elapsed();
+        Ok(result)
     }
 }
 

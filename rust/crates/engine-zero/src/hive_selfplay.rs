@@ -1,3 +1,6 @@
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use numpy::{PyArray1, PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
@@ -100,6 +103,14 @@ fn infer_padded<F>(
 where
     F: FnMut(&[f32], &[f32], usize) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>,
 {
+    // Fast path: no padding needed (no fixed batch size, or actual already
+    // matches it). The chunk's vectors are the answer — skip the append-copy
+    // into freshly-allocated output Vecs, which would otherwise re-copy the
+    // entire policy buffer (~ batch_size × policy_size × 4 bytes) per call.
+    if actual == target {
+        return infer_once(boards, reserves, actual);
+    }
+
     let policy_size = move_encoding::policy_size(grid_size);
     let board_size = NUM_CHANNELS * grid_size * grid_size;
 
@@ -134,6 +145,52 @@ where
     }
 
     Ok((out_policy, out_value, out_draw))
+}
+
+/// One-shot diagnostic dump of where wall-clock time went during a Hive
+/// self-play session on the ORT inference path. Printed to stderr after
+/// `play_selfplay_core` returns so it doesn't interleave with the tqdm bar.
+///
+/// - `total`: end-to-end `play_selfplay_core` duration.
+/// - `t_eval`: time spent inside the eval-fn closure (chunking + lock + infer).
+/// - `t_input/t_run/t_extract`: ORT sub-phases (`HiveOrtEngine::phase_times`).
+///
+/// `total - t_eval` is non-eval CPU work (select_leaves + encode_leaf +
+/// expand_and_backprop). `t_run / total` is roughly the GPU-busy fraction —
+/// the headline number for "would pipelining help?".
+fn print_ort_timing(
+    total: Duration,
+    t_eval: Duration,
+    t_input: Duration,
+    t_run: Duration,
+    t_extract: Duration,
+) {
+    let total_s = total.as_secs_f64();
+    if total_s <= 0.0 {
+        return;
+    }
+    let pct = |d: Duration| 100.0 * d.as_secs_f64() / total_s;
+    let other_eval = t_eval.saturating_sub(t_input + t_run + t_extract);
+    let non_eval = total.saturating_sub(t_eval);
+    eprintln!(
+        "  [ort timing] total={:.2}s  eval={:.2}s ({:.0}%)  non-eval={:.2}s ({:.0}%)",
+        total_s,
+        t_eval.as_secs_f64(),
+        pct(t_eval),
+        non_eval.as_secs_f64(),
+        pct(non_eval),
+    );
+    eprintln!(
+        "  [ort timing]   input={:.2}s ({:.0}%)  run={:.2}s ({:.0}%)  extract={:.2}s ({:.0}%)  other={:.2}s ({:.0}%)",
+        t_input.as_secs_f64(),
+        pct(t_input),
+        t_run.as_secs_f64(),
+        pct(t_run),
+        t_extract.as_secs_f64(),
+        pct(t_extract),
+        other_eval.as_secs_f64(),
+        pct(other_eval),
+    );
 }
 
 fn make_selfplay_progress<'py>(
@@ -574,12 +631,26 @@ impl PySelfPlaySession {
         let progress_core = make_selfplay_progress(py, progress_fn);
 
         let result = if let Some(path) = onnx_path {
-            let mut engine = crate::inference::HiveOrtEngine::load(&path)
+            // Keep an outer handle to the engine so we can drain per-phase
+            // wall-clock timers after self-play completes (mirrors the Yinsh
+            // ORT path). The closure captures a clone of the Arc; after
+            // play_selfplay_core returns the closure is dropped, leaving us
+            // as the sole owner so the lock is uncontended.
+            let engine = crate::inference::HiveOrtEngine::load(&path)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            let engine_handle = Arc::new(Mutex::new(engine));
+            let t_eval_handle: Arc<Mutex<Duration>> = Arc::new(Mutex::new(Duration::ZERO));
+
+            let engine_for_eval = Arc::clone(&engine_handle);
+            let t_eval_for_eval = Arc::clone(&t_eval_handle);
             let core_eval: search::EvalFn<'_> = Box::new(move |boards, reserves, actual| {
                 let target = fixed_batch_size.unwrap_or(actual);
-                infer_padded(
+                let t_start = Instant::now();
+                let result = infer_padded(
                     |chunk_boards, chunk_reserves, batch_size| {
+                        let mut engine = engine_for_eval
+                            .lock()
+                            .map_err(|_| "ONNX engine mutex poisoned".to_string())?;
                         let result = engine
                             .infer_batch(
                                 chunk_boards,
@@ -606,15 +677,32 @@ impl PySelfPlaySession {
                     actual,
                     target,
                     grid_size,
-                )
+                );
+                if let Ok(mut acc) = t_eval_for_eval.lock() {
+                    *acc += t_start.elapsed();
+                }
+                result
             });
-            play_selfplay_core(
+            let t_total_start = Instant::now();
+            let result = play_selfplay_core(
                 num_games,
                 self.session.config.clone(),
                 core_eval,
                 progress_core,
                 opening_sequences,
-            )
+            );
+            let total = t_total_start.elapsed();
+
+            // core_eval is dropped at this point, so we hold the only Arc to
+            // the engine and the timing accumulator.
+            let t_eval = t_eval_handle.lock().map(|d| *d).unwrap_or_default();
+            let (t_input, t_run, t_extract) = engine_handle
+                .lock()
+                .map(|e| e.phase_times())
+                .unwrap_or((Duration::ZERO, Duration::ZERO, Duration::ZERO));
+            print_ort_timing(total, t_eval, t_input, t_run, t_extract);
+
+            result
         } else {
             let eval_fn = eval_fn.ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err("eval_fn is required when onnx_path is not provided")
