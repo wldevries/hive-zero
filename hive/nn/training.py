@@ -303,6 +303,13 @@ class HiveDataset(Dataset):
         return self._size
 
     def __getitem__(self, idx):
+        """Returns the raw position plus a `sym_idx` integer in [0, 12).
+
+        The D6 permutation is applied on GPU in Trainer._apply_sym_gpu after
+        the batch lands on device — moves the per-sample numpy gather/filter/
+        renormalize work off the main thread, which is the data-loading
+        bottleneck on Windows where multi-worker DataLoaders are unreliable.
+        """
         if self.augment_symmetry:
             sym = idx % 12
             base_idx = idx // 12
@@ -311,82 +318,9 @@ class HiveDataset(Dataset):
             base_idx = idx
 
         board = self.board_tensors[base_idx]
-        p_idx = self.place_idx[base_idx].copy()
-        p_prob = self.place_probs[base_idx].copy()
-        n_p = int(self.num_placements[base_idx])
-        m_src = self.movement_src[base_idx].copy()
-        m_dst = self.movement_dst[base_idx].copy()
-        m_prob = self.movement_probs[base_idx].copy()
-        n_m = int(self.num_movements[base_idx])
-
-        # Rotations 1,2,4,5 and all 6 mirrors involve s=-(q+r) and clip pieces
-        # in the square-grid corners (|s|>half_grid). Skip those augmentations.
-        # Identity (sym=0) and 180° (sym=3) never clip.
-        if sym not in (0, 3) and self.augment_symmetry:
-            bad = _load_bad_cells(self.grid_size)
-            if board[:10].reshape(10, -1)[:, bad].any():
-                sym = 0
-
-        if sym != 0:
-            gs = self.grid_size
-            gc = gs * gs
-            sym_perms = _load_sym_perms(gs)
-            perm = sym_perms[sym]
-
-            # Board: (NUM_CHANNELS, gs, gs) → permute spatial cells
-            bf = board.reshape(NUM_CHANNELS, gc)
-            padded = np.concatenate([bf, np.zeros((NUM_CHANNELS, 1), dtype=np.float32)], axis=1)
-            board = padded[:, perm].reshape(NUM_CHANNELS, gs, gs)
-
-            # Placement indices: idx = type * gc + cell. Permute the cell part.
-            if n_p > 0:
-                flat = p_idx[:n_p].astype(np.int64)
-                type_part = flat // gc
-                cell_part = flat % gc
-                new_cell = perm[cell_part]
-                valid_p = new_cell < gc
-                new_flat = (type_part * gc + new_cell).astype(np.uint16)
-            else:
-                valid_p = np.zeros(0, dtype=bool)
-                new_flat = np.zeros(0, dtype=np.uint16)
-
-            # Movement pairs: permute src and dst; drop pairs with OOB src or dst.
-            if n_m > 0:
-                new_src = perm[m_src[:n_m]]
-                new_dst = perm[m_dst[:n_m]]
-                valid_m = (new_src < gc) & (new_dst < gc)
-            else:
-                valid_m = np.zeros(0, dtype=bool)
-                new_src = np.zeros(0, dtype=np.int64)
-                new_dst = np.zeros(0, dtype=np.int64)
-
-            # Renormalize the joint target across surviving placements + movements.
-            kept_p_prob = p_prob[:n_p][valid_p] if n_p > 0 else np.zeros(0, dtype=np.float32)
-            kept_m_prob = m_prob[:n_m][valid_m] if n_m > 0 else np.zeros(0, dtype=np.float32)
-            total = float(kept_p_prob.sum() + kept_m_prob.sum())
-            if total > 0:
-                kept_p_prob = kept_p_prob / total
-                kept_m_prob = kept_m_prob / total
-
-            # Write back (pad with zeros).
-            n_p_new = len(kept_p_prob)
-            p_idx = np.zeros(MAX_PLACEMENTS, dtype=np.uint16)
-            p_prob = np.zeros(MAX_PLACEMENTS, dtype=np.float32)
-            if n_p_new > 0:
-                p_idx[:n_p_new] = new_flat[valid_p][:MAX_PLACEMENTS]
-                p_prob[:n_p_new] = kept_p_prob[:MAX_PLACEMENTS]
-            n_p = min(n_p_new, MAX_PLACEMENTS)
-
-            n_m_new = len(kept_m_prob)
-            m_src = np.zeros(MAX_MOVE_PAIRS, dtype=np.uint16)
-            m_dst = np.zeros(MAX_MOVE_PAIRS, dtype=np.uint16)
-            m_prob = np.zeros(MAX_MOVE_PAIRS, dtype=np.float32)
-            if n_m_new > 0:
-                m_src[:n_m_new] = new_src[valid_m][:MAX_MOVE_PAIRS].astype(np.uint16)
-                m_dst[:n_m_new] = new_dst[valid_m][:MAX_MOVE_PAIRS].astype(np.uint16)
-                m_prob[:n_m_new] = kept_m_prob[:MAX_MOVE_PAIRS]
-            n_m = min(n_m_new, MAX_MOVE_PAIRS)
-        else:
+        # h5py slicing materializes a fresh array; for the in-memory backing
+        # store .copy() is needed to detach from the underlying buffer.
+        if self._h5file is None:
             board = board.copy()
 
         aux_targets = np.array([
@@ -398,18 +332,19 @@ class HiveDataset(Dataset):
         return (
             torch.from_numpy(board),
             torch.from_numpy(self.reserve_vectors[base_idx].copy()),
-            torch.from_numpy(p_idx.astype(np.int64)),
-            torch.from_numpy(p_prob),
-            torch.tensor(n_p, dtype=torch.int32),
-            torch.from_numpy(m_src.astype(np.int64)),
-            torch.from_numpy(m_dst.astype(np.int64)),
-            torch.from_numpy(m_prob),
-            torch.tensor(n_m, dtype=torch.int32),
+            torch.from_numpy(self.place_idx[base_idx].astype(np.int64)),
+            torch.from_numpy(self.place_probs[base_idx].copy()),
+            torch.tensor(int(self.num_placements[base_idx]), dtype=torch.int32),
+            torch.from_numpy(self.movement_src[base_idx].astype(np.int64)),
+            torch.from_numpy(self.movement_dst[base_idx].astype(np.int64)),
+            torch.from_numpy(self.movement_probs[base_idx].copy()),
+            torch.tensor(int(self.num_movements[base_idx]), dtype=torch.int32),
             torch.tensor(self.value_targets[base_idx], dtype=torch.float32),
             torch.tensor(self.root_q_targets[base_idx], dtype=torch.float32),
             torch.tensor(self.value_only[base_idx], dtype=torch.bool),
             torch.tensor(self.policy_only[base_idx], dtype=torch.bool),
             torch.from_numpy(aux_targets),
+            torch.tensor(sym, dtype=torch.int64),
         )
 
 
@@ -441,10 +376,112 @@ class Trainer:
         else:
             raise ValueError(f"unknown optimizer {optimizer!r}; expected 'sgd' or 'adamw'")
         self._compiled = torch.compile(self.model, dynamic=False) if self.device.type == "cuda" else self.model
+        self._sym_perms_gpu: Optional[torch.Tensor] = None
+        self._bad_cells_gpu: Optional[torch.Tensor] = None
+        self._sym_buffers_grid_size: Optional[int] = None
 
     @property
     def _current_lr(self) -> float:
         return self.optimizer.param_groups[0]['lr']
+
+    def _init_sym_buffers(self, grid_size: int):
+        """Move the 12 D6 cell permutations and the corner-clip mask to GPU.
+
+        Lazy: keyed on grid_size, rebuilt only when the model's grid changes.
+        Each permutation entry is in [0, gs²]; the value gs² signals 'out of
+        bounds' and is used as a gather sentinel into a zero-padded buffer.
+        """
+        if (self._sym_perms_gpu is not None
+                and self._sym_buffers_grid_size == grid_size):
+            return
+        perms = _load_sym_perms(grid_size)  # list of 12 np.int arrays, shape (gs²,)
+        stacked = np.stack(perms).astype(np.int64)
+        self._sym_perms_gpu = torch.from_numpy(stacked).to(self.device)
+        bad = _load_bad_cells(grid_size)
+        self._bad_cells_gpu = torch.from_numpy(bad.astype(np.bool_)).to(self.device)
+        self._sym_buffers_grid_size = grid_size
+
+    def _apply_sym_gpu(self, board, p_idx, p_prob, n_p,
+                       m_src, m_dst, m_prob, n_m, sym_idx):
+        """Apply per-sample D6 augmentation on GPU.
+
+        Inputs are already on `self.device`. `sym_idx` is (B,) in [0, 12).
+        Mirrors the CPU augmentation that used to live in HiveDataset.__getitem__:
+        permutes board cells, decodes/permutes placement indices, permutes
+        movement (src, dst) pairs, drops slots whose permuted cell falls in
+        the corner-clip zone, and renormalizes the joint probability target
+        across surviving placements + movements.
+
+        Returns the augmented tensors plus combined (n_p/n_m × aug-validity)
+        boolean masks for placements and movements. Callers must use those
+        masks in place of recomputing from arange/n_p.
+        """
+        B, C = board.size(0), board.size(1)
+        gs = board.size(-1)
+        gs2 = gs * gs
+        self._init_sym_buffers(gs)
+        sym_perms = self._sym_perms_gpu  # (12, gs²)
+        bad_mask = self._bad_cells_gpu   # (gs²,) bool
+
+        # Bad-cell override: any piece in the corner-clip zone forces sym → 0
+        # for rotations/mirrors that would clip (everything except 0° and 180°).
+        piece_present = (board.view(B, C, gs2)[:, :10, :] > 0).any(dim=1)  # (B, gs²)
+        has_corner = (piece_present & bad_mask.unsqueeze(0)).any(dim=1)    # (B,)
+        unsafe_sym = (sym_idx != 0) & (sym_idx != 3)
+        sym_idx = torch.where(has_corner & unsafe_sym,
+                              torch.zeros_like(sym_idx), sym_idx)
+
+        perm_b = sym_perms[sym_idx]  # (B, gs²)
+
+        # Augment board: gather cells with a zero-padded sentinel column so
+        # any perm entry == gs² (OOB) reads as 0.
+        board_flat = board.view(B, C, gs2)
+        zero_col = torch.zeros(B, C, 1, device=board.device, dtype=board.dtype)
+        board_padded = torch.cat([board_flat, zero_col], dim=2)  # (B, C, gs²+1)
+        perm_bc = perm_b.unsqueeze(1).expand(-1, C, -1)
+        new_board = torch.gather(board_padded, 2, perm_bc).view(B, C, gs, gs)
+
+        # Augment placement indices (type * gs² + cell). Slots whose new cell
+        # is OOB are clamped to cell 0 and masked out in p_mask below.
+        p_idx_l = p_idx.long()
+        p_cell = p_idx_l % gs2
+        p_type = p_idx_l // gs2
+        new_p_cell = torch.gather(perm_b, 1, p_cell)
+        p_aug_valid = (new_p_cell < gs2)
+        safe_p_cell = torch.where(p_aug_valid, new_p_cell,
+                                  torch.zeros_like(new_p_cell))
+        new_p_idx = p_type * gs2 + safe_p_cell
+
+        # Augment movement (src, dst).
+        m_src_l = m_src.long()
+        m_dst_l = m_dst.long()
+        new_m_src = torch.gather(perm_b, 1, m_src_l)
+        new_m_dst = torch.gather(perm_b, 1, m_dst_l)
+        m_aug_valid = (new_m_src < gs2) & (new_m_dst < gs2)
+        safe_m_src = torch.where(m_aug_valid, new_m_src,
+                                 torch.zeros_like(new_m_src))
+        safe_m_dst = torch.where(m_aug_valid, new_m_dst,
+                                 torch.zeros_like(new_m_dst))
+
+        # Combined masks: original padding bound × augmentation validity.
+        device = board.device
+        p_mask_orig = (torch.arange(p_idx.size(1), device=device).unsqueeze(0)
+                       < n_p.unsqueeze(1).long())
+        m_mask_orig = (torch.arange(m_src.size(1), device=device).unsqueeze(0)
+                       < n_m.unsqueeze(1).long())
+        p_mask = p_mask_orig & p_aug_valid
+        m_mask = m_mask_orig & m_aug_valid
+
+        # Renormalize joint target over surviving placements + movements.
+        p_prob_z = p_prob * p_mask.to(p_prob.dtype)
+        m_prob_z = m_prob * m_mask.to(m_prob.dtype)
+        total = (p_prob_z.sum(dim=1) + m_prob_z.sum(dim=1)).clamp(min=1e-8)
+        new_p_prob = p_prob_z / total.unsqueeze(1)
+        new_m_prob = m_prob_z / total.unsqueeze(1)
+
+        return (new_board, new_p_idx, new_p_prob,
+                safe_m_src, safe_m_dst, new_m_prob,
+                p_mask, m_mask)
 
     def _compute_batch_losses(self, batch, value_loss_scale: float, aux_loss_scale: float):
         """Compute per-batch loss tensors. Shared by train_epoch and validate.
@@ -455,7 +492,7 @@ class Trainer:
         """
         (board, reserve, p_idx, p_prob, n_p,
          m_src, m_dst, m_prob, n_m,
-         value_target, root_q, vo_mask, po_mask, aux_target) = batch
+         value_target, root_q, vo_mask, po_mask, aux_target, sym_idx) = batch
 
         device = self.device
         device_type = self.device.type
@@ -475,6 +512,16 @@ class Trainer:
         vo_mask = vo_mask.to(device)
         po_mask = po_mask.to(device)
         aux_target = aux_target.to(device)
+        sym_idx = sym_idx.to(device)
+
+        # D6 symmetry augmentation runs here on GPU rather than per-sample in
+        # the DataLoader worker. Returned p_mask/m_mask combine the padding
+        # bound (arange < n_p) with augmentation validity, so the loss code
+        # below uses them directly instead of recomputing from n_p/n_m.
+        (board, p_idx, p_prob, m_src, m_dst, m_prob,
+         p_mask, m_mask) = self._apply_sym_gpu(
+            board, p_idx, p_prob, n_p, m_src, m_dst, m_prob, n_m, sym_idx
+        )
 
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             policy_logits, wdl_logits, aux, src_logits, legal_place_logits = self._compiled(board, reserve)
@@ -507,10 +554,8 @@ class Trainer:
         combined_legal_logits = torch.cat([p_gather, m_logits], dim=1)
         combined_probs = torch.cat([p_prob, m_prob], dim=1)
 
-        p_mask = (torch.arange(MAX_PLACEMENTS, device=device).unsqueeze(0)
-                  < n_p.unsqueeze(1).long())
-        m_mask = (torch.arange(MAX_MOVE_PAIRS, device=device).unsqueeze(0)
-                  < n_m.unsqueeze(1).long())
+        # p_mask, m_mask were produced by _apply_sym_gpu and already combine
+        # the padding bound with augmentation validity.
         c_mask = torch.cat([p_mask, m_mask], dim=1)
 
         # Softmax denominator: legal placements + legal movements only.
@@ -553,10 +598,10 @@ class Trainer:
         # Legal-placement aux: per-cell BCE against the binary "any of my piece
         # types can place here" mask derived from place_idx. p_idx[i, k] is the
         # flat (channel × gs² + cell) index of the k-th legal placement;
-        # cell = idx % gs², OR'd across channels.
+        # cell = idx % gs², OR'd across channels. p_mask already excludes both
+        # padded slots and aug-invalid slots.
         p_cells = (p_idx.long() % gs2)                                 # (B, MAX_PLACEMENTS)
-        p_valid = (torch.arange(MAX_PLACEMENTS, device=device).unsqueeze(0)
-                   < n_p.unsqueeze(1).long()).to(legal_place_logits.dtype)
+        p_valid = p_mask.to(legal_place_logits.dtype)
         lp_count = torch.zeros(B, gs2, device=device, dtype=legal_place_logits.dtype)
         lp_count.scatter_add_(1, p_cells, p_valid)
         lp_target = (lp_count > 0).to(legal_place_logits.dtype)

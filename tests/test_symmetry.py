@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+import torch
 
 from hive.nn.training import (
     _load_sym_perms,
@@ -136,12 +137,13 @@ class TestDatasetAugmentation:
         ds.augment_symmetry = True
         (b, rv, p_idx, p_prob, n_p,
          m_src, m_dst, m_prob, n_m,
-         v, _root_q, vo, po, aux) = ds[0]
+         v, _root_q, vo, po, aux, sym) = ds[0]
         assert b.shape == (NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
         assert rv.shape == (RESERVE_SIZE,)
         assert p_idx.shape == (MAX_PLACEMENTS,)
         assert p_prob.shape == (MAX_PLACEMENTS,)
         assert m_src.shape == (MAX_MOVE_PAIRS,)
+        assert sym.dtype == torch.int64
 
     def test_augment_preserves_value(self):
         ds = self._make_dataset()
@@ -187,14 +189,31 @@ class TestDatasetAugmentation:
         assert rotated[1, CENTER, CENTER + 1] == 0.0
 
     def test_augment_r3_flips_placement_indices(self):
-        """180-degree rotation maps placement cells to mirrored cells."""
+        """180-degree rotation maps placement cells to mirrored cells via
+        the Trainer's GPU-side augmentation. Uses device='cpu' so no GPU is
+        needed."""
+        from hive.nn.model import HiveNet
+        from hive.nn.training import Trainer
+
         ds = self._make_dataset()
-        perm = _SYM_PERMS[3]
-        # Directly apply R3 via dataset mechanics: idx 0 .. 11 are base sample copies
-        # under 12 symmetries. idx = base_idx * 12 + sym → base 0, sym 3 lives at idx 3.
         ds.augment_symmetry = True
-        _, _, p_idx, p_prob, n_p, _, _, _, _, *_ = ds[3]
-        assert int(n_p.item()) == 2
+        # Fetch the raw sample. We override sym_idx below to force R3.
+        (board, _rv, p_idx, p_prob, n_p,
+         m_src, m_dst, m_prob, n_m,
+         *_) = ds[0]
+
+        model = HiveNet(channels=8, grid_size=GRID_SIZE)
+        trainer = Trainer(model=model, device='cpu')
+
+        # Add batch dim, force sym=3 (180°).
+        batch = lambda t: t.unsqueeze(0)
+        (new_board, new_p_idx, new_p_prob,
+         _new_m_src, _new_m_dst, _new_m_prob,
+         p_mask, _m_mask) = trainer._apply_sym_gpu(
+            batch(board), batch(p_idx), batch(p_prob), batch(n_p),
+            batch(m_src), batch(m_dst), batch(m_prob), batch(n_m),
+            torch.tensor([3], dtype=torch.int64),
+        )
 
         # Queen placement was (type=0, cell=(11,13)=hex(2,0)) → hex(-2,0)=grid(11,9).
         # Spider placement was (type=1, cell=(11,12)=hex(1,0)) → hex(-1,0)=grid(11,10).
@@ -202,5 +221,8 @@ class TestDatasetAugmentation:
             0 * _GRID_CELLS + cell(CENTER, CENTER - 2): pytest.approx(0.7),
             1 * _GRID_CELLS + cell(CENTER, CENTER - 1): pytest.approx(0.3),
         }
-        got = {int(p_idx[i].item()): p_prob[i].item() for i in range(int(n_p.item()))}
+        got = {}
+        for i in range(int(n_p.item())):
+            if bool(p_mask[0, i].item()):
+                got[int(new_p_idx[0, i].item())] = new_p_prob[0, i].item()
         assert got == expected
