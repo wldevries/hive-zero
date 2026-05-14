@@ -1,6 +1,7 @@
 """AlphaZero-style neural network for Hive."""
 
 from __future__ import annotations
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -211,25 +212,52 @@ def save_checkpoint(model: HiveNet, path: str, generation: int = 0,
 
 
 class _OnnxExportWrapper(nn.Module):
-    """Wraps HiveNet for ONNX export, passing WDL (B, 3) through directly."""
-    def __init__(self, model: "HiveNet"):
+    """Wraps HiveNet for ONNX export.
+
+    - Drops the training-only aux outputs (src_logits, legal_place_logits).
+    - Softmaxes WDL so ORT consumers see probabilities.
+    - With `precision="fp16"` (default), runs the internal model in float16
+      while keeping fp32 inputs and outputs at the ONNX boundary. Uses
+      Ampere+ tensor cores via ORT-CUDA fp16 kernels while leaving the Rust
+      ORT engine fp32-in/fp32-out unchanged. bfloat16 isn't usable here:
+      the ONNX Conv op's type constraint excludes bf16 in opset 17.
+    """
+    def __init__(self, model: "HiveNet", precision: str = "fp16"):
         super().__init__()
-        self.model = model
+        if precision not in ("fp32", "fp16"):
+            raise ValueError(f"unknown precision {precision!r}; expected 'fp32' or 'fp16'")
+        self.precision = precision
+        # Deepcopy so casting to fp16 doesn't mutate the caller's training model.
+        m = copy.deepcopy(model)
+        if precision == "fp16":
+            m = m.to(torch.float16)
+        self.model = m
 
     def forward(self, board: torch.Tensor, reserve: torch.Tensor):
-        # src_logits and legal_place_logits are training-only aux; drop both
-        # from the ONNX surface.
+        if self.precision == "fp16":
+            board = board.to(torch.float16)
+            reserve = reserve.to(torch.float16)
         policy, wdl_logits, aux, _src, _lp = self.model(board, reserve)
         wdl = F.softmax(wdl_logits, dim=1)
+        if self.precision == "fp16":
+            policy = policy.to(torch.float32)
+            wdl = wdl.to(torch.float32)
+            aux = aux.to(torch.float32)
         return policy, wdl, aux
 
 
-def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
+def export_onnx(model: HiveNet, path: str, batch_size: int | None = None,
+                precision: str = "fp16"):
     """Export model to ONNX for Rust-native ORT inference.
 
     Inputs:  board_tensor (B, NUM_CHANNELS, G, G), reserve (B, RESERVE_SIZE)
     Outputs: policy (B, (5+2D)×G²), wdl (B, 3) [P(win), P(draw), P(loss)], aux (B, 6)
     Contempt is applied in the Rust caller as W - L - contempt * D.
+
+    `precision`: "fp16" (default) runs internal compute in float16 with fp32
+    IO at the ONNX boundary — uses Ampere+ tensor cores via ORT-CUDA's fp16
+    kernels while keeping the Rust caller fp32-in/fp32-out. Pass "fp32" for a
+    fully fp32 graph (e.g. for environments without fp16 hardware support).
     """
     import os
     g = model.grid_size
@@ -239,7 +267,7 @@ def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
     b = batch_size or 1
     dummy_board = torch.zeros(b, NUM_CHANNELS, g, g, device=device)
     dummy_reserve = torch.zeros(b, RESERVE_SIZE, device=device)
-    wrapper = _OnnxExportWrapper(model).eval()
+    wrapper = _OnnxExportWrapper(model, precision=precision).eval().to(device)
     dynamic_axes = None if batch_size else {
         "board": {0: "batch"}, "reserve": {0: "batch"},
         "policy": {0: "batch"}, "wdl": {0: "batch"}, "aux": {0: "batch"},
@@ -258,7 +286,7 @@ def export_onnx(model: HiveNet, path: str, batch_size: int | None = None):
         model.train()
     size_mb = os.path.getsize(path) / (1024 * 1024)
     batch_label = f" (batch={batch_size}, static)" if batch_size else ""
-    print(f"  ONNX exported: {path} ({size_mb:.1f} MB){batch_label}")
+    print(f"  ONNX exported: {path} ({size_mb:.1f} MB, {precision}){batch_label}")
 
 
 def load_checkpoint(path: str) -> tuple[HiveNet, dict]:
