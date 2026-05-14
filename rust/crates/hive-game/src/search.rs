@@ -1234,6 +1234,33 @@ pub fn play_selfplay_core(
     let mut bot_losses = 0u32;
     let mut bot_draws = 0u32;
 
+    // Pre-pass: run heuristic alphabeta on every timeout game in parallel.
+    // Sequential calls inside the per-game loop below stalled the post-game
+    // phase (140 timeouts × depth-3 ≈ 30-60s on one core).
+    let heuristic_values: Vec<Option<(f32, f32)>> = if matches!(timeout_target, TimeoutTarget::Heuristic) {
+        let timeout_indices: Vec<usize> = (0..num_games)
+            .filter(|&i| {
+                resigned_as[i].is_none()
+                    && !matches!(
+                        games[i].state,
+                        GameState::WhiteWins | GameState::BlackWins
+                            | GameState::Draw | GameState::DrawByRepetition
+                    )
+            })
+            .collect();
+        let computed: Vec<(usize, (f32, f32))> = timeout_indices
+            .par_iter()
+            .map(|&i| (i, crate::alphabeta::evaluate_alphabeta(&games[i], HEURISTIC_VALUE_DEPTH)))
+            .collect();
+        let mut out = vec![None; num_games];
+        for (i, wb) in computed {
+            out[i] = Some(wb);
+        }
+        out
+    } else {
+        Vec::new()
+    };
+
     for game_index in 0..num_games {
         let game_value: GameValueSource = if let Some(color) = resigned_as[game_index] {
             resignations += 1;
@@ -1280,10 +1307,8 @@ pub fn play_selfplay_core(
                         }
                         TimeoutTarget::Mask => GameValueSource::TimeoutMasked,
                         TimeoutTarget::Heuristic => {
-                            let (w, b) = crate::alphabeta::evaluate_alphabeta(
-                                &games[game_index],
-                                HEURISTIC_VALUE_DEPTH,
-                            );
+                            let (w, b) = heuristic_values[game_index]
+                                .expect("heuristic value missing for timeout game");
                             if w == 0.0 {
                                 GameValueSource::TimeoutMasked
                             } else {
