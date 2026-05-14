@@ -347,21 +347,23 @@ class SelfPlayTrainer:
             self.start_generation = ckpt.get("generation", 0)
             ch = self.model.input_conv.out_channels
             gs = self.model.grid_size
+            bd = self.model.bilinear_dim
             trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
                 f"Resumed from {self.model_path} (generation {self.start_generation}, "
-                f"{ch}ch, {trunk_desc}, grid {gs}x{gs}, {params / 1e6:.2f}M params)"
+                f"{ch}ch, {trunk_desc}, grid {gs}x{gs}, D={bd}, {params / 1e6:.2f}M params)"
             )
         else:
             os.makedirs(self.model_dir, exist_ok=True)
             self.model = create_model(model_config)
             ch = self.model.input_conv.out_channels
             gs = self.model.grid_size
+            bd = self.model.bilinear_dim
             trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"Created new model ({ch}ch, {trunk_desc}, grid {gs}x{gs}, {params / 1e6:.2f}M params)"
+                f"Created new model ({ch}ch, {trunk_desc}, grid {gs}x{gs}, D={bd}, {params / 1e6:.2f}M params)"
             )
 
         self.grid_size = self.model.grid_size

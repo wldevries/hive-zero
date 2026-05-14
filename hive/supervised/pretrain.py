@@ -385,20 +385,22 @@ class Pretrainer:
             it = ckpt.get("generation", 0)
             ch = self.model.input_conv.out_channels
             gs = self.model.grid_size
+            bd = self.model.bilinear_dim
             trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
                 f"Resumed from {model_path} "
-                f"(iteration {it}, {ch}ch, {trunk_desc}, grid {gs}x{gs}, {params/1e6:.2f}M params)"
+                f"(iteration {it}, {ch}ch, {trunk_desc}, grid {gs}x{gs}, D={bd}, {params/1e6:.2f}M params)"
             )
         else:
             self.model = create_model(model_config)
             ch = self.model.input_conv.out_channels
             gs = self.model.grid_size
+            bd = self.model.bilinear_dim
             trunk_desc = _describe_trunk(self.model.trunk_spec)
             params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"Created new model ({ch}ch, {trunk_desc}, grid {gs}x{gs}, {params/1e6:.2f}M params)"
+                f"Created new model ({ch}ch, {trunk_desc}, grid {gs}x{gs}, D={bd}, {params/1e6:.2f}M params)"
             )
         self.grid_size = self.model.grid_size
 
