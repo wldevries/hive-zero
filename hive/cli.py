@@ -115,6 +115,15 @@ def main():
              "when symmetry augmentation expands the buffer 12x.",
     )
     train_parser.add_argument(
+        "--training-num-workers",
+        type=int,
+        default=0,
+        help="DataLoader worker processes for training. 0 = main thread "
+             "(default). Workers open the replay h5 'r' in parallel so fetch "
+             "overlaps GPU compute; the main process detaches 'r+' for the "
+             "training phase and reattaches between generations. Try 2-4.",
+    )
+    train_parser.add_argument(
         "--name", type=str, default="hive",
         help="Model name; all paths derived as models/{name}/",
     )
@@ -686,6 +695,7 @@ def main():
             value_loss_scale=args.value_loss_scale,
             aux_loss_scale=args.aux_loss_scale,
             training_subsample_frac=args.training_subsample_frac,
+            training_num_workers=args.training_num_workers,
             buf_dir=args.buf_dir,
             export_sgf=args.export_sgf,
             bot_frac=args.bot_frac if args.opponent_bot == "alphabeta" else 0.0,
