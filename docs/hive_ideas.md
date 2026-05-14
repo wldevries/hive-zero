@@ -149,22 +149,62 @@ fit their targets and placements chronically undershoot. Even after illegal
 logits are mostly suppressed (mean -13 to -16 by gen 20), the residual leak
 (~3% mean, ~11% p90) is enough to maintain the bias.
 
+### Why unmasking BOTH heads would be worse, not better
+
+A natural follow-up is "if the asymmetry is the problem, unmask both heads."
+It isn't. The relevant quantity is **(dynamic range) × (number of illegal
+cells to suppress)** per head, and the two axes pull in the same direction
+for the move head once it's in the denominator:
+
+| head  | illegal cells (gs=17) | dynamic range | observed illegal-logit mean (current masked-trained model) |
+|-------|----------------------:|---------------|-----------------------------------------------------------:|
+| place | 5·gs² = 1,445         | bounded (Conv1×1→BN→ReLU→Conv1×1) | **−13.6** |
+| move  | gs²² = 83,521         | bilinear Q·K/√D (~√D × larger)    | **+0.48** |
+
+The move head's larger dynamic range doesn't compensate for its ~60× larger
+illegal-cell count. And the bilinear structure adds a global constraint that
+the place head doesn't have: K[dst] is a *single* vector regardless of which
+src it's paired with, so the model can't independently push down the logit
+for "(src=A, dst=C) illegal" while keeping "(src=B, dst=C) legal" high — the
+correct sign pattern has to emerge from inner products of low-rank vectors,
+across thousands of pairs that share each Q and K embedding.
+
+Concrete: if we joint-softmaxed all four logit groups on the current
+masked-trained `hive-small` model (i.e. simulated a "both unmasked"
+denominator), illegal-move mass would be ~99.96% — 83k illegal pairs at mean
+logit +0.48 dwarfing 16 legal moves at mean +1.0 by sheer count. A
+both-unmasked run from scratch would have to drag those 83k pairs to deeply
+negative logits through low-rank embeddings to make training match
+inference; the residual leak that does survive would dominate Z_full and
+dilute *both* heads' legal priors. Trading the place-vs-move bias for an
+across-the-board legal-vs-illegal bias is not progress.
+
 ### Rule for future heads
 
 When adding a head whose targets share a softmax denominator with another
-head, the two heads must have **comparable dynamic range**. Either both bounded
-(e.g. both Conv1×1) or both unbounded (e.g. both bilinear). Mixing the two
-under one softmax silently biases the prior toward whichever head can produce
-larger logits, by an amount proportional to how aggressively the denom
-expands beyond the legal set.
+head, the two heads must have comparable **(dynamic range) × (illegal-cell
+count)**. Not just comparable dynamic range — the count side of the product
+matters too, and a bilinear head's illegal-cell count grows as gs²² while a
+per-cell head grows as channels·gs². Mixing the two under one softmax
+silently biases the prior toward whichever head's product is smaller, by an
+amount proportional to the larger head's residual illegal leak. If you want
+illegal-cell suppression as a training signal, give it its own head with an
+independent BCE loss — sigmoid per cell, no softmax coupling. KataGo's
+auxiliary head zoo works this way for exactly this reason.
 
 ### Where "suppress illegal placements" lives instead
 
-The same auxiliary signal is now carried by the dedicated `src_logits` head
+Movement suppression is already carried implicitly by the `src_logits` head
 (commit aaa7ac2): per-cell BCE against the source-marginal MCTS visit
-distribution. A K=1 "is-this-cell-a-legal-placement" BCE head is a
-straightforward extension if more illegal-placement gradient is ever wanted —
-keep it off the policy softmax.
+distribution, which is zero at every empty/pinned/no-legal-move source. For
+placements we now have an explicit `legal_place_logits` aux head: per-cell
+BCE against the binary "any of my piece types can place here" mask, derived
+for free from the existing `place_idx` targets in the replay buffer. Both
+heads sit off the trunk in parallel with the policy heads, share none of the
+policy softmax, and contribute a dense per-cell gradient signal at every
+position. Movement-pair legality (full gs²×gs² mask) is not worth adding —
+factor it into the same source-marginal signal if more gradient is needed
+there.
 
 ## Supervised mix during self-play
 

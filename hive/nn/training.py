@@ -477,7 +477,7 @@ class Trainer:
         aux_target = aux_target.to(device)
 
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-            policy_logits, wdl_logits, aux, src_logits = self._compiled(board, reserve)
+            policy_logits, wdl_logits, aux, src_logits, legal_place_logits = self._compiled(board, reserve)
 
         B = board.size(0)
         gs = board.size(-1)
@@ -550,7 +550,21 @@ class Trainer:
             src_logits, src_target
         )
 
-        aux_loss = qd_loss + qe_loss + mob_loss + src_loss
+        # Legal-placement aux: per-cell BCE against the binary "any of my piece
+        # types can place here" mask derived from place_idx. p_idx[i, k] is the
+        # flat (channel × gs² + cell) index of the k-th legal placement;
+        # cell = idx % gs², OR'd across channels.
+        p_cells = (p_idx.long() % gs2)                                 # (B, MAX_PLACEMENTS)
+        p_valid = (torch.arange(MAX_PLACEMENTS, device=device).unsqueeze(0)
+                   < n_p.unsqueeze(1).long()).to(legal_place_logits.dtype)
+        lp_count = torch.zeros(B, gs2, device=device, dtype=legal_place_logits.dtype)
+        lp_count.scatter_add_(1, p_cells, p_valid)
+        lp_target = (lp_count > 0).to(legal_place_logits.dtype)
+        lp_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            legal_place_logits, lp_target
+        )
+
+        aux_loss = qd_loss + qe_loss + mob_loss + src_loss + lp_loss
 
         total = policy_loss + value_loss_scale * value_loss + aux_loss_scale * aux_loss
 
@@ -565,7 +579,7 @@ class Trainer:
         return {
             "total": total, "policy": policy_loss, "value": value_loss,
             "aux": aux_loss, "qd": qd_loss, "qe": qe_loss, "mob": mob_loss,
-            "src": src_loss,
+            "src": src_loss, "lp": lp_loss,
             "top1_hits": top1_hits, "uniform_ce_sum": uniform_ce_sum,
             "n_pol_active": n_pol_active,
         }
@@ -578,7 +592,7 @@ class Trainer:
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=drop)
 
         sums = {"total": 0.0, "policy": 0.0, "value": 0.0,
-                "aux": 0.0, "qd": 0.0, "qe": 0.0, "mob": 0.0, "src": 0.0}
+                "aux": 0.0, "qd": 0.0, "qe": 0.0, "mob": 0.0, "src": 0.0, "lp": 0.0}
         num_batches = 0
 
         for batch in tqdm(loader, desc="  Training", leave=False, unit="batch"):
@@ -602,7 +616,7 @@ class Trainer:
 
         if num_batches == 0:
             return {"policy_loss": 0, "value_loss": 0, "qd_loss": 0,
-                    "qe_loss": 0, "mob_loss": 0, "src_loss": 0,
+                    "qe_loss": 0, "mob_loss": 0, "src_loss": 0, "lp_loss": 0,
                     "aux_loss": 0, "total_loss": 0}
 
         return {
@@ -613,6 +627,7 @@ class Trainer:
             "qe_loss": sums["qe"] / num_batches,
             "mob_loss": sums["mob"] / num_batches,
             "src_loss": sums["src"] / num_batches,
+            "lp_loss": sums["lp"] / num_batches,
             "total_loss": sums["total"] / num_batches,
         }
 
@@ -625,7 +640,7 @@ class Trainer:
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=drop)
 
         sums = {"total": 0.0, "policy": 0.0, "value": 0.0,
-                "aux": 0.0, "qd": 0.0, "qe": 0.0, "mob": 0.0, "src": 0.0}
+                "aux": 0.0, "qd": 0.0, "qe": 0.0, "mob": 0.0, "src": 0.0, "lp": 0.0}
         top1_hits = 0
         uniform_ce_sum = 0.0
         n_pol_active = 0
@@ -642,7 +657,7 @@ class Trainer:
 
         if num_batches == 0:
             return {"policy_loss": 0, "value_loss": 0, "qd_loss": 0,
-                    "qe_loss": 0, "mob_loss": 0, "src_loss": 0,
+                    "qe_loss": 0, "mob_loss": 0, "src_loss": 0, "lp_loss": 0,
                     "aux_loss": 0, "total_loss": 0,
                     "top1_acc": 0.0, "uniform_ce": 0.0}
 
@@ -655,6 +670,7 @@ class Trainer:
             "qe_loss": sums["qe"] / num_batches,
             "mob_loss": sums["mob"] / num_batches,
             "src_loss": sums["src"] / num_batches,
+            "lp_loss": sums["lp"] / num_batches,
             "total_loss": sums["total"] / num_batches,
             "top1_acc": top1_hits / denom,
             "uniform_ce": uniform_ce_sum / denom,

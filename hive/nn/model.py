@@ -113,6 +113,11 @@ class HiveNet(nn.Module):
 
         # Source-marginal aux head: one scalar logit per cell.
         self.src_head = nn.Conv2d(channels, 1, 1)
+        # Legal-placement aux head: one scalar logit per cell, BCE target is
+        # the binary "any of my piece types can place here" mask derived from
+        # the replay buffer's place_idx. Off the policy softmax — see
+        # docs/hive_ideas.md (#placement-policy-masking).
+        self.legal_place_head = nn.Conv2d(channels, 1, 1)
 
     def forward(self, board_tensor: torch.Tensor, reserve_vector: torch.Tensor):
         """
@@ -131,6 +136,10 @@ class HiveNet(nn.Module):
                            marginal aux task. Training applies BCE-with-logits
                            against scatter-add of movement probs by src cell.
                            Dropped from ONNX export.
+            legal_place_logits: (batch, G²) raw per-cell logits for the
+                           legal-placement aux task. Training applies
+                           BCE-with-logits against the binary "any piece
+                           type can place here" mask. Dropped from ONNX.
         """
         g = board_tensor.size(-1)
         r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, g, g)
@@ -162,8 +171,9 @@ class HiveNet(nn.Module):
         aux = torch.sigmoid(self.qd_fc2(qd))
 
         src_logits = self.src_head(x).flatten(1)
+        legal_place_logits = self.legal_place_head(x).flatten(1)
 
-        return policy_logits, wdl_logits, aux, src_logits
+        return policy_logits, wdl_logits, aux, src_logits, legal_place_logits
 
 
 def create_model(model_config: dict | None = None) -> HiveNet:
@@ -207,8 +217,9 @@ class _OnnxExportWrapper(nn.Module):
         self.model = model
 
     def forward(self, board: torch.Tensor, reserve: torch.Tensor):
-        # src_logits is training-only aux; drop it from the ONNX surface.
-        policy, wdl_logits, aux, _src = self.model(board, reserve)
+        # src_logits and legal_place_logits are training-only aux; drop both
+        # from the ONNX surface.
+        policy, wdl_logits, aux, _src, _lp = self.model(board, reserve)
         wdl = F.softmax(wdl_logits, dim=1)
         return policy, wdl, aux
 
