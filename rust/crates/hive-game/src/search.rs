@@ -1203,25 +1203,32 @@ pub fn play_selfplay_core(
         }
     }
 
-    let mut result_board_data = Vec::new();
-    let mut result_reserve_data = Vec::new();
+    // total_turns is the tight upper bound on the eventual sample count
+    // (skip-mode and repetition truncation can drop some, but never add).
+    // Preallocating avoids the ~2× memcpy cost of Vec doubling — the board
+    // data alone is ~50KB/sample, ~870MB at 17k samples.
+    let cap = total_turns as usize;
+    let mut result_board_data = Vec::with_capacity(cap * board_size);
+    let mut result_reserve_data = Vec::with_capacity(cap * RESERVE_SIZE);
     let mut result_place_idx: Vec<u16> = Vec::new();
     let mut result_place_prob: Vec<f32> = Vec::new();
-    let mut result_place_offsets: Vec<u32> = vec![0u32];
+    let mut result_place_offsets: Vec<u32> = Vec::with_capacity(cap + 1);
+    result_place_offsets.push(0);
     let mut result_movement_src: Vec<u16> = Vec::new();
     let mut result_movement_dst: Vec<u16> = Vec::new();
     let mut result_movement_prob: Vec<f32> = Vec::new();
-    let mut result_movement_offsets: Vec<u32> = vec![0u32];
-    let mut result_value_targets = Vec::new();
-    let mut result_root_q_targets: Vec<f32> = Vec::new();
-    let mut result_value_only = Vec::new();
-    let mut result_policy_only = Vec::new();
-    let mut result_my_queen_danger = Vec::new();
-    let mut result_opp_queen_danger = Vec::new();
-    let mut result_my_queen_escape = Vec::new();
-    let mut result_opp_queen_escape = Vec::new();
-    let mut result_my_mobility = Vec::new();
-    let mut result_opp_mobility = Vec::new();
+    let mut result_movement_offsets: Vec<u32> = Vec::with_capacity(cap + 1);
+    result_movement_offsets.push(0);
+    let mut result_value_targets = Vec::with_capacity(cap);
+    let mut result_root_q_targets: Vec<f32> = Vec::with_capacity(cap);
+    let mut result_value_only = Vec::with_capacity(cap);
+    let mut result_policy_only = Vec::with_capacity(cap);
+    let mut result_my_queen_danger = Vec::with_capacity(cap);
+    let mut result_opp_queen_danger = Vec::with_capacity(cap);
+    let mut result_my_queen_escape = Vec::with_capacity(cap);
+    let mut result_opp_queen_escape = Vec::with_capacity(cap);
+    let mut result_my_mobility = Vec::with_capacity(cap);
+    let mut result_opp_mobility = Vec::with_capacity(cap);
     let mut num_samples = 0usize;
 
     let mut wins_w = 0u32;
