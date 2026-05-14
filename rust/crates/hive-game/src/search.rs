@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rand::RngExt;
 use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
@@ -85,6 +87,83 @@ use crate::piece::PieceColor;
 pub type EvalFn<'a> = Box<dyn FnMut(&[f32], &[f32], usize) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> + 'a>;
 pub type SelfPlayProgressFn<'a> = Box<dyn FnMut(u32, u32, u32, u32, u32, u32, u32) + 'a>;
 pub type BattleProgressFn<'a> = Box<dyn FnMut(u32, u32, u32, u32) + 'a>;
+
+/// Opaque ticket returned by `BatchEvaluator::submit` and consumed by
+/// `collect`. The implementation chooses what it means: the synchronous
+/// evaluator uses it as an index into a result stash; the pipelined ORT
+/// evaluator maps it to a oneshot receiver from the worker thread.
+pub type RequestId = u64;
+
+/// Two-phase batch inference interface. `submit` posts a request and returns
+/// immediately; `collect` blocks until that request's response is ready.
+///
+/// The split lets `play_selfplay_core` overlap leaf selection for batch N+1
+/// with the GPU forward for batch N when paired with a worker-thread
+/// implementation. The default synchronous wrapper (used for the Python
+/// callback path, where the GIL precludes overlap) does the work inside
+/// `submit` and trivially returns it in `collect`.
+///
+/// Boards and reserves are taken by value so a pipelined implementation can
+/// ship the owned buffers across a channel to a worker thread without an
+/// additional memcpy. The synchronous wrapper just borrows from the Vec
+/// before dropping it.
+pub trait BatchEvaluator {
+    fn submit(
+        &mut self,
+        boards: Vec<f32>,
+        reserves: Vec<f32>,
+        n: usize,
+    ) -> Result<RequestId, String>;
+
+    fn collect(
+        &mut self,
+        id: RequestId,
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>;
+}
+
+/// Default `BatchEvaluator` that runs the closure synchronously inside
+/// `submit` and stashes the result for `collect`. Behaviour is identical to
+/// calling `eval_fn` inline — no pipelining benefit, but lets the inner loop
+/// speak a single API regardless of backend.
+pub struct SyncEvaluator<'a> {
+    eval_fn: EvalFn<'a>,
+    next_id: RequestId,
+    pending: HashMap<RequestId, Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>>,
+}
+
+impl<'a> SyncEvaluator<'a> {
+    pub fn new(eval_fn: EvalFn<'a>) -> Self {
+        Self {
+            eval_fn,
+            next_id: 0,
+            pending: HashMap::new(),
+        }
+    }
+}
+
+impl<'a> BatchEvaluator for SyncEvaluator<'a> {
+    fn submit(
+        &mut self,
+        boards: Vec<f32>,
+        reserves: Vec<f32>,
+        n: usize,
+    ) -> Result<RequestId, String> {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        let result = (self.eval_fn)(&boards, &reserves, n);
+        self.pending.insert(id, result);
+        Ok(id)
+    }
+
+    fn collect(
+        &mut self,
+        id: RequestId,
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+        self.pending
+            .remove(&id)
+            .ok_or_else(|| format!("SyncEvaluator: unknown request id {id}"))?
+    }
+}
 
 /// Alphabeta depth used when computing value targets for unfinished games
 /// (timeouts, mutual surround, repetition draws). The static heuristic alone
@@ -415,7 +494,7 @@ fn mean_std(sum: f64, sum_sq: f64, count: u64) -> (f32, f32) {
 pub fn play_selfplay_core(
     num_games: usize,
     config: SelfPlayConfig,
-    mut eval_fn: EvalFn<'_>,
+    evaluator: &mut dyn BatchEvaluator,
     mut progress_fn: Option<SelfPlayProgressFn<'_>>,
     opening_sequences: Vec<Vec<String>>,
 ) -> Result<SelfPlayResult, String> {
@@ -844,7 +923,9 @@ pub fn play_selfplay_core(
                 flat_boards.extend_from_slice(&board_buf[bo..bo + board_size]);
                 flat_reserves.extend_from_slice(&reserve_buf[ro..ro + RESERVE_SIZE]);
             }
-            let (init_policies, _, _) = eval_fn(&flat_boards, &flat_reserves, fresh.len())?;
+            let fresh_count = fresh.len();
+            let init_id = evaluator.submit(flat_boards, flat_reserves, fresh_count)?;
+            let (init_policies, _, _) = evaluator.collect(init_id)?;
             for (batch_i, &fi) in fresh.iter().enumerate() {
                 let game_index = mcts_games[fi];
                 let policy = &init_policies[batch_i * policy_size..(batch_i + 1) * policy_size];
@@ -904,63 +985,111 @@ pub fn play_selfplay_core(
         if !searching.is_empty() {
             let mut sims_done = vec![0usize; searching.len()];
             let mut still_searching: Vec<usize> = (0..searching.len()).collect();
-            let mut per_game_leaf_ids: Vec<Vec<NodeId>> = vec![Vec::new(); searching.len()];
 
-            while !still_searching.is_empty() {
-                for index in 0..searching.len() {
-                    per_game_leaf_ids[index].clear();
-                }
+            // Pipelined sim loop: at any time at most one batch is in flight
+            // on the evaluator. Each iteration builds + submits batch N+1 and
+            // then waits on + expands batch N, so the GPU forward for the
+            // previous batch overlaps with the main thread's leaf selection
+            // for the next one.
+            //
+            // `pending` holds the in-flight request id together with the
+            // per-game stashes taken out of each `MctsSearch` at submit
+            // time, so `expand_and_backprop_with_stash` knows which leaves
+            // belong to which game when the response arrives.
+            //
+            // For the synchronous `SyncEvaluator` this loop is equivalent to
+            // the old "build → submit → collect → expand" pattern (no
+            // overlap), since `submit` does the work inline.
+            let mut pending: Option<(RequestId, Vec<Vec<(NodeId, Game)>>)> = None;
 
+            loop {
+                // Phase A: select + encode the next batch's leaves, if any
+                // games still need sims.
                 let mut flat_boards: Vec<f32> = Vec::new();
                 let mut flat_reserves: Vec<f32> = Vec::new();
                 let mut any_leaves = false;
 
-                for _ in 0..leaf_batch_size {
-                    let mut any_this_round = false;
-                    for &search_index in &still_searching {
-                        let game_index = mcts_games[searching[search_index]];
-                        let leaf_ids = searches[game_index].select_leaves(1);
-                        sims_done[search_index] += leaf_ids.len().max(1);
-                        for &leaf_id in &leaf_ids {
-                            let (board, reserve) = searches[game_index].encode_leaf(leaf_id);
-                            flat_boards.extend_from_slice(&board);
-                            flat_reserves.extend_from_slice(&reserve);
-                            per_game_leaf_ids[search_index].push(leaf_id);
-                            any_this_round = true;
-                            any_leaves = true;
+                if !still_searching.is_empty() {
+                    for _ in 0..leaf_batch_size {
+                        let mut any_this_round = false;
+                        for &search_index in &still_searching {
+                            let game_index = mcts_games[searching[search_index]];
+                            let leaf_ids = searches[game_index].select_leaves(1);
+                            sims_done[search_index] += leaf_ids.len().max(1);
+                            for &leaf_id in &leaf_ids {
+                                let (board, reserve) = searches[game_index].encode_leaf(leaf_id);
+                                flat_boards.extend_from_slice(&board);
+                                flat_reserves.extend_from_slice(&reserve);
+                                any_this_round = true;
+                                any_leaves = true;
+                            }
+                        }
+                        still_searching
+                            .retain(|&search_index| sims_done[search_index] < sim_caps[search_index]);
+                        if !any_this_round {
+                            break;
                         }
                     }
-                    still_searching.retain(|&search_index| sims_done[search_index] < sim_caps[search_index]);
-                    if !any_this_round {
-                        break;
-                    }
                 }
 
-                if !any_leaves {
-                    break;
-                }
-
-                let total_leaves = flat_boards.len() / board_size;
-                let (policy_data, value_data, draw_data) = eval_fn(&flat_boards, &flat_reserves, total_leaves)?;
-
-                let mut offset = 0usize;
-                for search_index in 0..searching.len() {
-                    let num_leaves = per_game_leaf_ids[search_index].len();
-                    if num_leaves == 0 {
-                        continue;
-                    }
-                    let game_index = mcts_games[searching[search_index]];
-                    let policies: Vec<Vec<f32>> = (0..num_leaves)
-                        .map(|leaf_offset| {
-                            policy_data
-                                [(offset + leaf_offset) * policy_size..(offset + leaf_offset + 1) * policy_size]
-                                .to_vec()
+                // Phase B: snapshot each game's stash out of its `MctsSearch`
+                // so the next iteration's select_leaves can refill cleanly.
+                // Empty Vec for games that produced no leaves this round.
+                let new_stashes: Vec<Vec<(NodeId, Game)>> = if any_leaves {
+                    (0..searching.len())
+                        .map(|i| {
+                            let game_index = mcts_games[searching[i]];
+                            searches[game_index].take_stash()
                         })
-                        .collect();
-                    let values = value_data[offset..offset + num_leaves].to_vec();
-                    let draws = draw_data[offset..offset + num_leaves].to_vec();
-                    searches[game_index].expand_and_backprop(&policies, &values, &draws);
-                    offset += num_leaves;
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                // Phase C: submit the new batch (non-blocking on a pipelined
+                // evaluator). After this returns, the GPU starts working on
+                // batch N+1.
+                let new_pending = if any_leaves {
+                    let total_leaves = flat_boards.len() / board_size;
+                    let id = evaluator.submit(flat_boards, flat_reserves, total_leaves)?;
+                    Some((id, new_stashes))
+                } else {
+                    None
+                };
+
+                // Phase D: collect + expand the PREVIOUS batch (if any).
+                // This is where the pipelined evaluator actually blocks on
+                // the GPU response — but at that point the next batch is
+                // already in flight, so the GPU stays busy.
+                if let Some((prev_id, prev_stashes)) = pending.take() {
+                    let (policy_data, value_data, draw_data) = evaluator.collect(prev_id)?;
+                    let mut offset = 0usize;
+                    for (i, stash) in prev_stashes.into_iter().enumerate() {
+                        let num_leaves = stash.len();
+                        if num_leaves == 0 {
+                            continue;
+                        }
+                        let game_index = mcts_games[searching[i]];
+                        let policies: Vec<Vec<f32>> = (0..num_leaves)
+                            .map(|leaf_offset| {
+                                policy_data
+                                    [(offset + leaf_offset) * policy_size..(offset + leaf_offset + 1) * policy_size]
+                                    .to_vec()
+                            })
+                            .collect();
+                        let values = value_data[offset..offset + num_leaves].to_vec();
+                        let draws = draw_data[offset..offset + num_leaves].to_vec();
+                        searches[game_index]
+                            .expand_and_backprop_with_stash(stash, &policies, &values, &draws);
+                        offset += num_leaves;
+                    }
+                }
+
+                pending = new_pending;
+
+                // Termination: no batch in flight and no more sims to issue.
+                if pending.is_none() && still_searching.is_empty() {
+                    break;
                 }
             }
         }

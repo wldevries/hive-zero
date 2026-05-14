@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use numpy::{PyArray1, PyArray2, PyArrayMethods};
@@ -11,9 +13,9 @@ use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE, f32_to_bf16};
 use hive_game::game::Game;
 use hive_game::move_encoding;
 use hive_game::piece::PieceColor;
-use hive_game::search::{self, play_battle_core, play_selfplay_core, SelfPlayConfig, TimeoutTarget};
+use hive_game::search::{self, play_battle_core, play_selfplay_core, BatchEvaluator, RequestId, SelfPlayConfig, TimeoutTarget};
 
-use crate::inference::HiveInference;
+use crate::inference::{HiveInference, HiveInferenceResult, HiveInferenceWorker};
 
 fn parse_timeout_target(s: &str) -> PyResult<TimeoutTarget> {
     match s {
@@ -191,6 +193,125 @@ fn print_ort_timing(
         other_eval.as_secs_f64(),
         pct(other_eval),
     );
+}
+
+/// Pipelined variant of `print_ort_timing`. `total` and `t_eval` are
+/// measured on the main thread; the inner phase timers (`input/run/extract`)
+/// come from the worker thread after shutdown. On the pipelined path,
+/// `non_eval` is the wall-clock the main thread spent overlapped with GPU
+/// work, so `total ≈ max(eval_wallclock_on_worker, non_eval)` — the value
+/// `t_eval` here is just the channel send/recv overhead (~0), not the
+/// GPU-busy time.
+fn print_ort_timing_pipelined(
+    total: Duration,
+    t_eval: Duration,
+    t_input: Duration,
+    t_run: Duration,
+    t_extract: Duration,
+) {
+    let total_s = total.as_secs_f64();
+    if total_s <= 0.0 {
+        return;
+    }
+    let pct = |d: Duration| 100.0 * d.as_secs_f64() / total_s;
+    let non_eval = total.saturating_sub(t_eval);
+    let worker_total = t_input + t_run + t_extract;
+    eprintln!(
+        "  [ort timing pipelined] total={:.2}s  main-eval={:.2}s ({:.0}%)  main-other={:.2}s ({:.0}%)",
+        total_s,
+        t_eval.as_secs_f64(),
+        pct(t_eval),
+        non_eval.as_secs_f64(),
+        pct(non_eval),
+    );
+    eprintln!(
+        "  [ort timing pipelined]   worker: input={:.2}s ({:.0}%)  run={:.2}s ({:.0}%)  extract={:.2}s ({:.0}%)  worker-total={:.2}s ({:.0}%)",
+        t_input.as_secs_f64(),
+        pct(t_input),
+        t_run.as_secs_f64(),
+        pct(t_run),
+        t_extract.as_secs_f64(),
+        pct(t_extract),
+        worker_total.as_secs_f64(),
+        pct(worker_total),
+    );
+}
+
+/// `BatchEvaluator` impl that hands batches off to a `HiveInferenceWorker`
+/// running on a dedicated thread. `submit` returns immediately after posting
+/// the request (one batch in flight at a time, bounded by the worker's
+/// channel capacity); `collect` blocks on the per-request response channel.
+///
+/// WDL splitting (W−L scalar + symmetric D) happens in `collect`, matching
+/// the inline closure the synchronous path used to do.
+///
+/// Does not handle `fixed_batch_size` padding/chunking — the caller must
+/// route through the synchronous `HiveOrtEngine` path when a static batch
+/// dim is required.
+struct PipelinedEvaluator<'w> {
+    worker: &'w HiveInferenceWorker,
+    next_id: RequestId,
+    pending: HashMap<RequestId, Receiver<Result<HiveInferenceResult, String>>>,
+    /// Wall-clock the main thread spent inside `submit`+`collect`. With
+    /// pipelining this is dominated by the recv() blocking time when the
+    /// GPU is the bottleneck, or near zero when the main thread is the
+    /// bottleneck.
+    t_eval: Duration,
+}
+
+impl<'w> PipelinedEvaluator<'w> {
+    fn new(worker: &'w HiveInferenceWorker) -> Self {
+        Self {
+            worker,
+            next_id: 0,
+            pending: HashMap::new(),
+            t_eval: Duration::ZERO,
+        }
+    }
+}
+
+impl<'w> BatchEvaluator for PipelinedEvaluator<'w> {
+    fn submit(
+        &mut self,
+        boards: Vec<f32>,
+        reserves: Vec<f32>,
+        n: usize,
+    ) -> Result<RequestId, String> {
+        let t0 = Instant::now();
+        let recv = self.worker.submit(boards, reserves, n)?;
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.pending.insert(id, recv);
+        self.t_eval += t0.elapsed();
+        Ok(id)
+    }
+
+    fn collect(
+        &mut self,
+        id: RequestId,
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+        let t0 = Instant::now();
+        let recv = self
+            .pending
+            .remove(&id)
+            .ok_or_else(|| format!("PipelinedEvaluator: unknown request {id}"))?;
+        let result = recv
+            .recv()
+            .map_err(|_| "hive-ort-worker died before responding".to_string())??;
+
+        // Split WDL: W−L is zero-sum (sign-flipped in backprop), D is
+        // symmetric (added unflipped). Contempt is applied at MCTS value()
+        // time, not baked in here.
+        let batch_size = result.wdl.len() / 3;
+        let mut values = Vec::with_capacity(batch_size);
+        let mut draws = Vec::with_capacity(batch_size);
+        for i in 0..batch_size {
+            values.push(result.wdl[i * 3] - result.wdl[i * 3 + 2]);
+            draws.push(result.wdl[i * 3 + 1]);
+        }
+        self.t_eval += t0.elapsed();
+        Ok((result.policy, values, draws))
+    }
 }
 
 fn make_selfplay_progress<'py>(
@@ -631,78 +752,128 @@ impl PySelfPlaySession {
         let progress_core = make_selfplay_progress(py, progress_fn);
 
         let result = if let Some(path) = onnx_path {
-            // Keep an outer handle to the engine so we can drain per-phase
-            // wall-clock timers after self-play completes (mirrors the Yinsh
-            // ORT path). The closure captures a clone of the Arc; after
-            // play_selfplay_core returns the closure is dropped, leaving us
-            // as the sole owner so the lock is uncontended.
-            let engine = crate::inference::HiveOrtEngine::load(&path)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            let engine_handle = Arc::new(Mutex::new(engine));
-            let t_eval_handle: Arc<Mutex<Duration>> = Arc::new(Mutex::new(Duration::ZERO));
-
-            let engine_for_eval = Arc::clone(&engine_handle);
-            let t_eval_for_eval = Arc::clone(&t_eval_handle);
-            let core_eval: search::EvalFn<'_> = Box::new(move |boards, reserves, actual| {
-                let target = fixed_batch_size.unwrap_or(actual);
-                let t_start = Instant::now();
-                let result = infer_padded(
-                    |chunk_boards, chunk_reserves, batch_size| {
-                        let mut engine = engine_for_eval
-                            .lock()
-                            .map_err(|_| "ONNX engine mutex poisoned".to_string())?;
-                        let result = engine
-                            .infer_batch(
-                                chunk_boards,
-                                chunk_reserves,
-                                batch_size,
-                                NUM_CHANNELS,
-                                grid_size,
-                                RESERVE_SIZE,
-                            )
-                            .map_err(|e| e.to_string())?;
-                        // Split WDL: W−L is zero-sum (sign-flipped in backprop),
-                        // D is symmetric (added unflipped). Contempt is applied
-                        // at MCTS value() time, not baked in here.
-                        let mut values = Vec::with_capacity(batch_size);
-                        let mut draws = Vec::with_capacity(batch_size);
-                        for i in 0..batch_size {
-                            values.push(result.wdl[i * 3] - result.wdl[i * 3 + 2]);
-                            draws.push(result.wdl[i * 3 + 1]);
-                        }
-                        Ok((result.policy, values, draws))
-                    },
-                    boards,
-                    reserves,
-                    actual,
-                    target,
+            if fixed_batch_size.is_none() {
+                // Pipelined ORT path: worker thread owns the session;
+                // play_selfplay_core overlaps leaf selection for batch N+1
+                // with the GPU forward for batch N. Only safe when no
+                // static batch dim is required — chunking + aggregation
+                // across multiple ORT calls per logical submit would
+                // require non-trivial buffering inside PipelinedEvaluator.
+                let worker = HiveInferenceWorker::spawn(
+                    path,
+                    NUM_CHANNELS,
                     grid_size,
-                );
-                if let Ok(mut acc) = t_eval_for_eval.lock() {
-                    *acc += t_start.elapsed();
+                    RESERVE_SIZE,
+                )
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+                // Halve play_batch_size so per-game in-flight virtual-loss
+                // leaves stay constant: the pipeline holds two batches
+                // alive at once (the one running on GPU + the next being
+                // selected), so VL accumulates over `2 × play_batch_size`
+                // leaves per game vs. `play_batch_size` on the sync path.
+                let mut config = self.session.config.clone();
+                let original_pbs = config.mcts.play_batch_size;
+                if original_pbs > 1 {
+                    config.mcts.play_batch_size = original_pbs / 2;
+                    eprintln!(
+                        "  [pipelined] play_batch_size: {} → {} (halved for pipeline depth)",
+                        original_pbs, config.mcts.play_batch_size,
+                    );
                 }
+
+                let t_total_start = Instant::now();
+                let mut evaluator = PipelinedEvaluator::new(&worker);
+                let result = play_selfplay_core(
+                    num_games,
+                    config,
+                    &mut evaluator,
+                    progress_core,
+                    opening_sequences,
+                );
+                let total = t_total_start.elapsed();
+                let t_eval = evaluator.t_eval;
+                // Drop evaluator (releases its borrow of `worker`) before
+                // taking the worker by value for shutdown.
+                drop(evaluator);
+                let timing = worker.shutdown_and_drain_timing();
+                print_ort_timing_pipelined(
+                    total,
+                    t_eval,
+                    timing.t_input,
+                    timing.t_run,
+                    timing.t_extract,
+                );
                 result
-            });
-            let t_total_start = Instant::now();
-            let result = play_selfplay_core(
-                num_games,
-                self.session.config.clone(),
-                core_eval,
-                progress_core,
-                opening_sequences,
-            );
-            let total = t_total_start.elapsed();
+            } else {
+                // Synchronous ORT path (kept for `fixed_batch_size` use,
+                // which forces per-call padding/chunking inside
+                // `infer_padded`). The Mutex is uncontended in practice
+                // since core_eval is dropped before we drain timing.
+                let engine = crate::inference::HiveOrtEngine::load(&path)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                let engine_handle = Arc::new(Mutex::new(engine));
+                let t_eval_handle: Arc<Mutex<Duration>> = Arc::new(Mutex::new(Duration::ZERO));
 
-            // core_eval is dropped at this point, so we hold the only Arc to
-            // the engine and the timing accumulator.
-            let t_eval = t_eval_handle.lock().map(|d| *d).unwrap_or_default();
-            let (t_input, t_run, t_extract) = engine_handle
-                .lock()
-                .map(|e| e.phase_times())
-                .unwrap_or((Duration::ZERO, Duration::ZERO, Duration::ZERO));
-            print_ort_timing(total, t_eval, t_input, t_run, t_extract);
+                let engine_for_eval = Arc::clone(&engine_handle);
+                let t_eval_for_eval = Arc::clone(&t_eval_handle);
+                let core_eval: search::EvalFn<'_> = Box::new(move |boards, reserves, actual| {
+                    let target = fixed_batch_size.unwrap_or(actual);
+                    let t_start = Instant::now();
+                    let result = infer_padded(
+                        |chunk_boards, chunk_reserves, batch_size| {
+                            let mut engine = engine_for_eval
+                                .lock()
+                                .map_err(|_| "ONNX engine mutex poisoned".to_string())?;
+                            let result = engine
+                                .infer_batch(
+                                    chunk_boards,
+                                    chunk_reserves,
+                                    batch_size,
+                                    NUM_CHANNELS,
+                                    grid_size,
+                                    RESERVE_SIZE,
+                                )
+                                .map_err(|e| e.to_string())?;
+                            let mut values = Vec::with_capacity(batch_size);
+                            let mut draws = Vec::with_capacity(batch_size);
+                            for i in 0..batch_size {
+                                values.push(result.wdl[i * 3] - result.wdl[i * 3 + 2]);
+                                draws.push(result.wdl[i * 3 + 1]);
+                            }
+                            Ok((result.policy, values, draws))
+                        },
+                        boards,
+                        reserves,
+                        actual,
+                        target,
+                        grid_size,
+                    );
+                    if let Ok(mut acc) = t_eval_for_eval.lock() {
+                        *acc += t_start.elapsed();
+                    }
+                    result
+                });
+                let t_total_start = Instant::now();
+                let mut evaluator = search::SyncEvaluator::new(core_eval);
+                let result = play_selfplay_core(
+                    num_games,
+                    self.session.config.clone(),
+                    &mut evaluator,
+                    progress_core,
+                    opening_sequences,
+                );
+                let total = t_total_start.elapsed();
 
-            result
+                let t_eval = t_eval_handle.lock().map(|d| *d).unwrap_or_default();
+                let (t_input, t_run, t_extract) = engine_handle
+                    .lock()
+                    .map(|e| e.phase_times())
+                    .unwrap_or((Duration::ZERO, Duration::ZERO, Duration::ZERO));
+                print_ort_timing(total, t_eval, t_input, t_run, t_extract);
+
+                result
+            }
         } else {
             let eval_fn = eval_fn.ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err("eval_fn is required when onnx_path is not provided")
@@ -727,10 +898,11 @@ impl PySelfPlaySession {
                     grid_size,
                 )
             });
+            let mut evaluator = search::SyncEvaluator::new(core_eval);
             play_selfplay_core(
                 num_games,
                 self.session.config.clone(),
-                core_eval,
+                &mut evaluator,
                 progress_core,
                 opening_sequences,
             )

@@ -303,6 +303,25 @@ fn apply_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, mut node_id: NodeId) {
     }
 }
 
+/// Exact inverse of `apply_virtual_loss`: decrement visit_count by 1 and add
+/// 1.0 back to value_sum at every node up the tree. Used by pipelined
+/// self-play when the same leaf appears in two consecutive in-flight
+/// batches: the first batch's expansion runs normally, and the second
+/// batch's stash entry for that leaf is undone via this function rather
+/// than re-expanded or re-backpropagated (which would double-count the NN's
+/// value contribution).
+fn undo_virtual_loss<M: Copy>(arena: &mut NodeArena<M>, mut node_id: NodeId) {
+    loop {
+        let node = arena.get_mut(node_id);
+        node.visit_count = node.visit_count.saturating_sub(1);
+        node.value_sum += 1.0;
+        match node.parent {
+            Some(parent) => node_id = parent,
+            None => break,
+        }
+    }
+}
+
 /// Correct virtual loss by replacing the -1.0 placeholder with the real backed-up
 /// (W−L, D) pair. Does NOT increment visit_count (already done by apply_virtual_loss).
 /// `real_value` is the W−L component from the perspective of the player to move at
@@ -672,7 +691,46 @@ impl<G: GameEngine> MctsSearch<G> {
         draws: &[f32],
     ) {
         let stashed = std::mem::take(&mut self.stashed_leaves);
-        for (i, (leaf, mut game)) in stashed.into_iter().enumerate() {
+        self.expand_and_backprop_with_stash(stashed, policies, values, draws);
+    }
+
+    /// Take the current stash out, leaving an empty one in its place. Used by
+    /// pipelined self-play to hand a batch's leaves to the caller so a new
+    /// batch can be selected (refilling the internal stash) while the eval
+    /// for the taken batch is in flight on a worker thread.
+    ///
+    /// Pair with `expand_and_backprop_with_stash` when the eval comes back.
+    pub fn take_stash(&mut self) -> Vec<(NodeId, G)> {
+        std::mem::take(&mut self.stashed_leaves)
+    }
+
+    /// Expand an externally-held stash (previously returned by `take_stash`)
+    /// with NN outputs and backpropagate values. Equivalent to
+    /// `expand_and_backprop`, but operates on a caller-owned stash so two
+    /// batches can be in flight simultaneously.
+    ///
+    /// Pipelining can cause the same unexpanded leaf to land in two
+    /// consecutive batches' stashes when virtual loss alone isn't enough
+    /// to deter re-selection (narrow trees). When the second batch's
+    /// expansion runs, `is_expanded` is already true; we undo *this batch's*
+    /// virtual loss without re-expanding or re-backpropagating, so visit
+    /// counts and value sums stay correct (single real evaluation counted).
+    /// The duplicate's NN output is silently discarded.
+    pub fn expand_and_backprop_with_stash(
+        &mut self,
+        stash: Vec<(NodeId, G)>,
+        policies: &[Vec<f32>],
+        values: &[f32],
+        draws: &[f32],
+    ) {
+        for (i, (leaf, mut game)) in stash.into_iter().enumerate() {
+            if self.arena.get(leaf).is_expanded {
+                // Duplicate from an earlier in-flight batch already expanded
+                // this leaf. Undo just our virtual-loss contribution; the
+                // earlier batch's real value is already backpropped.
+                undo_virtual_loss(&mut self.arena, leaf);
+                continue;
+            }
             expand_with_policy::<G>(&mut self.arena, leaf, &mut game, &policies[i], self.params.max_children);
             let value = values[i];
             let draw = if draws.is_empty() { 0.0 } else { draws[i] };

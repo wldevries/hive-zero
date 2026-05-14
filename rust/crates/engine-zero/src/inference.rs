@@ -1,6 +1,9 @@
 //! Rust-native ONNX inference via the `ort` crate, replacing the Python eval callback.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use ort::session::Session;
@@ -214,6 +217,178 @@ impl HiveOrtEngine {
         };
         self.t_extract += t2.elapsed();
         Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hive ORT worker thread (for pipelined self-play)
+// ---------------------------------------------------------------------------
+
+/// One request to the worker. `respond` is a single-use channel; the worker
+/// posts the result and the caller blocks on `recv()` when ready to consume.
+struct HiveWorkerRequest {
+    boards: Vec<f32>,
+    reserves: Vec<f32>,
+    batch_size: usize,
+    respond: SyncSender<Result<HiveInferenceResult, String>>,
+}
+
+/// Per-phase wall-clock totals drained from the worker after it shuts down.
+#[derive(Clone, Copy, Default)]
+pub struct HiveWorkerTiming {
+    pub t_input: Duration,
+    pub t_run: Duration,
+    pub t_extract: Duration,
+}
+
+/// Dedicated worker thread that owns a `HiveOrtEngine` and processes
+/// inference requests off an mpsc channel. Lets `play_selfplay_core` submit
+/// a batch and continue selecting leaves for the next batch while the GPU
+/// runs the current one (one batch in flight).
+///
+/// Lifecycle: spawn → submit/recv pairs → `shutdown_and_drain_timing()` to
+/// close the channel, join the thread, and read its `phase_times`. Dropping
+/// without explicit shutdown also closes the channel (sender is dropped) and
+/// detaches the thread, but the per-phase timing will be lost.
+pub struct HiveInferenceWorker {
+    request_tx: SyncSender<HiveWorkerRequest>,
+    handle: Option<JoinHandle<()>>,
+    timing: Arc<Mutex<HiveWorkerTiming>>,
+    num_channels: usize,
+    grid_size: usize,
+    reserve_size: usize,
+}
+
+impl HiveInferenceWorker {
+    /// Spawn the worker. The ONNX session is constructed on the worker
+    /// thread so it doesn't migrate after init (CUDA EP can be picky about
+    /// thread-affinity for the bound stream).
+    pub fn spawn(
+        onnx_path: String,
+        num_channels: usize,
+        grid_size: usize,
+        reserve_size: usize,
+    ) -> Result<Self, String> {
+        // Bounded queue depth = 2: at most one batch waiting in the channel
+        // plus one being processed by the worker. send() will block past
+        // that, which acts as backpressure if the caller submits faster than
+        // the worker can drain.
+        let (request_tx, request_rx) = sync_channel::<HiveWorkerRequest>(2);
+        let timing = Arc::new(Mutex::new(HiveWorkerTiming::default()));
+        let timing_for_worker = Arc::clone(&timing);
+
+        // Spawn first, load engine inside the thread so session ownership
+        // stays on the worker. If load fails we surface the error via the
+        // first request's respond channel — we can't propagate it eagerly
+        // without leaking the spawn.
+        //
+        // To keep the spawn API fallible-on-load, we do load + initial send
+        // synchronously on a barrier: spawn the thread, have it try to load,
+        // then signal success/failure via an init channel.
+        let (init_tx, init_rx) = sync_channel::<Result<(), String>>(1);
+        let onnx_path_for_thread = onnx_path.clone();
+        let handle = thread::Builder::new()
+            .name("hive-ort-worker".into())
+            .spawn(move || {
+                let mut engine = match HiveOrtEngine::load(&onnx_path_for_thread) {
+                    Ok(e) => {
+                        let _ = init_tx.send(Ok(()));
+                        e
+                    }
+                    Err(e) => {
+                        let _ = init_tx.send(Err(e.to_string()));
+                        return;
+                    }
+                };
+
+                while let Ok(req) = request_rx.recv() {
+                    let result = engine
+                        .infer(
+                            &req.boards,
+                            &req.reserves,
+                            req.batch_size,
+                            num_channels,
+                            grid_size,
+                            reserve_size,
+                        )
+                        .map_err(|e| e.to_string());
+                    let _ = req.respond.send(result);
+                }
+
+                // Channel closed → drain accumulated phase timers so the
+                // outer caller can read them after `join`.
+                let (t_input, t_run, t_extract) = engine.phase_times();
+                if let Ok(mut t) = timing_for_worker.lock() {
+                    *t = HiveWorkerTiming { t_input, t_run, t_extract };
+                }
+            })
+            .map_err(|e| format!("spawn hive-ort-worker: {e}"))?;
+
+        // Wait for load to either succeed or fail.
+        match init_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                request_tx,
+                handle: Some(handle),
+                timing,
+                num_channels,
+                grid_size,
+                reserve_size,
+            }),
+            Ok(Err(e)) => {
+                let _ = handle.join();
+                Err(e)
+            }
+            Err(_) => Err("worker thread died before load completed".into()),
+        }
+    }
+
+    /// Post one inference request. Returns a receiver the caller can block
+    /// on later via `recv()`. Sends are bounded by the channel capacity, so
+    /// this can block if the worker is more than one batch behind.
+    pub fn submit(
+        &self,
+        boards: Vec<f32>,
+        reserves: Vec<f32>,
+        batch_size: usize,
+    ) -> Result<Receiver<Result<HiveInferenceResult, String>>, String> {
+        let (resp_tx, resp_rx) = sync_channel(1);
+        self.request_tx
+            .send(HiveWorkerRequest { boards, reserves, batch_size, respond: resp_tx })
+            .map_err(|_| "hive-ort-worker request channel closed".to_string())?;
+        Ok(resp_rx)
+    }
+
+    /// Dimensions baked in at spawn time, exposed for callers that build
+    /// their own input buffers (kept in sync with the trained model).
+    pub fn dims(&self) -> (usize, usize, usize) {
+        (self.num_channels, self.grid_size, self.reserve_size)
+    }
+
+    /// Close the request channel, join the worker, and return the drained
+    /// per-phase timing. Consumes self so accidental further use is a
+    /// compile error.
+    pub fn shutdown_and_drain_timing(mut self) -> HiveWorkerTiming {
+        // Replace the sender with a fresh closed channel so the worker's
+        // recv() sees disconnection; the original sender is dropped here.
+        let (dummy_tx, _) = sync_channel::<HiveWorkerRequest>(0);
+        drop(std::mem::replace(&mut self.request_tx, dummy_tx));
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        self.timing.lock().map(|t| *t).unwrap_or_default()
+    }
+}
+
+impl Drop for HiveInferenceWorker {
+    fn drop(&mut self) {
+        // Best-effort cleanup if the caller forgot to call
+        // `shutdown_and_drain_timing`: replace the sender so the worker's
+        // recv() sees the channel close, then join. Timing is lost.
+        if let Some(handle) = self.handle.take() {
+            let (dummy_tx, _) = sync_channel::<HiveWorkerRequest>(0);
+            drop(std::mem::replace(&mut self.request_tx, dummy_tx));
+            let _ = handle.join();
+        }
     }
 }
 
