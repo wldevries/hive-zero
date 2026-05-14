@@ -417,6 +417,7 @@ class SelfPlayTrainer:
         use_ort: bool = False,
         value_loss_scale: float = 1.0,
         aux_loss_scale: float = 1.0,
+        training_subsample_frac: float = 1.0,
         buf_dir: Optional[str] = None,
         export_sgf: bool = True,
         bot_frac: float = 0.0,
@@ -457,6 +458,7 @@ class SelfPlayTrainer:
             "asymmetric_contempt": mcts.asymmetric_contempt,
             "timeout_target": timeout_target,
             "q_mix_lambda": q_mix_lambda,
+            "training_subsample_frac": training_subsample_frac,
         }
 
         # Training log (CSV, truncated on fresh start)
@@ -511,6 +513,7 @@ class SelfPlayTrainer:
                         batch_size=batch_size,
                         value_loss_scale=value_loss_scale,
                         aux_loss_scale=aux_loss_scale,
+                        subsample_frac=training_subsample_frac,
                     )
                     lr = self.trainer._current_lr
                     total_s = f"{losses['total_loss']:.4f}"
@@ -874,6 +877,7 @@ class SelfPlayTrainer:
                         batch_size=batch_size,
                         value_loss_scale=value_loss_scale,
                         aux_loss_scale=aux_loss_scale,
+                        subsample_frac=training_subsample_frac,
                     )
                     lr = self.trainer._current_lr
                     total_s = f"{losses['total_loss']:.4f}"

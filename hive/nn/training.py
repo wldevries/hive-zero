@@ -585,11 +585,23 @@ class Trainer:
         }
 
     def train_epoch(self, dataset: HiveDataset, batch_size: int = 64, value_loss_scale: float = 1.0,
-                    aux_loss_scale: float = 1.0) -> dict:
-        """Train one epoch. Returns loss dict."""
+                    aux_loss_scale: float = 1.0, subsample_frac: float = 1.0) -> dict:
+        """Train one epoch. Returns loss dict.
+
+        `subsample_frac`: if < 1.0, draw a uniform random subset of size
+        int(len(dataset) * frac) without replacement instead of iterating the
+        full dataset. With symmetry augmentation on, this samples uniformly
+        from the (position × sym) flat pool — a fresh subset each epoch.
+        """
         self.model.train()
         drop = self.device.type == "cuda"
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=drop)
+        if subsample_frac < 1.0:
+            from torch.utils.data import RandomSampler
+            n = max(1, int(len(dataset) * subsample_frac))
+            sampler = RandomSampler(dataset, replacement=False, num_samples=n)
+            loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, drop_last=drop)
+        else:
+            loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=drop)
 
         sums = {"total": 0.0, "policy": 0.0, "value": 0.0,
                 "aux": 0.0, "qd": 0.0, "qe": 0.0, "mob": 0.0, "src": 0.0, "lp": 0.0}

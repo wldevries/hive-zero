@@ -107,6 +107,14 @@ def main():
     )
     train_parser.add_argument("--training-batch-size", type=int, default=512)
     train_parser.add_argument(
+        "--training-subsample-frac",
+        type=float,
+        default=1.0,
+        help="Fraction of the (augmented) replay buffer to sample per epoch "
+             "without replacement. 1.0 = full pass. Useful to cut wall-clock "
+             "when symmetry augmentation expands the buffer 12x.",
+    )
+    train_parser.add_argument(
         "--name", type=str, default="hive",
         help="Model name; all paths derived as models/{name}/",
     )
@@ -677,6 +685,7 @@ def main():
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
             aux_loss_scale=args.aux_loss_scale,
+            training_subsample_frac=args.training_subsample_frac,
             buf_dir=args.buf_dir,
             export_sgf=args.export_sgf,
             bot_frac=args.bot_frac if args.opponent_bot == "alphabeta" else 0.0,
