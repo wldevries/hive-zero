@@ -106,6 +106,66 @@ improved the decisive game rate — the network recognizes positional patterns b
 struggles with multi-move attacking sequences. The bottleneck appears to be planning depth
 (policy + MCTS search), not position evaluation.
 
+## Placement policy masking
+
+**Status:** reverted to fully-masked (legal-only) softmax after an unmasked
+placement experiment hurt play quality. Do not re-enable without first
+addressing the dynamic-range mismatch described below.
+
+### What we tried (commit 834ea9f, May 2026)
+
+Trained the placement head with the softmax denominator covering **every**
+(piece_type, cell) placement logit — legal AND illegal — using illegal cells
+as 0-target "auxiliary suppression" examples. Movement logits stayed masked
+(Q·K gives gs²×gs² pairs, too many to put in the denom). Motivation was the
+AlphaZero/KataGo trick of using illegal-move suppression as a free dense
+gradient signal.
+
+### Why it failed
+
+Measured on gen-20 checkpoints of `hive-small` (switched mid-training) and
+`hive-small-2` (unmasked from scratch):
+
+| run          | MCTS-target place mass | model prior place mass | bias  |
+|--------------|------------------------:|------------------------:|------:|
+| `hive-small`   | 23.8% | 14.7% | **-9.1pp** |
+| `hive-small-2` | 29.5% | 23.2% | **-6.3pp** |
+
+The model under-allocated 6-9pp of prior mass away from placements toward
+movements. Behavioural impact: decisive-game rate dropped from ~80/200
+(masked, iters 1-6) to ~25/200 (unmasked, iters 7-20) and repetition draws
+went from 0 → 25-40 per gen, exactly matching the unmask cutover. With
+placements under-prioritised, MCTS explores them less, players push existing
+pieces around instead of placing attackers, and games drift into repetitions
+and timeouts.
+
+Root cause is a dynamic-range mismatch between the two heads. The place head
+(`Conv1×1 → BN → ReLU → Conv1×1`) has a bounded output range; the Q·K
+movement head can produce arbitrarily large dot products. With illegal
+placements in the denom (~5×gs² extra logits), the place head can't push
+legal placement logits high enough to match the MCTS targets via the
+training softmax, so SGD settles in a basin where movement logits comfortably
+fit their targets and placements chronically undershoot. Even after illegal
+logits are mostly suppressed (mean -13 to -16 by gen 20), the residual leak
+(~3% mean, ~11% p90) is enough to maintain the bias.
+
+### Rule for future heads
+
+When adding a head whose targets share a softmax denominator with another
+head, the two heads must have **comparable dynamic range**. Either both bounded
+(e.g. both Conv1×1) or both unbounded (e.g. both bilinear). Mixing the two
+under one softmax silently biases the prior toward whichever head can produce
+larger logits, by an amount proportional to how aggressively the denom
+expands beyond the legal set.
+
+### Where "suppress illegal placements" lives instead
+
+The same auxiliary signal is now carried by the dedicated `src_logits` head
+(commit aaa7ac2): per-cell BCE against the source-marginal MCTS visit
+distribution. A K=1 "is-this-cell-a-legal-placement" BCE head is a
+straightforward extension if more illegal-placement gradient is ever wanted —
+keep it off the policy softmax.
+
 ## Supervised mix during self-play
 
 The network has good pattern recognition (aux losses converge quickly) but the policy head

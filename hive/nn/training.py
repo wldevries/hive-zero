@@ -4,12 +4,12 @@ The policy target is a **joint** distribution over every legal move at a
 position — placements and movements share one softmax, matching what MCTS
 consumes at inference. See docs/policy_heads.md.
 
-Placement logits are trained **unmasked**: the softmax denominator covers
-every (piece_type, cell) placement logit, not just the legal ones. Illegal
-placements have implicit target probability 0 and the network learns to
-suppress their logits as an auxiliary signal (cf. AlphaZero/KataGo).
-Movement logits remain masked because the Q·K bilinear parameterizes
-gs² × gs² (src, dst) pairs — too large a denominator to be useful.
+Both heads are trained **masked**: the softmax denominator covers only the
+legal placement and movement logits at this position. An earlier experiment
+unmasked the placement head (illegal placements in the denom as a 0-target
+suppression signal) but caused legal placement priors to undershoot their
+MCTS targets by 6-9pp and drove the decisive-game rate down — see
+docs/hive_ideas.md (#placement-policy-masking).
 """
 
 from __future__ import annotations
@@ -513,15 +513,11 @@ class Trainer:
                   < n_m.unsqueeze(1).long())
         c_mask = torch.cat([p_mask, m_mask], dim=1)
 
-        # Softmax denominator: ALL placement logits (unmasked) + legal
-        # movement logits only. Padded movement slots are -inf so they drop
-        # out of logsumexp.
-        m_logits_for_denom = m_logits.masked_fill(~m_mask, float('-inf'))
-        denom_logits = torch.cat([place_logits_flat, m_logits_for_denom], dim=1)
-        log_z = torch.logsumexp(denom_logits.float(), dim=1, keepdim=True)
-
-        log_probs = combined_legal_logits - log_z
-        log_probs = log_probs.masked_fill(~c_mask, 0.0)  # avoid 0 * pad = NaN
+        # Softmax denominator: legal placements + legal movements only.
+        # Padded slots are -inf so they drop out of logsumexp.
+        masked_logits = combined_legal_logits.masked_fill(~c_mask, float('-inf'))
+        log_probs = torch.log_softmax(masked_logits.float(), dim=1)
+        log_probs = log_probs.masked_fill(~c_mask, 0.0)  # avoid 0 * -inf = NaN
 
         per_sample_policy = -(combined_probs * log_probs).sum(dim=1)
         has_target = ((n_p + n_m) > 0)
@@ -559,8 +555,7 @@ class Trainer:
         total = policy_loss + value_loss_scale * value_loss + aux_loss_scale * aux_loss
 
         pol_active = has_target & (~vo_mask)
-        # Top-1 metric: argmax over legal moves only, matching MCTS inference.
-        argmax_pred = combined_legal_logits.masked_fill(~c_mask, float('-inf')).argmax(dim=1)
+        argmax_pred = masked_logits.argmax(dim=1)
         argmax_true = combined_probs.argmax(dim=1)
         top1_hits = ((argmax_pred == argmax_true) & pol_active).sum()
         n_legal = c_mask.sum(dim=1).clamp(min=1).float()
