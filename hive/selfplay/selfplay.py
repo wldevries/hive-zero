@@ -210,6 +210,7 @@ class RustParallelSelfPlay:
         q_mix_lambda: float = 0.0,
         bot_frac: float = 0.0,
         bot_depth: int = 2,
+        show_timing: bool = False,
     ):
         self.model = model
         self.device = device
@@ -226,6 +227,7 @@ class RustParallelSelfPlay:
         self.q_mix_lambda = q_mix_lambda
         self.bot_frac = bot_frac
         self.bot_depth = bot_depth
+        self.show_timing = show_timing
 
     def _eval_fn(self):
         """Return a callable for Rust's GPU inference callback."""
@@ -292,6 +294,7 @@ class RustParallelSelfPlay:
             grid_size=grid_size,
             bot_frac=self.bot_frac,
             bot_depth=self.bot_depth,
+            show_timing=self.show_timing,
         )
 
         pbar = tqdm(total=self.max_moves, unit="turn", desc="  Self-play", leave=False)
@@ -423,6 +426,7 @@ class SelfPlayTrainer:
         export_sgf: bool = True,
         bot_frac: float = 0.0,
         bot_depth: int = 2,
+        show_timing: bool = False,
     ):
         """Run the full training loop.
 
@@ -630,6 +634,7 @@ class SelfPlayTrainer:
                 q_mix_lambda=q_mix_lambda,
                 bot_frac=bot_frac,
                 bot_depth=bot_depth,
+                show_timing=show_timing,
             )
 
             ort_path = None

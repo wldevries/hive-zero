@@ -36,6 +36,10 @@ struct SessionConfig {
     num_games: usize,
     config: SelfPlayConfig,
     fixed_batch_size: Option<usize>,
+    /// Whether to emit the `[ort timing ...]` lines on stderr after each
+    /// self-play session. Diagnostic only; gated by `--show-timing` on the
+    /// Python side, mirroring the Yinsh pattern.
+    show_timing: bool,
 }
 
 fn call_python_eval_bf16(
@@ -669,6 +673,7 @@ impl PySelfPlaySession {
         asymmetric_contempt = false,
         bot_frac = 0.0,
         bot_depth = 2,
+        show_timing = false,
     ))]
     fn new(
         num_games: usize,
@@ -697,12 +702,14 @@ impl PySelfPlaySession {
         asymmetric_contempt: bool,
         bot_frac: f32,
         bot_depth: u32,
+        show_timing: bool,
     ) -> PyResult<Self> {
         let timeout_target = parse_timeout_target(&timeout_target)?;
         Ok(PySelfPlaySession {
             session: SessionConfig {
                 num_games,
                 fixed_batch_size,
+                show_timing,
                 config: SelfPlayConfig {
                     mcts: MctsConfig {
                         simulations,
@@ -776,10 +783,12 @@ impl PySelfPlaySession {
                 let original_pbs = config.mcts.play_batch_size;
                 if original_pbs > 1 {
                     config.mcts.play_batch_size = original_pbs / 2;
-                    eprintln!(
-                        "  [pipelined] play_batch_size: {} → {} (halved for pipeline depth)",
-                        original_pbs, config.mcts.play_batch_size,
-                    );
+                    if self.session.show_timing {
+                        eprintln!(
+                            "  [pipelined] play_batch_size: {} → {} (halved for pipeline depth)",
+                            original_pbs, config.mcts.play_batch_size,
+                        );
+                    }
                 }
 
                 let t_total_start = Instant::now();
@@ -797,13 +806,15 @@ impl PySelfPlaySession {
                 // taking the worker by value for shutdown.
                 drop(evaluator);
                 let timing = worker.shutdown_and_drain_timing();
-                print_ort_timing_pipelined(
-                    total,
-                    t_eval,
-                    timing.t_input,
-                    timing.t_run,
-                    timing.t_extract,
-                );
+                if self.session.show_timing {
+                    print_ort_timing_pipelined(
+                        total,
+                        t_eval,
+                        timing.t_input,
+                        timing.t_run,
+                        timing.t_extract,
+                    );
+                }
                 result
             } else {
                 // Synchronous ORT path (kept for `fixed_batch_size` use,
@@ -870,7 +881,9 @@ impl PySelfPlaySession {
                     .lock()
                     .map(|e| e.phase_times())
                     .unwrap_or((Duration::ZERO, Duration::ZERO, Duration::ZERO));
-                print_ort_timing(total, t_eval, t_input, t_run, t_extract);
+                if self.session.show_timing {
+                    print_ort_timing(total, t_eval, t_input, t_run, t_extract);
+                }
 
                 result
             }

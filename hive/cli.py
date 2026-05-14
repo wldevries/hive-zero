@@ -360,6 +360,13 @@ def main():
     )
     train_parser.set_defaults(export_sgf=True)
     train_parser.add_argument(
+        "--show-timing",
+        action="store_true",
+        help="Print per-phase wall-clock breakdown for the ORT self-play "
+        "inference path each gen (input/run/extract on the worker, "
+        "main-eval/main-other on the main thread).",
+    )
+    train_parser.add_argument(
         "--opponent-bot",
         choices=["none", "alphabeta"],
         default="none",
@@ -700,6 +707,7 @@ def main():
             export_sgf=args.export_sgf,
             bot_frac=args.bot_frac if args.opponent_bot == "alphabeta" else 0.0,
             bot_depth=args.bot_depth,
+            show_timing=args.show_timing,
         )
     else:
         # Default: UHP engine
