@@ -859,6 +859,7 @@ class SelfPlayTrainer:
                 sgf_dir = os.path.join(self.model_dir, "selfplay_sgf")
                 os.makedirs(sgf_dir, exist_ok=True)
                 zip_path = os.path.join(sgf_dir, f"gen{generation:05d}.zip")
+                sgf_start = time.time()
                 n = _export_games_to_zip(
                     finished_games_all,
                     zip_path,
@@ -866,7 +867,7 @@ class SelfPlayTrainer:
                     self.model_name,
                     finished_bot_colors,
                 )
-                print(f"  SGF export: {n} games → {zip_path}")
+                print(f"  SGF export: {n} games → {zip_path} ({time.time() - sgf_start:.1f}s)")
 
             # Train on replay buffer
             train_start = time.time()
