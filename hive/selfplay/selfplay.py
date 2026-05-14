@@ -509,32 +509,15 @@ class SelfPlayTrainer:
                     f"\n=== {_cc(self.model_name)}  Buffer warmup: "
                     f"{buffer_warmup_epochs} epoch(s) on {replay_buffer.raw_size} samples ==="
                 )
-                with replay_buffer.read_only_mode():
-                    for epoch in range(buffer_warmup_epochs):
-                        losses = self.trainer.train_epoch(
-                            replay_buffer,
-                            batch_size=batch_size,
-                            value_loss_scale=value_loss_scale,
-                            aux_loss_scale=aux_loss_scale,
-                            subsample_frac=training_subsample_frac,
-                            num_workers=training_num_workers,
-                        )
-                        lr = self.trainer._current_lr
-                        total_s = f"{losses['total_loss']:.4f}"
-                        policy_s = f"{losses['policy_loss']:.4f}"
-                        value_s = f"{losses['value_loss']:.4f}"
-                        qd_s = f"{losses.get('qd_loss', 0):.4f}"
-                        qe_s = f"{losses.get('qe_loss', 0):.4f}"
-                        mob_s = f"{losses.get('mob_loss', 0):.4f}"
-                        src_s = f"{losses.get('src_loss', 0):.4f}"
-                        lp_s = f"{losses.get('lp_loss', 0):.4f}"
-                        print(
-                            f"  Warmup epoch {epoch + 1}/{buffer_warmup_epochs}: "
-                            f"loss={_cr(total_s)} (policy={_cy(policy_s)}, "
-                            f"value={_cy(value_s)}, qd={_cy(qd_s)}, "
-                            f"qe={_cy(qe_s)}, mob={_cy(mob_s)}, "
-                            f"src={_cy(src_s)}, lp={_cy(lp_s)}, lr={lr})"
-                        )
+                self._run_training_epochs(
+                    replay_buffer, buffer_warmup_epochs,
+                    batch_size=batch_size,
+                    value_loss_scale=value_loss_scale,
+                    aux_loss_scale=aux_loss_scale,
+                    subsample_frac=training_subsample_frac,
+                    num_workers=training_num_workers,
+                    prefix_fn=lambda e: f"Warmup epoch {e + 1}/{buffer_warmup_epochs}",
+                )
                 # Persist warmed-up model so a Ctrl-C before gen 1 isn't lost.
                 metadata = {**train_params, "lr": self.trainer._current_lr}
                 save_checkpoint(self.model, self.model_path, self.start_generation,
@@ -875,35 +858,21 @@ class SelfPlayTrainer:
 
             # Train on replay buffer
             train_start = time.time()
+            losses: dict = {}
             try:
-                with replay_buffer.read_only_mode():
-                    for epoch in range(epochs_per_gen):
-                        losses = self.trainer.train_epoch(
-                            replay_buffer,
-                            batch_size=batch_size,
-                            value_loss_scale=value_loss_scale,
-                            aux_loss_scale=aux_loss_scale,
-                            subsample_frac=training_subsample_frac,
-                            num_workers=training_num_workers,
-                        )
-                        lr = self.trainer._current_lr
-                        total_s = f"{losses['total_loss']:.4f}"
-                        policy_s = f"{losses['policy_loss']:.4f}"
-                        value_s = f"{losses['value_loss']:.4f}"
-                        qd_s = f"{losses.get('qd_loss', 0):.4f}"
-                        qe_s = f"{losses.get('qe_loss', 0):.4f}"
-                        mob_s = f"{losses.get('mob_loss', 0):.4f}"
-                        src_s = f"{losses.get('src_loss', 0):.4f}"
-                        lp_s = f"{losses.get('lp_loss', 0):.4f}"
-                        print(
-                            f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
-                            f"(policy={_cy(policy_s)}, value={_cy(value_s)}, "
-                            f"qd={_cy(qd_s)}, qe={_cy(qe_s)}, mob={_cy(mob_s)}, "
-                            f"src={_cy(src_s)}, lp={_cy(lp_s)}, lr={lr})"
-                        )
+                losses = self._run_training_epochs(
+                    replay_buffer, epochs_per_gen,
+                    batch_size=batch_size,
+                    value_loss_scale=value_loss_scale,
+                    aux_loss_scale=aux_loss_scale,
+                    subsample_frac=training_subsample_frac,
+                    num_workers=training_num_workers,
+                    prefix_fn=lambda e: f"Epoch {e + 1}",
+                )
             except KeyboardInterrupt:
                 print("\n  Ctrl-C during training, saving model...")
                 interrupted = True
+            lr = self.trainer._current_lr
             train_time = time.time() - train_start
             _print_vram("post-train")
 
@@ -1026,6 +995,43 @@ class SelfPlayTrainer:
         if not candidates:
             return None
         return max(candidates, key=lambda x: x[0])[1]
+
+    def _print_epoch_losses(self, prefix: str, losses: dict) -> None:
+        lr = self.trainer._current_lr
+        f = lambda key: f"{losses.get(key, 0):.4f}"
+        print(
+            f"  {prefix}: loss={_cr(f('total_loss'))} "
+            f"(policy={_cy(f('policy_loss'))}, value={_cy(f('value_loss'))}, "
+            f"qd={_cy(f('qd_loss'))}, qe={_cy(f('qe_loss'))}, "
+            f"mob={_cy(f('mob_loss'))}, src={_cy(f('src_loss'))}, "
+            f"lp={_cy(f('lp_loss'))}, lr={lr})"
+        )
+
+    def _run_training_epochs(self, replay_buffer, n_epochs: int, *,
+                             batch_size: int,
+                             value_loss_scale: float,
+                             aux_loss_scale: float,
+                             subsample_frac: float,
+                             num_workers: int,
+                             prefix_fn) -> dict:
+        """Run n training epochs under read_only_mode, logging each.
+
+        `prefix_fn(epoch_idx)` formats the per-epoch log prefix (0-indexed).
+        Returns the final epoch's loss dict (callers log it to CSV).
+        """
+        losses: dict = {}
+        with replay_buffer.read_only_mode():
+            for epoch in range(n_epochs):
+                losses = self.trainer.train_epoch(
+                    replay_buffer,
+                    batch_size=batch_size,
+                    value_loss_scale=value_loss_scale,
+                    aux_loss_scale=aux_loss_scale,
+                    subsample_frac=subsample_frac,
+                    num_workers=num_workers,
+                )
+                self._print_epoch_losses(prefix_fn(epoch), losses)
+        return losses
 
     def _run_checkpoint_eval(self, generation: int, simulations: int, num_games: int):
         """Pit current model against best_model.pt. Winner becomes new best and model.pt."""
