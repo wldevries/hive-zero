@@ -233,11 +233,14 @@ pub fn play_battle_core(
     simulations: usize,
     c_puct: f32,
     play_batch_size: usize,
+    temperature: f32,
+    temp_threshold: u32,
     eval_fn1: EvalFn,
     eval_fn2: EvalFn,
     progress_fn: Option<ProgressFn>,
 ) -> Result<BattleResult, String> {
     let half = num_games / 2;
+    let mut rng = rand::rng();
 
     // Per-game state.
     let mut boards: Vec<YinshBoard> = (0..num_games).map(|_| YinshBoard::new()).collect();
@@ -272,7 +275,20 @@ pub fn play_battle_core(
 
             run_simulations_single(&mut search, simulations, play_batch_size.max(1), eval_ref)?;
 
-            let mv = search.best_move().unwrap_or_else(YinshBoard::pass_move);
+            // Temperature sampling for the opening — diversifies games across
+            // (P1, P2) pairings. No Dirichlet at the root, so without this the
+            // games in a pairing bucket would play identically.
+            let dist = search.get_pruned_visit_distribution();
+            let mv = if dist.is_empty() {
+                YinshBoard::pass_move()
+            } else if move_counts[gi] < temp_threshold && temperature > 0.01 {
+                let weights: Vec<f32> =
+                    dist.iter().map(|(_, p)| p.powf(1.0 / temperature)).collect();
+                let wi = WeightedIndex::new(&weights).map_err(|e| e.to_string())?;
+                dist[wi.sample(&mut rng)].0
+            } else {
+                dist.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap().0
+            };
             boards[gi]
                 .play_move(&mv)
                 .map_err(|e| format!("battle game {} illegal move: {}", gi, e))?;
@@ -331,12 +347,15 @@ pub fn play_battle_vs_bot_core(
     simulations: usize,
     c_puct: f32,
     play_batch_size: usize,
+    temperature: f32,
+    temp_threshold: u32,
     bot_depth: u32,
     eval_fn: EvalFn,
     progress_fn: Option<ProgressFn>,
 ) -> Result<BattleResult, String> {
     let half = num_games / 2;
     let model_is_p1 = |gi: usize| gi < half;
+    let mut rng = rand::rng();
 
     let mut boards: Vec<YinshBoard> = (0..num_games).map(|_| YinshBoard::new()).collect();
     let mut searches: Vec<MctsSearch<YinshBoard>> =
@@ -477,9 +496,20 @@ pub fn play_battle_vs_bot_core(
                 }
             }
 
-            // Pick best move per game by visit count.
+            // Pick the model's move per game — temperature sampling in the
+            // opening (no Dirichlet at the root in battle), argmax afterwards.
             for &gi in &mcts_games {
-                let mv = searches[gi].best_move().unwrap_or_else(YinshBoard::pass_move);
+                let dist = searches[gi].get_pruned_visit_distribution();
+                let mv = if dist.is_empty() {
+                    YinshBoard::pass_move()
+                } else if move_counts[gi] < temp_threshold && temperature > 0.01 {
+                    let weights: Vec<f32> =
+                        dist.iter().map(|(_, p)| p.powf(1.0 / temperature)).collect();
+                    let wi = WeightedIndex::new(&weights).map_err(|e| e.to_string())?;
+                    dist[wi.sample(&mut rng)].0
+                } else {
+                    dist.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap().0
+                };
                 chosen_moves.push((gi, mv));
             }
         }

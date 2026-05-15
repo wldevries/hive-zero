@@ -46,6 +46,8 @@ def run_battle(
     device: str = "cuda",
     play_batch_size: int = 8,
     bot_depth: int = 3,
+    temperature: float = 1.0,
+    temp_threshold: int = 10,
 ):
     if model2_path == "alphabeta":
         return _run_battle_vs_bot(
@@ -55,6 +57,8 @@ def run_battle(
             device=device,
             play_batch_size=play_batch_size,
             bot_depth=bot_depth,
+            temperature=temperature,
+            temp_threshold=temp_threshold,
         )
 
     from engine_zero import YinshSelfPlaySession
@@ -89,7 +93,8 @@ def run_battle(
     session = YinshSelfPlaySession(
         num_games=num_games,
         simulations=sims,
-        temp_threshold=0,
+        temperature=temperature,
+        temp_threshold=temp_threshold,
         playout_cap_p=0.0,
         fast_cap=sims,
         play_batch_size=play_batch_size,
@@ -113,6 +118,8 @@ def _run_battle_vs_bot(
     device: str,
     play_batch_size: int,
     bot_depth: int,
+    temperature: float,
+    temp_threshold: int,
 ):
     """Run the model (NN+MCTS) against the alpha-beta bot in parallel via
     ``YinshSelfPlaySession.play_battle_vs_bot``. Each ply, the Rust core
@@ -143,7 +150,8 @@ def _run_battle_vs_bot(
     session = YinshSelfPlaySession(
         num_games=num_games,
         simulations=sims,
-        temp_threshold=0,
+        temperature=temperature,
+        temp_threshold=temp_threshold,
         playout_cap_p=0.0,
         fast_cap=sims,
         play_batch_size=play_batch_size,

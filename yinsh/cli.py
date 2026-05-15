@@ -205,6 +205,24 @@ def main():
         default=3,
         help="Alpha-beta search depth when model2 is 'alphabeta' (default: 3)",
     )
+    b.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for opening-move sampling during battle (default: 1.0). "
+             "Weights moves by visits^(1/T) for the first --temp-threshold plies, "
+             "then argmax takes over. Set 0 to disable (every game in a P1/P2 "
+             "pairing then plays identically).",
+    )
+    b.add_argument(
+        "--temp-threshold",
+        type=int,
+        default=10,
+        help="Plies after which battle move selection drops back to argmax "
+             "(default: 10 — covers the entire 10-ply setup phase, so games "
+             "diverge into independent trajectories without weakening play "
+             "in the Normal phase).",
+    )
 
     # play
     p = sub.add_parser("play", help="REPL: list valid moves and play interactively")
@@ -333,6 +351,8 @@ def main():
             device=args.device,
             play_batch_size=args.play_batch_sims,
             bot_depth=args.bot_depth,
+            temperature=args.temperature,
+            temp_threshold=args.temp_threshold,
         )
     elif args.command == "play":
         _run_play(args)
