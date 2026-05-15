@@ -423,7 +423,7 @@ pub fn play_battle_vs_bot_core(
     play_batch_size: usize,
     bot_depth: u32,
     bot_time_budget: Option<Duration>,
-    eval_fn: EvalFn,
+    evaluator: &mut dyn BatchEvaluator,
     progress_fn: Option<ProgressFn>,
 ) -> Result<BattleResult, String> {
     let half = num_games / 2;
@@ -510,13 +510,14 @@ pub fn play_battle_vs_bot_core(
         let mut chosen_moves: Vec<(usize, ZertzMove)> = Vec::with_capacity(num_games);
         chosen_moves.extend(bot_chosen);
 
-        // Model moves: batched MCTS across mcts_games (single eval_fn).
+        // Model moves: batched MCTS across mcts_games via BatchEvaluator.
         if !mcts_games.is_empty() {
             let n = mcts_games.len();
 
             // Cold init for any game whose tree isn't warm. Warm games
             // already have an expanded root with priors from the
-            // previous reroot.
+            // previous reroot. Single submit/collect pair — no pipelining
+            // gain on the one-shot root eval.
             let cold: Vec<usize> = (0..n).filter(|&i| !search_warm[mcts_games[i]]).collect();
             if !cold.is_empty() {
                 let nc = cold.len();
@@ -530,7 +531,8 @@ pub fn play_battle_vs_bot_core(
                         &mut flat_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE],
                     );
                 }
-                let (init_policy, _) = eval_fn(&flat_boards, &flat_reserves, nc)?;
+                let init_id = evaluator.submit(flat_boards, flat_reserves, nc)?;
+                let (init_policy, _) = evaluator.collect(init_id)?;
                 for (k, &ci) in cold.iter().enumerate() {
                     let gi = mcts_games[ci];
                     searches[gi].init(
@@ -540,53 +542,56 @@ pub fn play_battle_vs_bot_core(
                 }
             }
 
-            // Simulation rounds: select leaves across games, batch-eval, expand.
-            let mut game_sims = vec![0usize; n];
+            // Pipelined simulation rounds — mirrors play_selfplay_core: at any
+            // time at most one batch is in flight on the evaluator. Each
+            // iteration prepares + submits batch N+1 and waits on + expands
+            // batch N, so the GPU forward overlaps with leaf selection on the
+            // pipelined path. The synchronous `SyncEvaluator` makes submit run
+            // the eval inline, preserving the old behaviour exactly.
+            let sim_caps: Vec<usize> = vec![simulations; n];
+            let mut game_sims: Vec<usize> = vec![0; n];
+            let mut pending: Option<(RequestId, Vec<Vec<(NodeId, ZertzBoard)>>, BatchMeta)> = None;
             loop {
-                let mut leaf_ids: Vec<NodeId> = Vec::new();
-                let mut leaf_game_idx: Vec<usize> = Vec::new();
-                for _round in 0..play_batch_size {
-                    let mut any = false;
-                    for (i, _) in mcts_games.iter().enumerate() {
-                        if game_sims[i] >= simulations { continue; }
-                        let gi = mcts_games[i];
-                        let leaves = searches[gi].select_leaves(1);
-                        let count = leaves.len();
-                        if count > 0 { any = true; }
-                        for leaf in leaves { leaf_ids.push(leaf); leaf_game_idx.push(i); }
-                        game_sims[i] += count;
-                    }
-                    if !any { break; }
-                }
-                if leaf_ids.is_empty() { break; }
+                let next_batch = prepare_batch(
+                    &mut searches,
+                    &mcts_games,
+                    play_batch_size,
+                    &sim_caps,
+                    &mut game_sims,
+                );
 
-                let nl = leaf_ids.len();
-                let mut leaf_boards_flat = vec![0f32; nl * BOARD_FLAT];
-                let mut leaf_reserves_flat = vec![0f32; nl * RESERVE_SIZE];
-                for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
-                    let gi = mcts_games[i];
-                    let (board_enc, reserve_enc) = searches[gi].encode_leaf(leaf);
-                    leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
-                    leaf_reserves_flat[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
-                }
+                let new_stashes: Vec<Vec<(NodeId, ZertzBoard)>> = if next_batch.is_some() {
+                    mcts_games
+                        .iter()
+                        .map(|&gi| searches[gi].take_stash())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
 
-                let (leaf_policy, leaf_values) =
-                    eval_fn(&leaf_boards_flat, &leaf_reserves_flat, nl)?;
+                let new_pending = if let Some(batch) = next_batch {
+                    let id = evaluator.submit(batch.boards, batch.reserves, batch.nl)?;
+                    Some((id, new_stashes, batch.meta))
+                } else {
+                    None
+                };
 
-                let mut per_game_policies: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n];
-                let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
-                for (k, &i) in leaf_game_idx.iter().enumerate() {
-                    per_game_policies[i].push(
-                        leaf_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE].to_vec(),
+                if let Some((prev_id, prev_stashes, prev_meta)) = pending.take() {
+                    let (policy, values) = evaluator.collect(prev_id)?;
+                    expand_from_resp_with_stashes(
+                        &mut searches,
+                        &mcts_games,
+                        prev_stashes,
+                        &prev_meta,
+                        &policy,
+                        &values,
                     );
-                    per_game_values[i].push(leaf_values[k]);
                 }
-                for (i, _) in mcts_games.iter().enumerate() {
-                    if per_game_policies[i].is_empty() { continue; }
-                    let gi = mcts_games[i];
-                    searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i], &[]);
+
+                pending = new_pending;
+                if pending.is_none() {
+                    break;
                 }
-                if game_sims.iter().all(|&s| s >= simulations) { break; }
             }
 
             // Pick best move per game by visit count.

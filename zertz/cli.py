@@ -144,6 +144,13 @@ def main():
              "deepest fully-completed iteration. --bot-depth still caps the "
              "search; whichever expires first wins. Default: no time cap.",
     )
+    battle_parser.add_argument(
+        "--use-ort",
+        action="store_true",
+        help="Run the NN through a Rust-native pipelined ORT worker (instead of "
+             "PyTorch via Python). Requires an .onnx alongside each .pt "
+             "checkpoint. Currently only wired up for model-vs-alphabeta.",
+    )
 
     args = parser.parse_args()
 
@@ -210,6 +217,7 @@ def main():
             play_batch_size=args.play_batch_sims,
             bot_depth=args.bot_depth,
             bot_time_ms=args.bot_time_ms,
+            use_ort=args.use_ort,
         )
     else:
         parser.print_help()

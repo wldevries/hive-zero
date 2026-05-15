@@ -7,6 +7,7 @@ paths route through the fast batched ``ZertzSelfPlaySession.play_battle``."""
 
 from __future__ import annotations
 
+import os
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -18,6 +19,17 @@ from tqdm import tqdm
 from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc, cm as _cm, styled
 
 from ..nn.model import load_checkpoint
+
+
+def _onnx_path_for(pt_path: str) -> str:
+    """Sibling .onnx for a given .pt checkpoint, validated to exist."""
+    onnx_path = os.path.splitext(pt_path)[0] + ".onnx"
+    if not os.path.isfile(onnx_path):
+        raise FileNotFoundError(
+            f"--use-ort requires an .onnx file alongside the .pt checkpoint; "
+            f"expected {onnx_path}"
+        )
+    return onnx_path
 
 
 @dataclass
@@ -57,6 +69,7 @@ def run_battle(
     play_batch_size: int = 2,
     bot_depth: int = 3,
     bot_time_ms: int | None = None,
+    use_ort: bool = False,
 ):
     if model2_path == "alphabeta":
         return _run_battle_vs_bot(
@@ -67,6 +80,13 @@ def run_battle(
             play_batch_size=play_batch_size,
             bot_depth=bot_depth,
             bot_time_ms=bot_time_ms,
+            use_ort=use_ort,
+        )
+
+    if use_ort:
+        raise NotImplementedError(
+            "--use-ort is currently only wired up for the model-vs-alphabeta "
+            "path; model-vs-model ORT support is the next stage."
         )
 
     from engine_zero import ZertzSelfPlaySession
@@ -198,32 +218,44 @@ def _run_battle_vs_bot(
     play_batch_size: int,
     bot_depth: int,
     bot_time_ms: int | None,
+    use_ort: bool = False,
 ):
     """Run the model (NN+MCTS) against the alpha-beta bot in parallel via
     ``ZertzSelfPlaySession.play_battle_vs_bot``. Each ply, the Rust core
     partitions active games by whose turn it is: model-turn games batch
-    their MCTS leaves through one ``eval_fn`` call (controlled by
-    ``play_batch_size`` like the model-vs-model path); bot-turn games are
-    resolved via alphabeta running in parallel across rayon workers. With
-    ``bot_time_ms`` set, each alphabeta call also caps wall-clock time and
-    falls back to the deepest fully-completed iteration if it expires.
-    Progress ticks per ply round. Pairing (model as P1 vs P2) is handled
-    inside the session.
+    their MCTS leaves (controlled by ``play_batch_size`` like the
+    model-vs-model path); bot-turn games are resolved via alphabeta in
+    parallel across rayon workers. With ``bot_time_ms`` set, each alphabeta
+    call caps wall-clock time and falls back to the deepest fully-completed
+    iteration if it expires. Progress ticks per ply round. Pairing (model
+    as P1 vs P2) is handled inside the session.
+
+    When ``use_ort`` is set, NN inference runs through a Rust-native
+    pipelined ORT worker (loaded from the .onnx alongside the .pt) so
+    leaf-selection for batch N+1 overlaps the GPU forward for batch N.
     """
     from engine_zero import ZertzSelfPlaySession
 
-    model, ckpt = load_checkpoint(model1_path)
+    ckpt = torch.load(model1_path, weights_only=False, map_location="cpu")
     meta = ckpt.get("metadata", {})
     iter_n = ckpt.get("generation", "?")
     sims = simulations if simulations is not None else meta.get("simulations", 800)
 
-    model.to(device).eval()
-    eval_fn = _make_eval_fn(model, device)
+    onnx_path: str | None = None
+    eval_fn = None
+    if use_ort:
+        onnx_path = _onnx_path_for(model1_path)
+    else:
+        model, _ = load_checkpoint(model1_path)
+        model.to(device).eval()
+        eval_fn = _make_eval_fn(model, device)
 
     name1 = f"{model1_path} (iter {iter_n})"
     bot_label = f"alphabeta depth={bot_depth}"
     if bot_time_ms is not None and bot_time_ms > 0:
         bot_label += f" time<={bot_time_ms}ms"
+    if use_ort:
+        bot_label += "  [ORT pipelined]"
     name2 = bot_label
 
     print(f"\n{'='*60}")
@@ -261,6 +293,7 @@ def _run_battle_vs_bot(
         bot_depth,
         progress_fn,
         bot_time_ms=bot_time_ms,
+        onnx_path=onnx_path,
     )
     elapsed = time.time() - start
     pbar.update(pbar.total - pbar.n)

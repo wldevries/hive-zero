@@ -523,29 +523,31 @@ impl PyZertzSelfPlaySession {
     }
 
     /// Battle the model against the heuristic alpha-beta bot in parallel.
-    /// Each ply, model-turn games batch their MCTS leaves through `eval_fn`
-    /// while bot-turn games resolve via alphabeta in parallel across rayon
-    /// workers. Half the games have the model as P1, half as P2 —
-    /// `wins_model1` counts the model's wins regardless of color.
+    /// Each ply, model-turn games batch their MCTS leaves while bot-turn
+    /// games resolve via alphabeta in parallel across rayon workers. Half
+    /// the games have the model as P1, half as P2 — `wins_model1` counts
+    /// the model's wins regardless of color.
+    ///
+    /// When `onnx_path` is set the model's NN runs through a dedicated ORT
+    /// worker thread (pipelined: batch N+1 is submitted while the GPU
+    /// finishes batch N), and `eval_fn` is ignored. Otherwise the Python
+    /// `eval_fn` callback is wrapped in a `SyncEvaluator` and called inline.
     ///
     /// `bot_time_ms` is an optional per-call wall-clock budget for each
     /// alphabeta search (0 or None = depth-only). When set, iterative
     /// deepening polls the deadline inside the search and falls back to
     /// the deepest fully-completed iteration if the budget expires
     /// mid-iteration. `bot_depth` is still a hard upper bound.
-    #[pyo3(signature = (eval_fn, bot_depth, progress_fn=None, bot_time_ms=None))]
+    #[pyo3(signature = (eval_fn=None, bot_depth=3, progress_fn=None, bot_time_ms=None, onnx_path=None))]
     fn play_battle_vs_bot(
         &self,
         _py: Python,
-        eval_fn: Py<PyAny>,
+        eval_fn: Option<Py<PyAny>>,
         bot_depth: u32,
         progress_fn: Option<Py<PyAny>>,
         bot_time_ms: Option<u64>,
+        onnx_path: Option<String>,
     ) -> PyResult<PyZertzBattleResult> {
-        let core_eval = Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
-            call_python_eval(&eval_fn, boards, reserves, n)
-        });
-
         let progress_core = progress_fn.map(|pfn| {
             let pfn: Py<PyAny> = pfn;
             Box::new(move |finished: u32, total: u32, active: u32, total_moves: u32| {
@@ -560,17 +562,61 @@ impl PyZertzSelfPlaySession {
             .filter(|&ms| ms > 0)
             .map(std::time::Duration::from_millis);
 
-        let r = play_battle_vs_bot_core(
-            self.num_games,
-            self.simulations,
-            self.c_puct,
-            self.play_batch_size,
-            bot_depth,
-            bot_time_budget,
-            core_eval,
-            progress_core,
-        )
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let r = if let Some(path) = onnx_path {
+            // Pipelined ORT path: a worker thread owns the engine; the inner
+            // sim loop overlaps leaf selection for batch N+1 with the GPU
+            // forward for batch N. Halve play_batch_size so per-game
+            // in-flight virtual-loss leaves stay constant across the two
+            // pipeline stages.
+            let mut play_batch_size = self.play_batch_size;
+            if play_batch_size > 1 {
+                play_batch_size /= 2;
+            }
+            let worker = ZertzInferenceWorker::spawn(
+                path,
+                NUM_CHANNELS,
+                GRID_SIZE,
+                RESERVE_SIZE,
+            )
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            let mut evaluator = PipelinedEvaluator::new(&worker);
+
+            let result = play_battle_vs_bot_core(
+                self.num_games,
+                self.simulations,
+                self.c_puct,
+                play_batch_size,
+                bot_depth,
+                bot_time_budget,
+                &mut evaluator,
+                progress_core,
+            );
+
+            drop(evaluator);
+            let _timing = worker.shutdown_and_drain_timing();
+            result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+        } else {
+            let py_eval = eval_fn.ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "eval_fn is required when onnx_path is not provided",
+                )
+            })?;
+            let core_eval: EvalFn = Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
+                call_python_eval(&py_eval, boards, reserves, n)
+            });
+            let mut evaluator = SyncEvaluator::new(core_eval);
+            play_battle_vs_bot_core(
+                self.num_games,
+                self.simulations,
+                self.c_puct,
+                self.play_batch_size,
+                bot_depth,
+                bot_time_budget,
+                &mut evaluator,
+                progress_core,
+            )
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+        };
 
         Ok(PyZertzBattleResult {
             wins_model1: r.wins_model1,
