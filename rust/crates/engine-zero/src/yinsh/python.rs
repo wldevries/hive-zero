@@ -336,9 +336,9 @@ impl PyYinshSelfPlaySession {
         // the per-phase timers after self-play finishes. The closure captures a
         // clone of the Arc; after `play_selfplay_core` returns the closure is
         // dropped, leaving us as the sole owner.
-        let engine_handle: Option<Arc<Mutex<crate::inference::YinshOrtEngine>>> =
+        let engine_handle: Option<Arc<Mutex<super::inference::YinshOrtEngine>>> =
             if let Some(path) = onnx_path.as_deref() {
-                let engine = crate::inference::YinshOrtEngine::load(path)
+                let engine = super::inference::YinshOrtEngine::load(path)
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
                 Some(Arc::new(Mutex::new(engine)))
             } else {

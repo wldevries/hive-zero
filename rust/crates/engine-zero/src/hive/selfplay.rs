@@ -15,7 +15,7 @@ use hive_game::move_encoding;
 use hive_game::piece::PieceColor;
 use hive_game::search::{self, play_battle_core, play_selfplay_core, BatchEvaluator, RequestId, SelfPlayConfig, TimeoutTarget};
 
-use crate::inference::{HiveInference, HiveInferenceResult, HiveInferenceWorker};
+use super::inference::{HiveInference, HiveInferenceResult, HiveInferenceWorker};
 
 fn parse_timeout_target(s: &str) -> PyResult<TimeoutTarget> {
     match s {
@@ -617,10 +617,10 @@ impl PySelfPlayResult {
         self.search_stats.clone()
     }
 
-    fn final_games(&self) -> Vec<crate::hive_python::PyGame> {
+    fn final_games(&self) -> Vec<super::python::PyGame> {
         self.final_games
             .iter()
-            .map(|game| crate::hive_python::PyGame { game: game.clone() })
+            .map(|game| super::python::PyGame { game: game.clone() })
             .collect()
     }
 
@@ -821,7 +821,7 @@ impl PySelfPlaySession {
                 // which forces per-call padding/chunking inside
                 // `infer_padded`). The Mutex is uncontended in practice
                 // since core_eval is dropped before we drain timing.
-                let engine = crate::inference::HiveOrtEngine::load(&path)
+                let engine = super::inference::HiveOrtEngine::load(&path)
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
                 let engine_handle = Arc::new(Mutex::new(engine));
                 let t_eval_handle: Arc<Mutex<Duration>> = Arc::new(Mutex::new(Duration::ZERO));

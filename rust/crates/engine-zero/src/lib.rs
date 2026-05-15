@@ -1,19 +1,19 @@
-pub mod inference;
-pub mod hive_python;
-pub mod hive_selfplay;
-pub mod zertz_python;
-pub mod tictactoe_python;
-pub mod yinsh_python;
+pub mod ort_common;
+
+pub mod hive;
+pub mod tictactoe;
+pub mod yinsh;
+pub mod zertz;
 
 use pyo3::prelude::*;
 
 /// Python module: engine_zero
 #[pymodule]
 fn engine_zero(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    hive_python::register(m)?;
-    hive_selfplay::register(m)?;
-    zertz_python::register(m)?;
-    tictactoe_python::register(m)?;
-    yinsh_python::register(m)?;
+    hive::python::register(m)?;
+    hive::selfplay::register(m)?;
+    zertz::python::register(m)?;
+    tictactoe::python::register(m)?;
+    yinsh::python::register(m)?;
     Ok(())
 }
