@@ -5,6 +5,7 @@
 //! (847 entries) consumed via the `PolicyIndex::Sum` mechanism that
 //! `core_game::mcts` already supports.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use rand::RngExt;
@@ -34,6 +35,83 @@ pub type EvalFn = Box<
 
 /// Progress callback: `(finished, total, active, total_moves)`.
 pub type ProgressFn = Box<dyn Fn(u32, u32, u32, u32) + Send + Sync>;
+
+/// Opaque ticket returned by `BatchEvaluator::submit` and consumed by
+/// `collect`. The implementation chooses what it means: the synchronous
+/// evaluator uses it as an index into a result stash; the pipelined ORT
+/// evaluator maps it to a oneshot receiver from the worker thread.
+pub type RequestId = u64;
+
+/// Two-phase batch inference interface. `submit` posts a request and returns
+/// immediately; `collect` blocks until that request's response is ready.
+///
+/// The split lets `play_selfplay_core` overlap leaf selection for batch N+1
+/// with the GPU forward for batch N when paired with a worker-thread
+/// implementation. The default synchronous wrapper (used for the Python
+/// callback path, where the GIL precludes overlap) does the work inside
+/// `submit` and trivially returns it in `collect`.
+///
+/// Boards and reserves are taken by value so a pipelined implementation can
+/// ship the owned buffers across a channel to a worker thread without an
+/// additional memcpy. The synchronous wrapper just borrows from the Vec
+/// before dropping it.
+pub trait BatchEvaluator {
+    fn submit(
+        &mut self,
+        boards: Vec<f32>,
+        reserves: Vec<f32>,
+        n: usize,
+    ) -> Result<RequestId, String>;
+
+    fn collect(
+        &mut self,
+        id: RequestId,
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>;
+}
+
+/// Default `BatchEvaluator` that runs the closure synchronously inside
+/// `submit` and stashes the result for `collect`. Behaviour is identical to
+/// calling `eval_fn` inline — no pipelining benefit, but lets the inner loop
+/// speak a single API regardless of backend.
+pub struct SyncEvaluator {
+    eval_fn: EvalFn,
+    next_id: RequestId,
+    pending: HashMap<RequestId, Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>>,
+}
+
+impl SyncEvaluator {
+    pub fn new(eval_fn: EvalFn) -> Self {
+        Self {
+            eval_fn,
+            next_id: 0,
+            pending: HashMap::new(),
+        }
+    }
+}
+
+impl BatchEvaluator for SyncEvaluator {
+    fn submit(
+        &mut self,
+        boards: Vec<f32>,
+        reserves: Vec<f32>,
+        n: usize,
+    ) -> Result<RequestId, String> {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        let result = (self.eval_fn)(&boards, &reserves, n);
+        self.pending.insert(id, result);
+        Ok(id)
+    }
+
+    fn collect(
+        &mut self,
+        id: RequestId,
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+        self.pending
+            .remove(&id)
+            .ok_or_else(|| format!("SyncEvaluator: unknown request id {id}"))?
+    }
+}
 
 /// Phase of a turn — useful as a categorical training-data flag.
 #[inline]
@@ -627,17 +705,21 @@ fn prepare_batch(
 }
 
 /// Regroup an inference batch's results back per-game and call
-/// `expand_and_backprop` on each game's portion in stash order. Mirrors what
-/// the synchronous loop used to do inline.
-fn expand_from_resp(
+/// `expand_and_backprop_with_stash` on each game's portion. Operates on
+/// caller-owned stashes (previously taken from each search via `take_stash`)
+/// so two batches can be in flight simultaneously on the pipelined path —
+/// the next `prepare_batch` is free to refill each search's internal stash
+/// without clobbering this batch's leaves.
+fn expand_from_resp_with_stashes(
     searches: &mut [MctsSearch<YinshBoard>],
     active_games: &[usize],
-    n: usize,
+    stashes: Vec<Vec<(NodeId, YinshBoard)>>,
     meta: &BatchMeta,
     policy: &[f32],
     values: &[f32],
     draws: &[f32],
 ) {
+    let n = stashes.len();
     let mut per_game_policies: Vec<Vec<Vec<f32>>> = (0..n).map(|_| Vec::new()).collect();
     let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
     let mut per_game_draws: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
@@ -648,11 +730,17 @@ fn expand_from_resp(
         per_game_values[i].push(values[k]);
         per_game_draws[i].push(draws[k]);
     }
-    for (i, &gi) in active_games.iter().enumerate() {
-        if per_game_policies[i].is_empty() {
+    for (i, stash) in stashes.into_iter().enumerate() {
+        if stash.is_empty() {
             continue;
         }
-        searches[gi].expand_and_backprop(&per_game_policies[i], &per_game_values[i], &per_game_draws[i]);
+        let gi = active_games[i];
+        searches[gi].expand_and_backprop_with_stash(
+            stash,
+            &per_game_policies[i],
+            &per_game_values[i],
+            &per_game_draws[i],
+        );
     }
 }
 
@@ -665,7 +753,7 @@ pub fn play_selfplay_core(
     mcts: MctsConfig,
     playout_cap: PlayoutCapConfig,
     opening: OpeningRandomConfig,
-    eval_fn: EvalFn,
+    evaluator: &mut dyn BatchEvaluator,
     progress_fn: Option<ProgressFn>,
     opening_sequences: Vec<Vec<String>>,
 ) -> Result<SelfPlayResult, String> {
@@ -873,7 +961,8 @@ pub fn play_selfplay_core(
                     &mut cold_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE],
                 );
             }
-            let (init_policy, _, _) = eval_fn(&cold_boards, &cold_reserves, nc)?;
+            let init_id = evaluator.submit(cold_boards, cold_reserves, nc)?;
+            let (init_policy, _, _) = evaluator.collect(init_id)?;
             for (k, &i) in cold.iter().enumerate() {
                 let gi = active_games[i];
                 let policy_slice = &init_policy[k * POLICY_SIZE..(k + 1) * POLICY_SIZE];
@@ -901,10 +990,19 @@ pub fn play_selfplay_core(
             }
         }
 
-        // Cross-game batched simulations.
+        // Cross-game batched simulations, pipelined: at any time at most one
+        // batch is in flight on the evaluator. Each iteration builds + submits
+        // batch N+1 and then waits on + expands batch N, so the GPU forward
+        // for the previous batch overlaps with the main thread's leaf
+        // selection for the next one. For the synchronous `SyncEvaluator`
+        // this loop is equivalent to the old "build → submit → collect →
+        // expand" pattern (no overlap), since `submit` does the work inline.
         let mut game_sims = vec![0usize; n];
+        let mut pending: Option<(RequestId, Vec<Vec<(NodeId, YinshBoard)>>, BatchMeta)> = None;
         loop {
-            let Some(batch) = prepare_batch(
+            // Phase A: prepare next batch's leaves (select + encode). Returns
+            // None when every game has hit its sim cap or trees are exhausted.
+            let next_batch = prepare_batch(
                 &mut searches,
                 &active_games,
                 mcts.play_batch_size,
@@ -912,25 +1010,61 @@ pub fn play_selfplay_core(
                 &mut game_sims,
                 &mut t_select,
                 &mut t_encode,
-            ) else {
-                break;
+            );
+
+            // Phase B: snapshot per-game stashes BEFORE the next iteration's
+            // prepare_batch can re-fill them. Without this take_stash, the
+            // next select_leaves would append onto the same Vec and clobber
+            // this batch's leaves when expand_and_backprop later consumes
+            // the merged stash via mem::take.
+            let new_stashes: Vec<Vec<(NodeId, YinshBoard)>> = if next_batch.is_some() {
+                active_games
+                    .iter()
+                    .map(|&gi| searches[gi].take_stash())
+                    .collect()
+            } else {
+                Vec::new()
             };
 
-            let t = Instant::now();
-            let (policy, values, draws) = eval_fn(&batch.boards, &batch.reserves, batch.nl)?;
-            t_eval += t.elapsed();
+            // Phase C: submit new batch. On the pipelined path this returns
+            // immediately and the GPU starts batch N+1; on the sync path it
+            // runs the eval inline.
+            let new_pending = if let Some(batch) = next_batch {
+                let t = Instant::now();
+                let id = evaluator.submit(batch.boards, batch.reserves, batch.nl)?;
+                t_eval += t.elapsed();
+                Some((id, new_stashes, batch.meta))
+            } else {
+                None
+            };
 
-            let te = Instant::now();
-            expand_from_resp(
-                &mut searches,
-                &active_games,
-                n,
-                &batch.meta,
-                &policy,
-                &values,
-                &draws,
-            );
-            t_expand += te.elapsed();
+            // Phase D: collect + expand the PREVIOUS batch (if any). The
+            // pipelined evaluator blocks here on the worker's response —
+            // but the new batch is already in flight from phase C, so the
+            // GPU stays busy across this boundary.
+            if let Some((prev_id, prev_stashes, prev_meta)) = pending.take() {
+                let t = Instant::now();
+                let (policy, values, draws) = evaluator.collect(prev_id)?;
+                t_eval += t.elapsed();
+                let te = Instant::now();
+                expand_from_resp_with_stashes(
+                    &mut searches,
+                    &active_games,
+                    prev_stashes,
+                    &prev_meta,
+                    &policy,
+                    &values,
+                    &draws,
+                );
+                t_expand += te.elapsed();
+            }
+
+            pending = new_pending;
+
+            // Termination: nothing more to submit and nothing in flight.
+            if pending.is_none() {
+                break;
+            }
         }
 
         // Collect per-turn MCTS stats for full-search turns.

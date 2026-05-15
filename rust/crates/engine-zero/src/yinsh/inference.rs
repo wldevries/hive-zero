@@ -1,6 +1,9 @@
 //! Yinsh ORT inference engine. Single flat policy output `policy[B, POLICY_SIZE]`
 //! and `wdl[B, 3]`. Shared QNN/onnxruntime setup lives in [`crate::ort_common`].
 
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use ort::session::Session;
@@ -126,5 +129,140 @@ impl YinshOrtEngine {
         let result = Ok((policy_data.to_vec(), values, draws));
         self.t_extract += t2.elapsed();
         result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Yinsh ORT worker thread (for pipelined self-play)
+// ---------------------------------------------------------------------------
+
+/// One request to the worker. `respond` is a single-use channel; the worker
+/// posts the result and the caller blocks on `recv()` when ready to consume.
+struct YinshWorkerRequest {
+    boards: Vec<f32>,
+    reserves: Vec<f32>,
+    batch_size: usize,
+    respond: SyncSender<Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>>,
+}
+
+/// Per-phase wall-clock totals drained from the worker after it shuts down.
+#[derive(Clone, Copy, Default)]
+pub struct YinshWorkerTiming {
+    pub t_input: Duration,
+    pub t_run: Duration,
+    pub t_extract: Duration,
+}
+
+/// Dedicated worker thread that owns a `YinshOrtEngine` and processes
+/// inference requests off an mpsc channel. Lets `play_selfplay_core` submit
+/// a batch and continue selecting leaves for the next batch while the GPU
+/// runs the current one (one batch in flight at a time).
+///
+/// Lifecycle: spawn → submit/recv pairs → `shutdown_and_drain_timing()` to
+/// close the channel, join the thread, and read its `phase_times`. Dropping
+/// without explicit shutdown also closes the channel (sender is dropped) and
+/// detaches the thread, but the per-phase timing will be lost.
+pub struct YinshInferenceWorker {
+    request_tx: SyncSender<YinshWorkerRequest>,
+    handle: Option<JoinHandle<()>>,
+    timing: Arc<Mutex<YinshWorkerTiming>>,
+}
+
+impl YinshInferenceWorker {
+    /// Spawn the worker. The ONNX session is constructed on the worker
+    /// thread so it doesn't migrate after init (CUDA EP can be picky about
+    /// thread-affinity for the bound stream).
+    pub fn spawn(onnx_path: String) -> Result<Self, String> {
+        // Bounded queue depth = 2: at most one batch waiting in the channel
+        // plus one being processed by the worker. send() will block past
+        // that, which acts as backpressure if the caller submits faster than
+        // the worker can drain.
+        let (request_tx, request_rx) = sync_channel::<YinshWorkerRequest>(2);
+        let timing = Arc::new(Mutex::new(YinshWorkerTiming::default()));
+        let timing_for_worker = Arc::clone(&timing);
+
+        // Load on the worker thread so session ownership stays there. Surface
+        // load failures via an init channel before returning the handle.
+        let (init_tx, init_rx) = sync_channel::<Result<(), String>>(1);
+        let onnx_path_for_thread = onnx_path.clone();
+        let handle = thread::Builder::new()
+            .name("yinsh-ort-worker".into())
+            .spawn(move || {
+                let mut engine = match YinshOrtEngine::load(&onnx_path_for_thread) {
+                    Ok(e) => {
+                        let _ = init_tx.send(Ok(()));
+                        e
+                    }
+                    Err(e) => {
+                        let _ = init_tx.send(Err(e.to_string()));
+                        return;
+                    }
+                };
+
+                while let Ok(req) = request_rx.recv() {
+                    let result = engine.infer_batch(&req.boards, &req.reserves, req.batch_size);
+                    let _ = req.respond.send(result);
+                }
+
+                // Channel closed → drain accumulated phase timers so the
+                // outer caller can read them after `join`.
+                let (t_input, t_run, t_extract) = engine.phase_times();
+                if let Ok(mut t) = timing_for_worker.lock() {
+                    *t = YinshWorkerTiming { t_input, t_run, t_extract };
+                }
+            })
+            .map_err(|e| format!("spawn yinsh-ort-worker: {e}"))?;
+
+        match init_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                request_tx,
+                handle: Some(handle),
+                timing,
+            }),
+            Ok(Err(e)) => {
+                let _ = handle.join();
+                Err(e)
+            }
+            Err(_) => Err("worker thread died before load completed".into()),
+        }
+    }
+
+    /// Post one inference request. Returns a receiver the caller can block
+    /// on later via `recv()`. Sends are bounded by the channel capacity, so
+    /// this can block if the worker is more than one batch behind.
+    pub fn submit(
+        &self,
+        boards: Vec<f32>,
+        reserves: Vec<f32>,
+        batch_size: usize,
+    ) -> Result<Receiver<Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>>, String> {
+        let (resp_tx, resp_rx) = sync_channel(1);
+        self.request_tx
+            .send(YinshWorkerRequest { boards, reserves, batch_size, respond: resp_tx })
+            .map_err(|_| "yinsh-ort-worker request channel closed".to_string())?;
+        Ok(resp_rx)
+    }
+
+    /// Close the request channel, join the worker, and return the drained
+    /// per-phase timing. Consumes self so accidental further use is a
+    /// compile error.
+    pub fn shutdown_and_drain_timing(mut self) -> YinshWorkerTiming {
+        let (dummy_tx, _) = sync_channel::<YinshWorkerRequest>(0);
+        drop(std::mem::replace(&mut self.request_tx, dummy_tx));
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        self.timing.lock().map(|t| *t).unwrap_or_default()
+    }
+}
+
+impl Drop for YinshInferenceWorker {
+    fn drop(&mut self) {
+        // Best-effort cleanup if the caller forgot shutdown_and_drain_timing.
+        if let Some(handle) = self.handle.take() {
+            let (dummy_tx, _) = sync_channel::<YinshWorkerRequest>(0);
+            drop(std::mem::replace(&mut self.request_tx, dummy_tx));
+            let _ = handle.join();
+        }
     }
 }

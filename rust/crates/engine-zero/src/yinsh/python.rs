@@ -2,7 +2,9 @@
 //! battle harness, and D6 symmetry permutation tables for Python-side
 //! data augmentation.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
 use numpy::{PyArray1, PyArray2, PyArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -20,8 +22,8 @@ use core_game::game::PolicyIndex;
 use yinsh_game::notation::{move_to_str, str_to_move};
 use yinsh_game::sgf::parse_sgf_move_strs;
 use yinsh_game::search::{
-    BattleResult, EvalFn, ProgressFn, SelfPlayResult, best_move_core, play_battle_core,
-    play_battle_vs_bot_core, play_selfplay_core,
+    BatchEvaluator, BattleResult, EvalFn, ProgressFn, RequestId, SelfPlayResult, SyncEvaluator,
+    best_move_core, play_battle_core, play_battle_vs_bot_core, play_selfplay_core,
 };
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
@@ -92,6 +94,60 @@ fn call_python_eval(
             draws,
         ))
     })
+}
+
+// ---------------------------------------------------------------------------
+// Pipelined evaluator — hands batches off to a YinshInferenceWorker so the
+// GPU forward for batch N runs while the main thread selects leaves for
+// batch N+1.
+// ---------------------------------------------------------------------------
+
+/// `BatchEvaluator` impl that hands batches off to a `YinshInferenceWorker`
+/// running on a dedicated thread. `submit` returns immediately after posting
+/// the request (one batch in flight at a time, bounded by the worker's
+/// channel capacity); `collect` blocks on the per-request response channel.
+struct PipelinedEvaluator<'w> {
+    worker: &'w super::inference::YinshInferenceWorker,
+    next_id: RequestId,
+    pending: HashMap<RequestId, Receiver<Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>>>,
+}
+
+impl<'w> PipelinedEvaluator<'w> {
+    fn new(worker: &'w super::inference::YinshInferenceWorker) -> Self {
+        Self {
+            worker,
+            next_id: 0,
+            pending: HashMap::new(),
+        }
+    }
+}
+
+impl<'w> BatchEvaluator for PipelinedEvaluator<'w> {
+    fn submit(
+        &mut self,
+        boards: Vec<f32>,
+        reserves: Vec<f32>,
+        n: usize,
+    ) -> Result<RequestId, String> {
+        let recv = self.worker.submit(boards, reserves, n)?;
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.pending.insert(id, recv);
+        Ok(id)
+    }
+
+    fn collect(
+        &mut self,
+        id: RequestId,
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+        let recv = self
+            .pending
+            .remove(&id)
+            .ok_or_else(|| format!("PipelinedEvaluator: unknown request {id}"))?;
+        recv
+            .recv()
+            .map_err(|_| "yinsh-ort-worker died before responding".to_string())?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -332,35 +388,6 @@ impl PyYinshSelfPlaySession {
         onnx_path: Option<String>,
         opening_sequences: Option<Vec<Vec<String>>>,
     ) -> PyResult<PyYinshSelfPlayResult> {
-        // For the ORT path we keep an outer handle to the engine so we can read
-        // the per-phase timers after self-play finishes. The closure captures a
-        // clone of the Arc; after `play_selfplay_core` returns the closure is
-        // dropped, leaving us as the sole owner.
-        let engine_handle: Option<Arc<Mutex<super::inference::YinshOrtEngine>>> =
-            if let Some(path) = onnx_path.as_deref() {
-                let engine = super::inference::YinshOrtEngine::load(path)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                Some(Arc::new(Mutex::new(engine)))
-            } else {
-                None
-            };
-
-        let core_eval: EvalFn = if let Some(handle) = engine_handle.as_ref() {
-            let shared = Arc::clone(handle);
-            Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
-                let mut engine = shared.lock().map_err(|_| "ONNX engine mutex poisoned".to_string())?;
-                engine.infer_batch(boards, reserves, n)
-            })
-        } else {
-            let py_eval = eval_fn
-                .ok_or_else(|| PyValueError::new_err("eval_fn is required when onnx_path is not provided"))?
-                .clone()
-                .unbind();
-            Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
-                call_python_eval(&py_eval, boards, reserves, n)
-            })
-        };
-
         let progress_core: Option<ProgressFn> = progress_fn.map(|pfn| {
             let pfn = pfn.clone().unbind();
             Box::new(move |finished: u32, total: u32, active: u32, total_moves: u32| {
@@ -371,7 +398,7 @@ impl PyYinshSelfPlaySession {
             }) as ProgressFn
         });
 
-        let mcts = core_game::selfplay_config::MctsConfig {
+        let mut mcts = core_game::selfplay_config::MctsConfig {
             simulations: self.simulations,
             c_puct: self.c_puct,
             dir_alpha: self.dir_alpha,
@@ -392,30 +419,74 @@ impl PyYinshSelfPlaySession {
             max: self.random_opening_moves_max,
         };
         let opening_sequences = opening_sequences.unwrap_or_default();
-        let mut result = play_selfplay_core(
-            self.num_games,
-            mcts,
-            playout_cap,
-            opening,
-            core_eval,
-            progress_core,
-            opening_sequences,
-        )
-        .map_err(PyRuntimeError::new_err)?;
 
-        // Drain ORT-engine sub-phase timers into the result. core_eval is now
-        // dropped (consumed by play_selfplay_core), so the closure-side Arc is
-        // gone and the lock is uncontended.
-        if let Some(handle) = engine_handle {
-            if let Ok(engine) = handle.lock() {
-                let (t_in, t_run, t_ex) = engine.phase_times();
-                result.timing.eval_input = t_in;
-                result.timing.eval_run = t_run;
-                result.timing.eval_extract = t_ex;
+        if let Some(path) = onnx_path {
+            // Pipelined ORT path: a worker thread owns the YinshOrtEngine;
+            // play_selfplay_core overlaps leaf selection for batch N+1 with
+            // the GPU forward for batch N.
+            //
+            // Halve play_batch_size so per-game in-flight virtual-loss leaves
+            // stay constant: the pipeline holds two batches alive at once
+            // (the one running on GPU + the next being selected), so VL
+            // accumulates over `2 × play_batch_size` leaves per game vs.
+            // `play_batch_size` on the sync path.
+            let original_pbs = mcts.play_batch_size;
+            if original_pbs > 1 {
+                mcts.play_batch_size = original_pbs / 2;
             }
-        }
 
-        Ok(PyYinshSelfPlayResult { inner: result })
+            let worker = super::inference::YinshInferenceWorker::spawn(path)
+                .map_err(PyRuntimeError::new_err)?;
+            let mut evaluator = PipelinedEvaluator::new(&worker);
+
+            let t_total_start = Instant::now();
+            let core_result = play_selfplay_core(
+                self.num_games,
+                mcts,
+                playout_cap,
+                opening,
+                &mut evaluator,
+                progress_core,
+                opening_sequences,
+            );
+            let total = t_total_start.elapsed();
+
+            // Release the evaluator's borrow before taking ownership of the
+            // worker for shutdown.
+            drop(evaluator);
+            let timing = worker.shutdown_and_drain_timing();
+
+            let mut result = core_result.map_err(PyRuntimeError::new_err)?;
+            result.timing.eval = total;
+            result.timing.eval_input = timing.t_input;
+            result.timing.eval_run = timing.t_run;
+            result.timing.eval_extract = timing.t_extract;
+
+            Ok(PyYinshSelfPlayResult { inner: result })
+        } else {
+            // Sync path: Python eval callback wrapped in SyncEvaluator. The
+            // GIL precludes pipelining; this preserves the previous
+            // behaviour exactly.
+            let py_eval = eval_fn
+                .ok_or_else(|| PyValueError::new_err("eval_fn is required when onnx_path is not provided"))?
+                .clone()
+                .unbind();
+            let core_eval: EvalFn = Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
+                call_python_eval(&py_eval, boards, reserves, n)
+            });
+            let mut evaluator = SyncEvaluator::new(core_eval);
+            let result = play_selfplay_core(
+                self.num_games,
+                mcts,
+                playout_cap,
+                opening,
+                &mut evaluator,
+                progress_core,
+                opening_sequences,
+            )
+            .map_err(PyRuntimeError::new_err)?;
+            Ok(PyYinshSelfPlayResult { inner: result })
+        }
     }
 
     /// Run a battle between two Python eval functions.
