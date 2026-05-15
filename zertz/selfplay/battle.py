@@ -70,6 +70,8 @@ def run_battle(
     bot_depth: int = 3,
     bot_time_ms: int | None = None,
     use_ort: bool = False,
+    temperature: float = 1.0,
+    temp_threshold: int = 4,
 ):
     if model2_path == "alphabeta":
         return _run_battle_vs_bot(
@@ -81,30 +83,42 @@ def run_battle(
             bot_depth=bot_depth,
             bot_time_ms=bot_time_ms,
             use_ort=use_ort,
-        )
-
-    if use_ort:
-        raise NotImplementedError(
-            "--use-ort is currently only wired up for the model-vs-alphabeta "
-            "path; model-vs-model ORT support is the next stage."
+            temperature=temperature,
+            temp_threshold=temp_threshold,
         )
 
     from engine_zero import ZertzSelfPlaySession
 
-    model1, ckpt1 = load_checkpoint(model1_path)
-    model2, ckpt2 = load_checkpoint(model2_path)
-
-    meta1 = ckpt1.get("metadata", {})
-    meta2 = ckpt2.get("metadata", {})
-    iter1 = ckpt1.get("generation", "?")
-    iter2 = ckpt2.get("generation", "?")
-
+    # Always load each .pt (cheap for small models) so we can print iter/sims
+    # metadata in the header regardless of which inference backend we use.
+    ckpt1_meta = torch.load(model1_path, weights_only=False, map_location="cpu")
+    ckpt2_meta = torch.load(model2_path, weights_only=False, map_location="cpu")
+    meta1 = ckpt1_meta.get("metadata", {})
+    meta2 = ckpt2_meta.get("metadata", {})
+    iter1 = ckpt1_meta.get("generation", "?")
+    iter2 = ckpt2_meta.get("generation", "?")
     sims1 = meta1.get("simulations", simulations or 800)
     sims2 = meta2.get("simulations", simulations or 800)
     sims = simulations if simulations is not None else max(sims1, sims2)
 
-    name1 = f"{model1_path} (iter {iter1})"
-    name2 = f"{model2_path} (iter {iter2})"
+    onnx_path1: str | None = None
+    onnx_path2: str | None = None
+    eval_fn1 = None
+    eval_fn2 = None
+    if use_ort:
+        onnx_path1 = _onnx_path_for(model1_path)
+        onnx_path2 = _onnx_path_for(model2_path)
+    else:
+        model1, _ = load_checkpoint(model1_path)
+        model2, _ = load_checkpoint(model2_path)
+        model1.to(device).eval()
+        model2.to(device).eval()
+        eval_fn1 = _make_eval_fn(model1, device)
+        eval_fn2 = _make_eval_fn(model2, device)
+
+    suffix = "  [ORT pipelined]" if use_ort else ""
+    name1 = f"{model1_path} (iter {iter1}){suffix}"
+    name2 = f"{model2_path} (iter {iter2}){suffix}"
 
     print(f"\n{'='*60}")
     print(f"  Battle: {_cc(name1)}")
@@ -112,16 +126,11 @@ def run_battle(
     print(f"  Games: {num_games}  Simulations: {sims}")
     print(f"{'='*60}")
 
-    model1.to(device).eval()
-    model2.to(device).eval()
-
-    eval_fn1 = _make_eval_fn(model1, device)
-    eval_fn2 = _make_eval_fn(model2, device)
-
     session = ZertzSelfPlaySession(
         num_games=num_games,
         simulations=sims,
-        temp_threshold=0,
+        temperature=temperature,
+        temp_threshold=temp_threshold,
         playout_cap_p=0.0,
         fast_cap=sims,
         play_batch_size=play_batch_size,
@@ -141,7 +150,13 @@ def run_battle(
         pbar.set_postfix(done=f"{finished}/{total}")
 
     start = time.time()
-    result = session.play_battle(eval_fn1, eval_fn2, progress_fn)
+    result = session.play_battle(
+        eval_fn1=eval_fn1,
+        eval_fn2=eval_fn2,
+        progress_fn=progress_fn,
+        onnx_path1=onnx_path1,
+        onnx_path2=onnx_path2,
+    )
     elapsed = time.time() - start
     pbar.update(pbar.total - pbar.n)
     pbar.close()
@@ -219,6 +234,8 @@ def _run_battle_vs_bot(
     bot_depth: int,
     bot_time_ms: int | None,
     use_ort: bool = False,
+    temperature: float = 1.0,
+    temp_threshold: int = 4,
 ):
     """Run the model (NN+MCTS) against the alpha-beta bot in parallel via
     ``ZertzSelfPlaySession.play_battle_vs_bot``. Each ply, the Rust core
@@ -268,7 +285,8 @@ def _run_battle_vs_bot(
     session = ZertzSelfPlaySession(
         num_games=num_games,
         simulations=sims,
-        temp_threshold=0,
+        temperature=temperature,
+        temp_threshold=temp_threshold,
         playout_cap_p=0.0,
         fast_cap=sims,
         play_batch_size=play_batch_size,

@@ -475,21 +475,26 @@ impl PyZertzSelfPlaySession {
 
     /// Run a battle between two models. Games 0..N/2 have model1 as P1, model2 as P2.
     /// Games N/2..N are reversed. Returns win/draw counts from model1's perspective.
-    #[pyo3(signature = (eval_fn1, eval_fn2, progress_fn=None))]
+    ///
+    /// Each model can independently use the Python eval_fn (sync) or a Rust-native
+    /// pipelined ORT worker (when onnx_path is set). With both models on the
+    /// pipelined path, their forwards run concurrently on independent CUDA streams,
+    /// and play_batch_size is halved to keep per-game in-flight virtual-loss
+    /// leaves constant across the two pipeline stages.
+    #[pyo3(signature = (
+        eval_fn1=None, eval_fn2=None,
+        progress_fn=None,
+        onnx_path1=None, onnx_path2=None,
+    ))]
     fn play_battle(
         &self,
         _py: Python,
-        eval_fn1: Py<PyAny>,
-        eval_fn2: Py<PyAny>,
+        eval_fn1: Option<Py<PyAny>>,
+        eval_fn2: Option<Py<PyAny>>,
         progress_fn: Option<Py<PyAny>>,
+        onnx_path1: Option<String>,
+        onnx_path2: Option<String>,
     ) -> PyResult<PyZertzBattleResult> {
-        let core_eval1 = Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
-            call_python_eval(&eval_fn1, boards, reserves, n)
-        });
-        let core_eval2 = Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
-            call_python_eval(&eval_fn2, boards, reserves, n)
-        });
-
         let progress_core = progress_fn.map(|pfn| {
             let pfn: Py<PyAny> = pfn;
             Box::new(move |finished: u32, total: u32, active: u32, total_moves: u32| {
@@ -500,16 +505,83 @@ impl PyZertzSelfPlaySession {
             }) as Box<dyn Fn(u32, u32, u32, u32) + Send + Sync>
         });
 
-        let r = play_battle_core(
-            self.num_games,
-            self.simulations,
-            self.c_puct,
-            self.play_batch_size,
-            core_eval1,
-            core_eval2,
-            progress_core,
-        ).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        // Spawn ORT workers up front for whichever side(s) opted into the
+        // pipelined path. Workers must outlive their PipelinedEvaluator,
+        // hence the explicit drop-order at the end.
+        let worker1 = onnx_path1
+            .map(|path| ZertzInferenceWorker::spawn(path, NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE))
+            .transpose()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let worker2 = onnx_path2
+            .map(|path| ZertzInferenceWorker::spawn(path, NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE))
+            .transpose()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
+        // Halve play_batch_size if either side is pipelined — same rationale
+        // as play_games: two batches alive per game across the pipeline stages.
+        let mut play_batch_size = self.play_batch_size;
+        if (worker1.is_some() || worker2.is_some()) && play_batch_size > 1 {
+            play_batch_size /= 2;
+        }
+
+        // Per-side sync evaluators (only built if no worker for that side).
+        let mut sync_eval1: Option<SyncEvaluator> = if worker1.is_none() {
+            let py_eval = eval_fn1.ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "either eval_fn1 or onnx_path1 must be provided for model1",
+                )
+            })?;
+            let core_eval: EvalFn = Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
+                call_python_eval(&py_eval, boards, reserves, n)
+            });
+            Some(SyncEvaluator::new(core_eval))
+        } else { None };
+        let mut sync_eval2: Option<SyncEvaluator> = if worker2.is_none() {
+            let py_eval = eval_fn2.ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "either eval_fn2 or onnx_path2 must be provided for model2",
+                )
+            })?;
+            let core_eval: EvalFn = Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
+                call_python_eval(&py_eval, boards, reserves, n)
+            });
+            Some(SyncEvaluator::new(core_eval))
+        } else { None };
+
+        let mut pipelined_eval1 = worker1.as_ref().map(PipelinedEvaluator::new);
+        let mut pipelined_eval2 = worker2.as_ref().map(PipelinedEvaluator::new);
+
+        let result = {
+            let evaluator1: &mut dyn BatchEvaluator = match (&mut pipelined_eval1, &mut sync_eval1) {
+                (Some(p), _) => p,
+                (None, Some(s)) => s,
+                _ => unreachable!("missing evaluator for model1"),
+            };
+            let evaluator2: &mut dyn BatchEvaluator = match (&mut pipelined_eval2, &mut sync_eval2) {
+                (Some(p), _) => p,
+                (None, Some(s)) => s,
+                _ => unreachable!("missing evaluator for model2"),
+            };
+
+            play_battle_core(
+                self.num_games,
+                self.simulations,
+                self.c_puct,
+                play_batch_size,
+                self.temperature,
+                self.temp_threshold,
+                evaluator1,
+                evaluator2,
+                progress_core,
+            )
+        };
+
+        drop(pipelined_eval1);
+        drop(pipelined_eval2);
+        let _t1 = worker1.map(|w| w.shutdown_and_drain_timing());
+        let _t2 = worker2.map(|w| w.shutdown_and_drain_timing());
+
+        let r = result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         Ok(PyZertzBattleResult {
             wins_model1: r.wins_model1,
             wins_model2: r.wins_model2,
@@ -586,6 +658,8 @@ impl PyZertzSelfPlaySession {
                 self.simulations,
                 self.c_puct,
                 play_batch_size,
+                self.temperature,
+                self.temp_threshold,
                 bot_depth,
                 bot_time_budget,
                 &mut evaluator,
@@ -610,6 +684,8 @@ impl PyZertzSelfPlaySession {
                 self.simulations,
                 self.c_puct,
                 self.play_batch_size,
+                self.temperature,
+                self.temp_threshold,
                 bot_depth,
                 bot_time_budget,
                 &mut evaluator,

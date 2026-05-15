@@ -147,9 +147,29 @@ def main():
     battle_parser.add_argument(
         "--use-ort",
         action="store_true",
-        help="Run the NN through a Rust-native pipelined ORT worker (instead of "
-             "PyTorch via Python). Requires an .onnx alongside each .pt "
-             "checkpoint. Currently only wired up for model-vs-alphabeta.",
+        help="Run the NN through Rust-native pipelined ORT workers (one per "
+             "model, two CUDA streams in parallel for model-vs-model) instead "
+             "of PyTorch via Python. Requires an .onnx alongside each .pt "
+             "checkpoint.",
+    )
+    battle_parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for opening-move sampling during battle (default: 1.0). "
+             "Weights moves by visits^(1/T); only applies to the first "
+             "--temp-threshold moves of each game, then argmax takes over. "
+             "Set 0 to disable (every game in a P1/P2 pairing then plays "
+             "identically and num_games collapses to 2 game-paths).",
+    )
+    battle_parser.add_argument(
+        "--temp-threshold",
+        type=int,
+        default=4,
+        help="Move number after which battle move selection drops back to "
+             "argmax (default: 4). With --temperature 1.0 this samples the "
+             "first 4 moves per game so games diverge into independent "
+             "trajectories without weakening end-game play.",
     )
 
     args = parser.parse_args()
@@ -218,6 +238,8 @@ def main():
             bot_depth=args.bot_depth,
             bot_time_ms=args.bot_time_ms,
             use_ort=args.use_ort,
+            temperature=args.temperature,
+            temp_threshold=args.temp_threshold,
         )
     else:
         parser.print_help()

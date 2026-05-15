@@ -187,10 +187,13 @@ pub fn play_battle_core(
     simulations: usize,
     c_puct: f32,
     play_batch_size: usize,
-    eval_fn1: EvalFn,
-    eval_fn2: EvalFn,
+    temperature: f32,
+    temp_threshold: u32,
+    evaluator1: &mut dyn BatchEvaluator,
+    evaluator2: &mut dyn BatchEvaluator,
     progress_fn: Option<ProgressFn>,
 ) -> Result<BattleResult, String> {
+    let mut rng = rand::rng();
     let half = num_games / 2;
 
     let mut boards: Vec<ZertzBoard> = (0..num_games).map(|_| ZertzBoard::default()).collect();
@@ -222,31 +225,38 @@ pub fn play_battle_core(
         (gi < half) == (player == Player::Player1)
     };
 
-    // Partition leaves by which model evaluates them and issue one forward
-    // call per model on its half. The old shape ran both eval_fns on the
-    // full batch and discarded the unused result, doubling GPU work.
-    //
-    // Inputs are already pre-partitioned at encode time (no intermediate
-    // flat_boards / re-split memcpy). idx1/idx2 hold the original combined
-    // position for each sub-batch entry, so eval outputs can be scattered
-    // back into a single (policy, value) pair.
+    // Submit pre-partitioned sub-batches to each model's evaluator, collect
+    // both, and scatter into a single flat (policy, value) pair indexed by
+    // the original combined position. Submits happen back-to-back before
+    // either collect, so on the pipelined path the two ORT workers run
+    // their GPU forwards concurrently on independent CUDA streams; the
+    // collects then block on whichever finishes last.
     let dispatch_pair = |
-        b1: &[f32], r1: &[f32], idx1: &[usize],
-        b2: &[f32], r2: &[f32], idx2: &[usize],
+        evaluator1: &mut dyn BatchEvaluator,
+        evaluator2: &mut dyn BatchEvaluator,
+        b1: Vec<f32>, r1: Vec<f32>, idx1: &[usize],
+        b2: Vec<f32>, r2: Vec<f32>, idx2: &[usize],
         total: usize,
     | -> Result<(Vec<f32>, Vec<f32>), String> {
+        let id1 = if !idx1.is_empty() {
+            Some(evaluator1.submit(b1, r1, idx1.len())?)
+        } else { None };
+        let id2 = if !idx2.is_empty() {
+            Some(evaluator2.submit(b2, r2, idx2.len())?)
+        } else { None };
+
         let mut policy = vec![0.0f32; total * NN_POLICY_SIZE];
         let mut value = vec![0.0f32; total];
-        if !idx1.is_empty() {
-            let (fp, va) = eval_fn1(b1, r1, idx1.len())?;
+        if let Some(id) = id1 {
+            let (fp, va) = evaluator1.collect(id)?;
             for (j, &k) in idx1.iter().enumerate() {
                 policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE]
                     .copy_from_slice(&fp[j * NN_POLICY_SIZE..(j + 1) * NN_POLICY_SIZE]);
                 value[k] = va[j];
             }
         }
-        if !idx2.is_empty() {
-            let (fp, va) = eval_fn2(b2, r2, idx2.len())?;
+        if let Some(id) = id2 {
+            let (fp, va) = evaluator2.collect(id)?;
             for (j, &k) in idx2.iter().enumerate() {
                 policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE]
                     .copy_from_slice(&fp[j * NN_POLICY_SIZE..(j + 1) * NN_POLICY_SIZE]);
@@ -292,7 +302,12 @@ pub fn play_battle_core(
                 }
             }
 
-            let (init_policy, _) = dispatch_pair(&b1, &r1, &idx1, &b2, &r2, &idx2, nc)?;
+            let (init_policy, _) = dispatch_pair(
+                evaluator1, evaluator2,
+                b1, r1, &idx1,
+                b2, r2, &idx2,
+                nc,
+            )?;
             for (k, &ci) in cold.iter().enumerate() {
                 let gi = mcts_games[ci];
                 searches[gi].init(&boards[gi], &init_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE]);
@@ -339,7 +354,12 @@ pub fn play_battle_core(
                 }
             }
 
-            let (leaf_policy, leaf_values) = dispatch_pair(&b1, &r1, &idx1, &b2, &r2, &idx2, nl)?;
+            let (leaf_policy, leaf_values) = dispatch_pair(
+                evaluator1, evaluator2,
+                b1, r1, &idx1,
+                b2, r2, &idx2,
+                nl,
+            )?;
 
             let mut per_game_policies: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n];
             let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
@@ -356,7 +376,19 @@ pub fn play_battle_core(
 
         for (_i, &gi) in mcts_games.iter().enumerate() {
             let dist = searches[gi].get_pruned_visit_distribution();
-            let mv = if dist.is_empty() { ZertzMove::Pass } else { dist.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap().0 };
+            let mv = if dist.is_empty() {
+                ZertzMove::Pass
+            } else if move_counts[gi] < temp_threshold && temperature > 0.01 {
+                // Temperature sampling for the opening — diversifies games
+                // across the (P1, P2) pairing buckets. Without this, every
+                // game in a bucket plays bit-identically (no MCTS noise, no
+                // Dirichlet at the root, argmax move selection).
+                let weights: Vec<f32> = dist.iter().map(|(_, p)| p.powf(1.0 / temperature)).collect();
+                let wi = WeightedIndex::new(&weights).map_err(|e| e.to_string())?;
+                dist[wi.sample(&mut rng)].0
+            } else {
+                dist.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap().0
+            };
             boards[gi].play(mv).expect("battle selected illegal move");
             move_counts[gi] += 1;
             total_moves += 1;
@@ -421,11 +453,14 @@ pub fn play_battle_vs_bot_core(
     simulations: usize,
     c_puct: f32,
     play_batch_size: usize,
+    temperature: f32,
+    temp_threshold: u32,
     bot_depth: u32,
     bot_time_budget: Option<Duration>,
     evaluator: &mut dyn BatchEvaluator,
     progress_fn: Option<ProgressFn>,
 ) -> Result<BattleResult, String> {
+    let mut rng = rand::rng();
     let half = num_games / 2;
     // Model is P1 for the first half, P2 for the second half. This
     // pairing cancels color advantage out of the model's score.
@@ -594,11 +629,21 @@ pub fn play_battle_vs_bot_core(
                 }
             }
 
-            // Pick best move per game by visit count.
+            // Pick the model's move per game — temperature sampling early
+            // (so games in a P1/P2 pairing diverge instead of replaying the
+            // same trajectory deterministically), argmax once past the
+            // threshold.
             for &gi in &mcts_games {
                 let dist = searches[gi].get_pruned_visit_distribution();
                 let mv = if dist.is_empty() {
                     ZertzMove::Pass
+                } else if move_counts[gi] < temp_threshold && temperature > 0.01 {
+                    let weights: Vec<f32> = dist
+                        .iter()
+                        .map(|(_, p)| p.powf(1.0 / temperature))
+                        .collect();
+                    let wi = WeightedIndex::new(&weights).map_err(|e| e.to_string())?;
+                    dist[wi.sample(&mut rng)].0
                 } else {
                     dist.iter()
                         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
