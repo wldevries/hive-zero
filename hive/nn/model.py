@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from shared.nn.attention import SpatialAttention
 from shared.nn.gpba import GlobalPoolBias
 from shared.nn.resblock import ResBlock
+from shared.nn.seresblock import SEResBlock
 from ..encoding.board_encoder import NUM_CHANNELS, DEFAULT_GRID_SIZE, RESERVE_SIZE
 from ..encoding.move_encoder import NUM_POLICY_CHANNELS, NUM_PLACE_CHANNELS, BILINEAR_DIM
 
@@ -27,9 +28,10 @@ class HiveNet(nn.Module):
     """AlphaZero-style network with configurable trunk, bilinear Q·K policy, value, and auxiliary heads.
 
     The trunk is a sequence of named layer types controlled by trunk_spec:
-        "res"  — ResBlock (standard 2-conv residual)
-        "gpba" — GlobalPoolBias (KataGo-style global context injection)
-        "attn" — SpatialAttention (multi-head self-attention with adaLN-Zero)
+        "res"   — ResBlock (standard 2-conv residual)
+        "seres" — SEResBlock (residual with Squeeze-and-Excitation channel gating)
+        "gpba"  — GlobalPoolBias (KataGo-style global context injection)
+        "attn"  — SpatialAttention (multi-head self-attention with adaLN-Zero)
 
     Each spec entry has a "type" field and an optional "count" (default 1).
     Example: [{"type": "res", "count": 5}, {"type": "gpba"}, {"type": "res", "count": 5}]
@@ -79,6 +81,8 @@ class HiveNet(nn.Module):
             for _ in range(count):
                 if layer_type == "res":
                     self.trunk.append(ResBlock(channels))
+                elif layer_type == "seres":
+                    self.trunk.append(SEResBlock(channels))
                 elif layer_type == "gpba":
                     self.trunk.append(GlobalPoolBias(channels))
                 elif layer_type == "attn":
