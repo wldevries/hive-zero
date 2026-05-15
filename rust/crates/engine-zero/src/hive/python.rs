@@ -8,7 +8,7 @@ use core_game::game::PolicyIndex;
 use core_game::mcts::search::{CpuctStrategy, ForcedExploration, RootNoise, SearchParams};
 
 use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
-use crate::inference::HiveInference;
+use super::inference::HiveInference;
 use hive_game::game::{self, Game};
 use hive_game::move_encoding;
 use hive_game::piece::{Piece, PieceColor, PieceType};
@@ -452,7 +452,7 @@ impl PyGame {
         let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
             engine
                 .infer_batch(boards, reserves, batch_size, NUM_CHANNELS, gs, RESERVE_SIZE)
-                .map(|r: crate::inference::HiveInferenceResult| {
+                .map(|r: super::inference::HiveInferenceResult| {
                     // Split WDL into W−L (zero-sum) and D (symmetric); contempt
                     // is applied at value() time inside MCTS, not baked here.
                     let mut values = Vec::with_capacity(batch_size);
@@ -527,7 +527,7 @@ impl PyGame {
         let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
             engine
                 .infer_batch(boards, reserves, batch_size, NUM_CHANNELS, gs, RESERVE_SIZE)
-                .map(|r: crate::inference::HiveInferenceResult| {
+                .map(|r: super::inference::HiveInferenceResult| {
                     let mut values = Vec::with_capacity(batch_size);
                     let mut draws = Vec::with_capacity(batch_size);
                     for i in 0..batch_size {
@@ -597,7 +597,7 @@ fn terminal_kind_str(k: HiveTerminalKind) -> &'static str {
 /// One entry in `MctsRootStats.children`. `terminal` is one of
 /// "ongoing" / "win" / "loss" / "draw", from the root player's POV
 /// (a "loss" child is a suicide move that surrenders the game).
-#[pyclass(name = "MctsChildStat", get_all)]
+#[pyclass(name = "MctsChildStat", get_all, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyMctsChildStat {
     pub uhp_move: String,
@@ -675,14 +675,14 @@ fn parse_sgf_moves(content: &str) -> PyResult<Vec<String>> {
 ///   `uv run python scripts/export_onnx.py model.pt --batch-size 1`
 #[pyclass(name = "HiveOrtSession")]
 pub struct PyHiveOrtSession {
-    engine: crate::inference::HiveOrtEngine,
+    engine: super::inference::HiveOrtEngine,
 }
 
 #[pymethods]
 impl PyHiveOrtSession {
     #[new]
     fn new(onnx_path: String) -> PyResult<Self> {
-        let engine = crate::inference::HiveOrtEngine::load(&onnx_path)
+        let engine = super::inference::HiveOrtEngine::load(&onnx_path)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(PyHiveOrtSession { engine })
     }

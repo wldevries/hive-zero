@@ -10,7 +10,7 @@ use zertz_game::move_encoding::{NN_POLICY_SIZE, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
 use zertz_game::notation::{move_to_str, str_to_move};
 use zertz_game::zertz::{classify_win, WinType, ZertzBoard};
 use core_game::game::{Game, Outcome, Player};
-use crate::inference::ZertzInference;
+use super::inference::ZertzInference;
 use zertz_game::search::{best_move_core, play_battle_core, play_battle_vs_bot_core, play_selfplay_core};
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
@@ -79,7 +79,7 @@ fn call_python_eval(
 // Result
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "ZertzSearchStats")]
+#[pyclass(name = "ZertzSearchStats", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyZertzSearchStats {
     #[pyo3(get)] pub top1_mean: f32,
@@ -293,7 +293,7 @@ impl PyZertzSelfPlaySession {
         onnx_path: Option<String>,
     ) -> PyResult<PyZertzSelfPlayResult> {
         let eval_core: zertz_game::search::EvalFn = if let Some(path) = onnx_path {
-            let engine = crate::inference::ZertzOrtEngine::load(&path)
+            let engine = super::inference::ZertzOrtEngine::load(&path)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let shared = Arc::new(Mutex::new(engine));
             Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {

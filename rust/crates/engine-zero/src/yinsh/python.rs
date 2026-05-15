@@ -98,7 +98,7 @@ fn call_python_eval(
 // Self-play result
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "YinshSearchStats")]
+#[pyclass(name = "YinshSearchStats", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyYinshSearchStats {
     #[pyo3(get)] pub top1_mean: f32,
@@ -113,7 +113,7 @@ pub struct PyYinshSearchStats {
 /// `eval` covers the eval_fn boundary; on the ORT path it splits into
 /// `eval_input` + `eval_run` + `eval_extract`, all zero on the Python-callback
 /// path. Diagnostic only — gated by `--show-timing` on the Python side.
-#[pyclass(name = "YinshTiming")]
+#[pyclass(name = "YinshTiming", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyYinshTiming {
     #[pyo3(get)] pub select_s: f64,
@@ -336,9 +336,9 @@ impl PyYinshSelfPlaySession {
         // the per-phase timers after self-play finishes. The closure captures a
         // clone of the Arc; after `play_selfplay_core` returns the closure is
         // dropped, leaving us as the sole owner.
-        let engine_handle: Option<Arc<Mutex<crate::inference::YinshOrtEngine>>> =
+        let engine_handle: Option<Arc<Mutex<super::inference::YinshOrtEngine>>> =
             if let Some(path) = onnx_path.as_deref() {
-                let engine = crate::inference::YinshOrtEngine::load(path)
+                let engine = super::inference::YinshOrtEngine::load(path)
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
                 Some(Arc::new(Mutex::new(engine)))
             } else {
