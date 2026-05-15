@@ -98,7 +98,7 @@ fn call_python_eval(
 // Self-play result
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "YinshSearchStats")]
+#[pyclass(name = "YinshSearchStats", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyYinshSearchStats {
     #[pyo3(get)] pub top1_mean: f32,
@@ -113,7 +113,7 @@ pub struct PyYinshSearchStats {
 /// `eval` covers the eval_fn boundary; on the ORT path it splits into
 /// `eval_input` + `eval_run` + `eval_extract`, all zero on the Python-callback
 /// path. Diagnostic only — gated by `--show-timing` on the Python side.
-#[pyclass(name = "YinshTiming")]
+#[pyclass(name = "YinshTiming", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyYinshTiming {
     #[pyo3(get)] pub select_s: f64,

@@ -597,7 +597,7 @@ fn terminal_kind_str(k: HiveTerminalKind) -> &'static str {
 /// One entry in `MctsRootStats.children`. `terminal` is one of
 /// "ongoing" / "win" / "loss" / "draw", from the root player's POV
 /// (a "loss" child is a suicide move that surrenders the game).
-#[pyclass(name = "MctsChildStat", get_all)]
+#[pyclass(name = "MctsChildStat", get_all, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyMctsChildStat {
     pub uhp_move: String,

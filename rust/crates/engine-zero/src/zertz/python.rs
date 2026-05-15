@@ -79,7 +79,7 @@ fn call_python_eval(
 // Result
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "ZertzSearchStats")]
+#[pyclass(name = "ZertzSearchStats", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyZertzSearchStats {
     #[pyo3(get)] pub top1_mean: f32,

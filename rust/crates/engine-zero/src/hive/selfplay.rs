@@ -405,7 +405,7 @@ fn into_py_battle_result(result: search::BattleResult) -> PyHiveBattleResult {
     }
 }
 
-#[pyclass(name = "SearchStats")]
+#[pyclass(name = "SearchStats", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PySearchStats {
     #[pyo3(get)]
