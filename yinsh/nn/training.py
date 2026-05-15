@@ -535,7 +535,7 @@ class Trainer:
             )
         else:
             raise ValueError(f"unknown optimizer {optimizer!r}; expected 'sgd' or 'adamw'")
-        self._compiled = torch.compile(self.model, dynamic=True, backend="cudagraphs") if self.device.type == "cuda" else self.model
+        self._compiled = torch.compile(self.model, dynamic=False) if self.device.type == "cuda" else self.model
         # Lazy-built GPU permutation tables (see _init_sym_buffers).
         self._grid_perms_gpu: Optional[torch.Tensor] = None
         self._ch_perms_gpu: Optional[torch.Tensor] = None
