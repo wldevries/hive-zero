@@ -192,6 +192,7 @@ class SelfPlayTrainer:
         opening_min_elo: float = 1600.0,
         draw_keep_frac: float = 1.0,
         value_target_q_mix: float = 0.0,
+        training_num_workers: int = 0,
     ):
         from engine_zero import YinshSelfPlaySession
 
@@ -227,6 +228,7 @@ class SelfPlayTrainer:
             "random_opening_moves": (opening.min, opening.max) if opening.max != opening.min else opening.min,
             "forced_playouts": mcts.forced_playouts,
             "value_target_q_mix": value_target_q_mix,
+            "training_num_workers": training_num_workers,
         }
 
         # Opening book: load boardspace game sequences if configured.
@@ -463,38 +465,40 @@ class SelfPlayTrainer:
 
             losses = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
             lr = self.trainer._current_lr
-            for epoch in range(epochs_per_gen):
-                losses = self.trainer.train_epoch(
-                    dataset, batch_size=batch_size, value_loss_scale=value_loss_scale,
-                    q_mix_lambda=value_target_q_mix,
-                )
-                lr = self.trainer._current_lr
-                total_s = f"{losses['total_loss']:.4f}"
-                policy_s = f"{losses['policy_loss']:.4f}"
-                value_s = f"{losses['value_loss']:.4f}"
-                print(
-                    f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
-                    f"(policy={_cy(policy_s)}, value={_cy(value_s)}, lr={lr:.4f})"
-                )
-
-                duration = time.time() - gen_start
-
-                with open(self.log_path, "a") as f:
-                    f.write(
-                        f"{generation},{epoch + 1},"
-                        f"{mcts.simulations},{games_per_gen},{result.num_samples},{len(dataset)},"
-                        f"{result.wins_p1},{result.wins_p2},{result.draws},{result.timeouts},"
-                        f"{avg_gl},{med_gl},{min_gl},{max_gl},"
-                        f"{losses['total_loss']:.6f},"
-                        f"{losses['policy_loss']:.6f},"
-                        f"{losses['value_loss']:.6f},"
-                        f"{lr:.6f},{duration:.1f},"
-                        f"{ss.top1_mean:.4f},{ss.top1_std:.4f},"
-                        f"{ss.depth_mean:.4f},{ss.depth_std:.4f},"
-                        f"{ss.valid_moves_mean:.4f},{ss.valid_moves_std:.4f},"
-                        f"{csv_comment(comment)}\n"
+            with dataset.read_only_mode():
+                for epoch in range(epochs_per_gen):
+                    losses = self.trainer.train_epoch(
+                        dataset, batch_size=batch_size, value_loss_scale=value_loss_scale,
+                        q_mix_lambda=value_target_q_mix,
+                        num_workers=training_num_workers,
                     )
-                comment = ""
+                    lr = self.trainer._current_lr
+                    total_s = f"{losses['total_loss']:.4f}"
+                    policy_s = f"{losses['policy_loss']:.4f}"
+                    value_s = f"{losses['value_loss']:.4f}"
+                    print(
+                        f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
+                        f"(policy={_cy(policy_s)}, value={_cy(value_s)}, lr={lr:.4f})"
+                    )
+
+                    duration = time.time() - gen_start
+
+                    with open(self.log_path, "a") as f:
+                        f.write(
+                            f"{generation},{epoch + 1},"
+                            f"{mcts.simulations},{games_per_gen},{result.num_samples},{len(dataset)},"
+                            f"{result.wins_p1},{result.wins_p2},{result.draws},{result.timeouts},"
+                            f"{avg_gl},{med_gl},{min_gl},{max_gl},"
+                            f"{losses['total_loss']:.6f},"
+                            f"{losses['policy_loss']:.6f},"
+                            f"{losses['value_loss']:.6f},"
+                            f"{lr:.6f},{duration:.1f},"
+                            f"{ss.top1_mean:.4f},{ss.top1_std:.4f},"
+                            f"{ss.depth_mean:.4f},{ss.depth_std:.4f},"
+                            f"{ss.valid_moves_mean:.4f},{ss.valid_moves_std:.4f},"
+                            f"{csv_comment(comment)}\n"
+                        )
+                    comment = ""
 
             metadata = {**train_params, "lr": lr}
             save_checkpoint(self.model, self.model_path, generation=generation,

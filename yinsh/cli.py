@@ -49,6 +49,13 @@ def main():
     t.add_argument("--simulations", type=int, default=200)
     t.add_argument("--epochs-per-gen", type=int, default=1)
     t.add_argument("--training-batch-size", type=int, default=256)
+    t.add_argument(
+        "--training-num-workers", type=int, default=0,
+        help="DataLoader worker processes for training. 0 = main thread "
+             "(default). Workers open the replay h5 'r' in parallel so fetch "
+             "overlaps GPU compute; the main process detaches 'r+' for the "
+             "training phase and reattaches between generations. Try 2-4.",
+    )
     t.add_argument("--lr", type=float, default=None,
                    help="Learning rate (default: restore from checkpoint, or 0.02 if none).")
     t.add_argument("--lr-schedule", type=str, default=None,
@@ -265,6 +272,7 @@ def main():
             opening_min_elo=args.opening_min_elo,
             draw_keep_frac=args.draw_keep_frac,
             value_target_q_mix=args.value_target_q_mix,
+            training_num_workers=args.training_num_workers,
         )
     elif args.command == "pretrain":
         from yinsh.supervised.pretrain import (
