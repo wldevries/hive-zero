@@ -282,6 +282,13 @@ class YinshDataset(Dataset):
         return self._size
 
     def __getitem__(self, idx):
+        """Returns the raw position plus a `sym_idx` integer in [0, 12).
+
+        The D6 permutation is applied on GPU in Trainer._apply_sym_gpu after
+        the batch lands on device — moves the per-sample numpy gather/channel-
+        permutation work off the main thread, which is the data-loading
+        bottleneck on Windows where multi-worker DataLoaders are unreliable.
+        """
         if self.augment_symmetry:
             valid_syms = _load_valid_syms()
             sym = valid_syms[idx % len(valid_syms)]
@@ -290,18 +297,14 @@ class YinshDataset(Dataset):
             sym = 0
             base_idx = idx
 
-        board = self.board_tensors[base_idx].copy()
-        policy = self.policy_targets[base_idx].copy()
-        if sym != 0:
-            board, policy = _apply_symmetry(board, policy, sym)
-
         return (
-            torch.from_numpy(board),
+            torch.from_numpy(self.board_tensors[base_idx].copy()),
             torch.from_numpy(self.reserve_vectors[base_idx].copy()),
-            torch.from_numpy(policy),
+            torch.from_numpy(self.policy_targets[base_idx].copy()),
             torch.tensor(self.value_targets[base_idx], dtype=torch.float32),
             torch.tensor(self.root_q_targets[base_idx], dtype=torch.float32),
             torch.tensor(bool(self.value_only[base_idx]), dtype=torch.bool),
+            torch.tensor(sym, dtype=torch.int64),
         )
 
 
@@ -371,10 +374,88 @@ class Trainer:
         else:
             raise ValueError(f"unknown optimizer {optimizer!r}; expected 'sgd' or 'adamw'")
         self._compiled = torch.compile(self.model, dynamic=True, backend="cudagraphs") if self.device.type == "cuda" else self.model
+        # Lazy-built GPU permutation tables (see _init_sym_buffers).
+        self._grid_perms_gpu: Optional[torch.Tensor] = None
+        self._ch_perms_gpu: Optional[torch.Tensor] = None
 
     @property
     def _current_lr(self) -> float:
         return self.optimizer.param_groups[0]["lr"]
+
+    def _init_sym_buffers(self):
+        """Move the D6 permutation tables to GPU.
+
+        Two tables are needed:
+          - grid_perms (12, GRID_SIZE²): spatial cell permutation. Entries can
+            equal GRID_SIZE² (sentinel for off-board cells); the caller pads
+            the input with a zero column to absorb them. Even within the
+            valid-sym subset, the 11×11 grid has 36 off-board cells whose
+            perm value is the sentinel.
+          - ch_perms (12, POLICY_CHANNELS=59): policy-channel permutation that
+            combines spatial-only channels (PlaceRing ch 0, ClaimRow ring ch 4)
+            with direction-permuted channels (ClaimRow row dirs ch 1-3 via
+            yinsh_d6_dir_permutations, MoveRing dirs × distances ch 5-58 via
+            yinsh_d6_movement_dir_permutations).
+        """
+        if self._grid_perms_gpu is not None:
+            return
+        grid = np.stack(_load_grid_perms()).astype(np.int64)  # (12, _GS)
+        self._grid_perms_gpu = torch.from_numpy(grid).to(self.device)
+
+        dir_perms = _load_dir_perms()        # list of 12 arrays of len 3
+        mv_perms = _load_move_dir_perms()    # list of 12 arrays of len 6
+        ch_table = np.empty((12, POLICY_CHANNELS), dtype=np.int64)
+        for s in range(12):
+            ch_table[s, _CH_PLACE_RING] = _CH_PLACE_RING
+            ch_table[s, _CH_CLAIM_RING] = _CH_CLAIM_RING
+            for d in range(3):
+                old_d = int(dir_perms[s][d])
+                ch_table[s, _CH_CLAIM_ROW_BASE + d] = _CH_CLAIM_ROW_BASE + old_d
+            for new_d in range(_NUM_DIRS):
+                old_d = int(mv_perms[s][new_d])
+                new_base = _CH_MOVE_BASE + new_d * _MAX_RING_DIST
+                old_base = _CH_MOVE_BASE + old_d * _MAX_RING_DIST
+                for dist in range(_MAX_RING_DIST):
+                    ch_table[s, new_base + dist] = old_base + dist
+        self._ch_perms_gpu = torch.from_numpy(ch_table).to(self.device)
+
+    def _apply_sym_gpu(self, board: torch.Tensor, policy: torch.Tensor,
+                       sym_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply per-sample D6 augmentation on GPU.
+
+        Inputs are already on `self.device`. `sym_idx` is (B,) in [0, 12).
+        Mirrors the CPU augmentation that used to live in YinshDataset.__getitem__:
+        permutes board cells (with zero-padded sentinel for the 36 off-board
+        positions of the 11×11 grid) and permutes the 59 policy channels both
+        spatially (cell gather) and by direction (channel gather).
+        Sym=0 is identity so `augment_symmetry=False` is a no-op pass through
+        this helper.
+        """
+        self._init_sym_buffers()
+        B, C, gs, _ = board.shape
+        gs2 = gs * gs
+        grid_perm_b = self._grid_perms_gpu[sym_idx]   # (B, gs²)
+        ch_perm_b = self._ch_perms_gpu[sym_idx]       # (B, POLICY_CHANNELS)
+
+        # Board cell permutation: pad with a zero column so any sentinel
+        # entry == gs² reads as 0.
+        board_flat = board.view(B, C, gs2)
+        zero_col_b = torch.zeros(B, C, 1, device=board.device, dtype=board.dtype)
+        board_padded = torch.cat([board_flat, zero_col_b], dim=2)
+        gp_bc = grid_perm_b.unsqueeze(1).expand(-1, C, -1)
+        new_board = torch.gather(board_padded, 2, gp_bc).view(B, C, gs, gs)
+
+        # Policy: spatial cell gather first, then channel-direction gather.
+        pol_flat = policy.view(B, POLICY_CHANNELS, gs2)
+        zero_col_p = torch.zeros(B, POLICY_CHANNELS, 1,
+                                 device=policy.device, dtype=policy.dtype)
+        pol_padded = torch.cat([pol_flat, zero_col_p], dim=2)
+        gp_pc = grid_perm_b.unsqueeze(1).expand(-1, POLICY_CHANNELS, -1)
+        spatially_permuted = torch.gather(pol_padded, 2, gp_pc)  # (B, C_P, gs²)
+
+        ch_idx = ch_perm_b.unsqueeze(2).expand(-1, -1, gs2)
+        new_policy = torch.gather(spatially_permuted, 1, ch_idx)
+        return new_board, new_policy.view(B, POLICY_SIZE)
 
     def train_epoch(
         self,
@@ -402,7 +483,7 @@ class Trainer:
         num_batches = 0
         device_type = self.device.type
 
-        for board, reserve, policy_target, value_target, root_q, value_only_mask in tqdm(
+        for board, reserve, policy_target, value_target, root_q, value_only_mask, sym_idx in tqdm(
             loader, desc="  Training", leave=False, unit="batch"
         ):
             board = board.to(self.device)
@@ -411,6 +492,12 @@ class Trainer:
             value_target = value_target.to(self.device).unsqueeze(1)
             root_q = root_q.to(self.device).unsqueeze(1)
             value_only_mask = value_only_mask.to(self.device)
+            sym_idx = sym_idx.to(self.device)
+
+            # D6 symmetry augmentation runs here on GPU rather than per-sample
+            # in the DataLoader worker. sym=0 is identity so augment_symmetry=
+            # False is a no-op pass through this helper.
+            board, policy_target = self._apply_sym_gpu(board, policy_target, sym_idx)
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 policy_logits, wdl_logits = self._compiled(board, reserve)
@@ -487,7 +574,7 @@ class Trainer:
         num_batches = 0
         device_type = self.device.type
 
-        for board, reserve, policy_target, value_target, _root_q, value_only_mask in tqdm(
+        for board, reserve, policy_target, value_target, _root_q, value_only_mask, sym_idx in tqdm(
             loader, desc="  Validating", leave=False, unit="batch"
         ):
             board = board.to(self.device)
@@ -495,6 +582,9 @@ class Trainer:
             policy_target = policy_target.to(self.device)
             value_target = value_target.to(self.device).unsqueeze(1)
             value_only_mask = value_only_mask.to(self.device)
+            sym_idx = sym_idx.to(self.device)
+
+            board, policy_target = self._apply_sym_gpu(board, policy_target, sym_idx)
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 policy_logits, wdl_logits = self._compiled(board, reserve)
