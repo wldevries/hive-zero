@@ -222,22 +222,38 @@ pub fn play_battle_core(
         (gi < half) == (player == Player::Player1)
     };
 
-    let call_evals = |flat_boards: &[f32], flat_reserves: &[f32], fn1_flags: &[bool], n: usize|
-     -> Result<(Vec<f32>, Vec<f32>), String> {
-        let (fp1, va1) = eval_fn1(flat_boards, flat_reserves, n)?;
-        let (fp2, va2) = eval_fn2(flat_boards, flat_reserves, n)?;
-        let mut flat = vec![0.0f32; n * NN_POLICY_SIZE];
-        let mut value = vec![0.0f32; n];
-        for i in 0..n {
-            if fn1_flags[i] {
-                flat[i * NN_POLICY_SIZE..(i + 1) * NN_POLICY_SIZE].copy_from_slice(&fp1[i * NN_POLICY_SIZE..(i + 1) * NN_POLICY_SIZE]);
-                value[i] = va1[i];
-            } else {
-                flat[i * NN_POLICY_SIZE..(i + 1) * NN_POLICY_SIZE].copy_from_slice(&fp2[i * NN_POLICY_SIZE..(i + 1) * NN_POLICY_SIZE]);
-                value[i] = va2[i];
+    // Partition leaves by which model evaluates them and issue one forward
+    // call per model on its half. The old shape ran both eval_fns on the
+    // full batch and discarded the unused result, doubling GPU work.
+    //
+    // Inputs are already pre-partitioned at encode time (no intermediate
+    // flat_boards / re-split memcpy). idx1/idx2 hold the original combined
+    // position for each sub-batch entry, so eval outputs can be scattered
+    // back into a single (policy, value) pair.
+    let dispatch_pair = |
+        b1: &[f32], r1: &[f32], idx1: &[usize],
+        b2: &[f32], r2: &[f32], idx2: &[usize],
+        total: usize,
+    | -> Result<(Vec<f32>, Vec<f32>), String> {
+        let mut policy = vec![0.0f32; total * NN_POLICY_SIZE];
+        let mut value = vec![0.0f32; total];
+        if !idx1.is_empty() {
+            let (fp, va) = eval_fn1(b1, r1, idx1.len())?;
+            for (j, &k) in idx1.iter().enumerate() {
+                policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE]
+                    .copy_from_slice(&fp[j * NN_POLICY_SIZE..(j + 1) * NN_POLICY_SIZE]);
+                value[k] = va[j];
             }
         }
-        Ok((flat, value))
+        if !idx2.is_empty() {
+            let (fp, va) = eval_fn2(b2, r2, idx2.len())?;
+            for (j, &k) in idx2.iter().enumerate() {
+                policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE]
+                    .copy_from_slice(&fp[j * NN_POLICY_SIZE..(j + 1) * NN_POLICY_SIZE]);
+                value[k] = va[j];
+            }
+        }
+        Ok((policy, value))
     };
 
     while active.iter().any(|&a| a) {
@@ -253,16 +269,30 @@ pub fn play_battle_core(
 
         if !cold.is_empty() {
             let nc = cold.len();
-            let mut flat_boards = vec![0f32; nc * BOARD_FLAT];
-            let mut flat_reserves = vec![0f32; nc * RESERVE_SIZE];
-            let mut fn1_flags: Vec<bool> = Vec::with_capacity(nc);
+            let mut b1: Vec<f32> = Vec::with_capacity(nc * BOARD_FLAT);
+            let mut r1: Vec<f32> = Vec::with_capacity(nc * RESERVE_SIZE);
+            let mut b2: Vec<f32> = Vec::with_capacity(nc * BOARD_FLAT);
+            let mut r2: Vec<f32> = Vec::with_capacity(nc * RESERVE_SIZE);
+            let mut idx1: Vec<usize> = Vec::with_capacity(nc);
+            let mut idx2: Vec<usize> = Vec::with_capacity(nc);
+
+            let mut board_buf = [0f32; BOARD_FLAT];
+            let mut reserve_buf = [0f32; RESERVE_SIZE];
             for (k, &ci) in cold.iter().enumerate() {
                 let gi = mcts_games[ci];
-                encode_board(&boards[gi], &mut flat_boards[k * BOARD_FLAT..(k + 1) * BOARD_FLAT], &mut flat_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE]);
-                fn1_flags.push(use_fn1_for(gi, boards[gi].next_player()));
+                encode_board(&boards[gi], &mut board_buf, &mut reserve_buf);
+                if use_fn1_for(gi, boards[gi].next_player()) {
+                    b1.extend_from_slice(&board_buf);
+                    r1.extend_from_slice(&reserve_buf);
+                    idx1.push(k);
+                } else {
+                    b2.extend_from_slice(&board_buf);
+                    r2.extend_from_slice(&reserve_buf);
+                    idx2.push(k);
+                }
             }
 
-            let (init_policy, _) = call_evals(&flat_boards, &flat_reserves, &fn1_flags, nc)?;
+            let (init_policy, _) = dispatch_pair(&b1, &r1, &idx1, &b2, &r2, &idx2, nc)?;
             for (k, &ci) in cold.iter().enumerate() {
                 let gi = mcts_games[ci];
                 searches[gi].init(&boards[gi], &init_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE]);
@@ -288,19 +318,28 @@ pub fn play_battle_core(
             if leaf_ids.is_empty() { break; }
 
             let nl = leaf_ids.len();
-            let mut leaf_boards_flat = vec![0f32; nl * BOARD_FLAT];
-            let mut leaf_reserves_flat = vec![0f32; nl * RESERVE_SIZE];
-            let mut leaf_fn1_flags: Vec<bool> = Vec::with_capacity(nl);
+            let mut b1: Vec<f32> = Vec::with_capacity(nl * BOARD_FLAT);
+            let mut r1: Vec<f32> = Vec::with_capacity(nl * RESERVE_SIZE);
+            let mut b2: Vec<f32> = Vec::with_capacity(nl * BOARD_FLAT);
+            let mut r2: Vec<f32> = Vec::with_capacity(nl * RESERVE_SIZE);
+            let mut idx1: Vec<usize> = Vec::with_capacity(nl);
+            let mut idx2: Vec<usize> = Vec::with_capacity(nl);
             for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
                 let gi = mcts_games[i];
                 let (board_enc, reserve_enc) = searches[gi].encode_leaf(leaf);
-                leaf_boards_flat[k * BOARD_FLAT..(k + 1) * BOARD_FLAT].copy_from_slice(&board_enc);
-                leaf_reserves_flat[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
                 let leaf_player = searches[gi].get_leaf_player(leaf);
-                leaf_fn1_flags.push(use_fn1_for(gi, leaf_player));
+                if use_fn1_for(gi, leaf_player) {
+                    b1.extend_from_slice(&board_enc);
+                    r1.extend_from_slice(&reserve_enc);
+                    idx1.push(k);
+                } else {
+                    b2.extend_from_slice(&board_enc);
+                    r2.extend_from_slice(&reserve_enc);
+                    idx2.push(k);
+                }
             }
 
-            let (leaf_policy, leaf_values) = call_evals(&leaf_boards_flat, &leaf_reserves_flat, &leaf_fn1_flags, nl)?;
+            let (leaf_policy, leaf_values) = dispatch_pair(&b1, &r1, &idx1, &b2, &r2, &idx2, nl)?;
 
             let mut per_game_policies: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n];
             let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
