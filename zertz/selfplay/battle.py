@@ -116,14 +116,14 @@ def run_battle(
         eval_fn1 = _make_eval_fn(model1, device)
         eval_fn2 = _make_eval_fn(model2, device)
 
-    suffix = "  [ORT pipelined]" if use_ort else ""
-    name1 = f"{model1_path} (iter {iter1}){suffix}"
-    name2 = f"{model2_path} (iter {iter2}){suffix}"
+    name1 = f"{model1_path} (iter {iter1})"
+    name2 = f"{model2_path} (iter {iter2})"
+    backend_str = "  Backend: ORT pipelined" if use_ort else ""
 
     print(f"\n{'='*60}")
     print(f"  Battle: {_cc(name1)}")
     print(f"      vs: {_cm(name2)}")
-    print(f"  Games: {num_games}  Simulations: {sims}")
+    print(f"  Games: {num_games}  Simulations: {sims}{backend_str}")
     print(f"{'='*60}")
 
     session = ZertzSelfPlaySession(
@@ -271,15 +271,14 @@ def _run_battle_vs_bot(
     bot_label = f"alphabeta depth={bot_depth}"
     if bot_time_ms is not None and bot_time_ms > 0:
         bot_label += f" time<={bot_time_ms}ms"
-    if use_ort:
-        bot_label += "  [ORT pipelined]"
     name2 = bot_label
 
     print(f"\n{'='*60}")
     print(f"  Battle: {_cc(name1)}")
     print(f"      vs: {_cm(name2)}")
     budget_str = f"  Bot time: {bot_time_ms}ms" if bot_time_ms else ""
-    print(f"  Games: {num_games}  Simulations: {sims}  Bot depth: {bot_depth}{budget_str}")
+    backend_str = "  Backend: ORT pipelined" if use_ort else ""
+    print(f"  Games: {num_games}  Simulations: {sims}  Bot depth: {bot_depth}{budget_str}{backend_str}")
     print(f"{'='*60}")
 
     session = ZertzSelfPlaySession(
