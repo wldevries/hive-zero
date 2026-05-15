@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::TensorRef;
 
 use crate::ort_common::{
     find_onnxruntime_dylib, find_qnn_htp_dll, prepend_qnn_dir_to_path, register_qnn_plugin,
@@ -19,7 +19,7 @@ pub struct YinshOrtEngine {
     policy_size: usize,
 
     // Per-call wall-clock accumulators, drained from outside via `phase_times`.
-    // `t_input`: Tensor::from_array allocations + the boards/reserves to_vec copies.
+    // `t_input`: TensorRef::from_array_view setup (borrowed slices, no host copy).
     // `t_run`: session.run (host↔device transfer + GPU compute + ORT marshaling).
     // `t_extract`: try_extract_tensor + the policy/wdl output copies.
     t_input: Duration,
@@ -72,6 +72,10 @@ impl YinshOrtEngine {
 
     /// Returns `(policy_flat[B*POLICY_SIZE], values[B], draws[B])`.
     /// `values[i] = W-L`, `draws[i] = D` extracted from the WDL softmax output.
+    ///
+    /// Uses `TensorRef::from_array_view` so the input slices are borrowed
+    /// rather than copied into an owned `Vec<f32>` — the only host→device
+    /// copy is the one ORT performs inside `session.run` itself.
     pub fn infer_batch(
         &mut self,
         boards: &[f32],
@@ -79,14 +83,14 @@ impl YinshOrtEngine {
         batch_size: usize,
     ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
         let t0 = Instant::now();
-        let board_tensor = Tensor::from_array((
+        let board_tensor = TensorRef::from_array_view((
             [batch_size, self.num_channels, self.grid_size, self.grid_size],
-            boards.to_vec(),
+            boards,
         ))
         .map_err(|e| e.to_string())?;
-        let reserve_tensor = Tensor::from_array((
+        let reserve_tensor = TensorRef::from_array_view((
             [batch_size, self.reserve_size],
-            reserves.to_vec(),
+            reserves,
         ))
         .map_err(|e| e.to_string())?;
         self.t_input += t0.elapsed();
