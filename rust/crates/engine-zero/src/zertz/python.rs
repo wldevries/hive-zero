@@ -3,15 +3,20 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use numpy::{PyArray1, PyArray2, PyArrayMethods};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::mpsc::Receiver;
 
 use zertz_game::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
 use zertz_game::move_encoding::{NN_POLICY_SIZE, PLACE_HEAD_SIZE, CAP_HEAD_SIZE};
 use zertz_game::notation::{move_to_str, str_to_move};
 use zertz_game::zertz::{classify_win, WinType, ZertzBoard};
 use core_game::game::{Game, Outcome, Player};
-use super::inference::ZertzInference;
-use zertz_game::search::{best_move_core, play_battle_core, play_battle_vs_bot_core, play_selfplay_core};
+use zertz_game::search::{
+    best_move_core, play_battle_core, play_battle_vs_bot_core, play_selfplay_core,
+    BatchEvaluator, EvalFn, RequestId, SyncEvaluator,
+};
+
+use super::inference::{ZertzInferenceResult, ZertzInferenceWorker};
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
 
@@ -75,6 +80,62 @@ fn call_python_eval(
         Ok((flat, value.as_slice().map_err(|e| e.to_string())?.to_vec()))
     })
 }
+
+// ---------------------------------------------------------------------------
+// Pipelined evaluator — hands batches off to a ZertzInferenceWorker so the
+// GPU forward for batch N runs while the main thread selects leaves for
+// batch N+1.
+// ---------------------------------------------------------------------------
+
+/// `BatchEvaluator` impl that hands batches off to a `ZertzInferenceWorker`
+/// running on a dedicated thread. `submit` returns immediately after posting
+/// the request (one batch in flight at a time, bounded by the worker's
+/// channel capacity); `collect` blocks on the per-request response channel.
+struct PipelinedEvaluator<'w> {
+    worker: &'w ZertzInferenceWorker,
+    next_id: RequestId,
+    pending: HashMap<RequestId, Receiver<Result<ZertzInferenceResult, String>>>,
+}
+
+impl<'w> PipelinedEvaluator<'w> {
+    fn new(worker: &'w ZertzInferenceWorker) -> Self {
+        Self {
+            worker,
+            next_id: 0,
+            pending: HashMap::new(),
+        }
+    }
+}
+
+impl<'w> BatchEvaluator for PipelinedEvaluator<'w> {
+    fn submit(
+        &mut self,
+        boards: Vec<f32>,
+        reserves: Vec<f32>,
+        n: usize,
+    ) -> Result<RequestId, String> {
+        let recv = self.worker.submit(boards, reserves, n)?;
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.pending.insert(id, recv);
+        Ok(id)
+    }
+
+    fn collect(
+        &mut self,
+        id: RequestId,
+    ) -> Result<(Vec<f32>, Vec<f32>), String> {
+        let recv = self
+            .pending
+            .remove(&id)
+            .ok_or_else(|| format!("PipelinedEvaluator: unknown request {id}"))?;
+        let result = recv
+            .recv()
+            .map_err(|_| "zertz-ort-worker died before responding".to_string())??;
+        Ok((result.policy, result.value))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------
@@ -292,27 +353,6 @@ impl PyZertzSelfPlaySession {
         progress_fn: Option<&Bound<'_, PyAny>>,
         onnx_path: Option<String>,
     ) -> PyResult<PyZertzSelfPlayResult> {
-        let eval_core: zertz_game::search::EvalFn = if let Some(path) = onnx_path {
-            let engine = super::inference::ZertzOrtEngine::load(&path)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            let shared = Arc::new(Mutex::new(engine));
-            Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
-                let mut engine = shared.lock().map_err(|_| "ONNX engine mutex poisoned".to_string())?;
-                let r = engine
-                    .infer_batch(boards, reserves, n, NUM_CHANNELS, GRID_SIZE, RESERVE_SIZE)
-                    .map_err(|e| e.to_string())?;
-                Ok((r.policy, r.value))
-            })
-        } else {
-            let py_eval = eval_fn
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("eval_fn is required when onnx_path is not provided"))?
-                .clone()
-                .unbind();
-            Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
-                call_python_eval(&py_eval, boards, reserves, n)
-            })
-        };
-
         let progress_core = progress_fn.map(|pfn| {
             let pfn = pfn.clone().unbind();
             Box::new(move |finished: u32, total: u32, active: u32, total_moves: u32| {
@@ -323,7 +363,7 @@ impl PyZertzSelfPlaySession {
             }) as Box<dyn Fn(u32, u32, u32, u32) + Send + Sync>
         });
 
-        let mcts = core_game::selfplay_config::MctsConfig {
+        let mut mcts = core_game::selfplay_config::MctsConfig {
             simulations: self.simulations,
             c_puct: self.c_puct,
             dir_alpha: self.dir_alpha,
@@ -339,13 +379,66 @@ impl PyZertzSelfPlaySession {
             p: self.playout_cap_p,
             fast_cap: self.fast_cap,
         };
-        let r = play_selfplay_core(
-            self.num_games,
-            mcts,
-            playout_cap,
-            eval_core,
-            progress_core,
-        ).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+        let r = if let Some(path) = onnx_path {
+            // Pipelined ORT path: a worker thread owns the ZertzOrtEngine;
+            // play_selfplay_core overlaps leaf selection for batch N+1 with
+            // the GPU forward for batch N.
+            //
+            // Halve play_batch_size so per-game in-flight virtual-loss leaves
+            // stay constant: the pipeline holds two batches alive at once
+            // (the one running on GPU + the next being selected), so VL
+            // accumulates over `2 × play_batch_size` leaves per game vs.
+            // `play_batch_size` on the sync path.
+            let original_pbs = mcts.play_batch_size;
+            if original_pbs > 1 {
+                mcts.play_batch_size = original_pbs / 2;
+            }
+
+            let worker = ZertzInferenceWorker::spawn(
+                path,
+                NUM_CHANNELS,
+                GRID_SIZE,
+                RESERVE_SIZE,
+            )
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            let mut evaluator = PipelinedEvaluator::new(&worker);
+
+            let result = play_selfplay_core(
+                self.num_games,
+                mcts,
+                playout_cap,
+                &mut evaluator,
+                progress_core,
+            );
+
+            // Release the evaluator's borrow before taking ownership of the
+            // worker for shutdown.
+            drop(evaluator);
+            let _timing = worker.shutdown_and_drain_timing();
+
+            result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+        } else {
+            // Sync path: Python eval callback wrapped in SyncEvaluator. The
+            // GIL precludes pipelining; this preserves the previous
+            // behaviour exactly.
+            let py_eval = eval_fn
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("eval_fn is required when onnx_path is not provided"))?
+                .clone()
+                .unbind();
+            let core_eval: EvalFn = Box::new(move |boards: &[f32], reserves: &[f32], n: usize| {
+                call_python_eval(&py_eval, boards, reserves, n)
+            });
+            let mut evaluator = SyncEvaluator::new(core_eval);
+            play_selfplay_core(
+                self.num_games,
+                mcts,
+                playout_cap,
+                &mut evaluator,
+                progress_core,
+            )
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+        };
 
         Ok(PyZertzSelfPlayResult {
             board_data: r.board_data,

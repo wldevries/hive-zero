@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import statistics
 import time
+from contextlib import nullcontext as _nullcontext
 from typing import Optional
 
 import numpy as np
@@ -136,6 +137,7 @@ class SelfPlayTrainer:
         use_ort: bool = False,
         value_loss_scale: float = 1.0,
         buf_dir: Optional[str] = None,
+        training_num_workers: int = 0,
     ):
         from engine_zero import ZertzSelfPlaySession
 
@@ -319,43 +321,55 @@ class SelfPlayTrainer:
             max_gl = str(max(lengths)) if lengths else ""
 
             losses = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
-            for epoch in range(epochs_per_gen):
-                losses = self.trainer.train_epoch(dataset, batch_size=batch_size, value_loss_scale=value_loss_scale)
-                lr = self.trainer._current_lr
-                total_s = f"{losses['total_loss']:.4f}"
-                policy_s = f"{losses['policy_loss']:.4f}"
-                value_s = f"{losses['value_loss']:.4f}"
-                place_pol_s = f"{losses['place_policy_loss']:.4f}"
-                cap_pol_s = f"{losses['capture_policy_loss']:.4f}"
-                print(
-                    f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
-                    f"(policy={_cy(policy_s)} place_pol={_cy(place_pol_s)} cap_pol={_cy(cap_pol_s)}, "
-                    f"value={_cy(value_s)}, "
-                    f"lr={lr:.4f})"
-                )
-
-                duration = time.time() - gen_start
-
-                # --- Log each epoch ---
-                with open(self.log_path, "a") as f:
-                    f.write(
-                        f"{generation},{epoch + 1},"
-                        f"{mcts.simulations},{games_per_gen},{result.num_samples},{len(dataset)},"
-                        f"{result.wins_p1},{result.wins_p2},{result.draws},"
-                        f"{result.wins_white},{result.wins_grey},{result.wins_black},{result.wins_combo},"
-                        f"{avg_gl},{med_gl},{min_gl},{max_gl},"
-                        f"{result.isolation_captures},{result.jump_captures},"
-                        f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
-                        f"{losses['value_loss']:.6f},"
-                        f"{losses['place_policy_loss']:.6f},{losses['capture_policy_loss']:.6f},"
-                        f"{losses['place_value_loss']:.6f},{losses['capture_value_loss']:.6f},"
-                        f"{lr:.6f},{duration:.1f},"
-                        f"{ss.top1_mean:.4f},{ss.top1_std:.4f},"
-                        f"{ss.depth_mean:.4f},{ss.depth_std:.4f},"
-                        f"{ss.valid_moves_mean:.4f},{ss.valid_moves_std:.4f},"
-                        f"{csv_comment(comment)}\n"
+            # When DataLoader workers are used, swap the h5 handle to 'r' so
+            # workers can also open 'r' concurrently. Reopens 'r+' on exit so
+            # the next selfplay generation can write.
+            train_context = (
+                dataset.read_only_mode() if training_num_workers > 0 else _nullcontext()
+            )
+            with train_context:
+                for epoch in range(epochs_per_gen):
+                    losses = self.trainer.train_epoch(
+                        dataset,
+                        batch_size=batch_size,
+                        value_loss_scale=value_loss_scale,
+                        num_workers=training_num_workers,
                     )
-                comment = ""
+                    lr = self.trainer._current_lr
+                    total_s = f"{losses['total_loss']:.4f}"
+                    policy_s = f"{losses['policy_loss']:.4f}"
+                    value_s = f"{losses['value_loss']:.4f}"
+                    place_pol_s = f"{losses['place_policy_loss']:.4f}"
+                    cap_pol_s = f"{losses['capture_policy_loss']:.4f}"
+                    print(
+                        f"  Epoch {epoch + 1}: loss={_cr(total_s)} "
+                        f"(policy={_cy(policy_s)} place_pol={_cy(place_pol_s)} cap_pol={_cy(cap_pol_s)}, "
+                        f"value={_cy(value_s)}, "
+                        f"lr={lr:.4f})"
+                    )
+
+                    duration = time.time() - gen_start
+
+                    # --- Log each epoch ---
+                    with open(self.log_path, "a") as f:
+                        f.write(
+                            f"{generation},{epoch + 1},"
+                            f"{mcts.simulations},{games_per_gen},{result.num_samples},{len(dataset)},"
+                            f"{result.wins_p1},{result.wins_p2},{result.draws},"
+                            f"{result.wins_white},{result.wins_grey},{result.wins_black},{result.wins_combo},"
+                            f"{avg_gl},{med_gl},{min_gl},{max_gl},"
+                            f"{result.isolation_captures},{result.jump_captures},"
+                            f"{losses['total_loss']:.6f},{losses['policy_loss']:.6f},"
+                            f"{losses['value_loss']:.6f},"
+                            f"{losses['place_policy_loss']:.6f},{losses['capture_policy_loss']:.6f},"
+                            f"{losses['place_value_loss']:.6f},{losses['capture_value_loss']:.6f},"
+                            f"{lr:.6f},{duration:.1f},"
+                            f"{ss.top1_mean:.4f},{ss.top1_std:.4f},"
+                            f"{ss.depth_mean:.4f},{ss.depth_std:.4f},"
+                            f"{ss.valid_moves_mean:.4f},{ss.valid_moves_std:.4f},"
+                            f"{csv_comment(comment)}\n"
+                        )
+                    comment = ""
 
             # --- Save model ---
             metadata = {**train_params, "lr": lr}

@@ -154,6 +154,16 @@ PyTorch CUDA is installed directly via:
 uv pip install torch==2.10.0+cu128 --index-url https://download.pytorch.org/whl/cu128
 ```
 
+On **Windows + CUDA**, `torch.compile` (used by the Hive/Yinsh/Zertz trainers
+when `device.type == "cuda"`) additionally needs `triton-windows`, which is
+not a transitive dep of torch on Windows:
+```bash
+uv pip install triton-windows
+```
+On Linux + CUDA the regular `triton` package ships as a transitive dep of
+torch, so no extra step. On CPU-only or ARM64 the trainer skips `torch.compile`
+and triton isn't needed at all.
+
 ## ONNX Runtime (`--use-ort`)
 The Rust `ort` crate loads `onnxruntime.dll` from `.venv/Lib/site-packages/onnxruntime/capi/`.
 The plain `onnxruntime` (CPU) and `onnxruntime-gpu` packages share that directory and overwrite

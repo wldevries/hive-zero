@@ -49,6 +49,13 @@ def main():
     train_parser.add_argument("--simulations", type=int, default=100)
     train_parser.add_argument("--epochs-per-gen", type=int, default=1)
     train_parser.add_argument("--training-batch-size", type=int, default=256)
+    train_parser.add_argument(
+        "--training-num-workers", type=int, default=0,
+        help="DataLoader worker processes for training. 0 = main thread "
+             "(default). Workers open the replay h5 'r' in parallel so fetch "
+             "overlaps GPU compute; the main process detaches 'r+' for the "
+             "training phase and reattaches between generations. Try 2-4.",
+    )
     train_parser.add_argument("--lr", type=float, default=None,
                               help="Learning rate (default: restore from checkpoint, or 0.02 if none).")
     train_parser.add_argument(
@@ -190,6 +197,7 @@ def main():
             use_ort=args.use_ort,
             value_loss_scale=args.value_loss_scale,
             buf_dir=args.buf_dir,
+            training_num_workers=args.training_num_workers,
         )
     elif args.command == "battle":
         from zertz.selfplay.battle import run_battle
