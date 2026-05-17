@@ -8,14 +8,53 @@ use rand::distr::Distribution;
 use rayon::prelude::*;
 
 use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
+use crate::joint_board::JointZertzBoard;
 use crate::zertz::{ZertzBoard, ZertzMove, classify_win, WinType};
 use crate::move_encoding::{encode_distribution_nn, NN_POLICY_SIZE};
-use core_game::game::{Game, Outcome, Player};
+use core_game::game::{Game, NNGame, Outcome, Player};
 use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::{MctsSearch, CpuctStrategy, ForcedExploration};
 use core_game::selfplay_config::{MctsConfig, PlayoutCapConfig};
 
 const BOARD_FLAT: usize = NUM_CHANNELS * GRID_SIZE * GRID_SIZE;
+
+/// Which architecture / move-space a model expects. Used by the versioned
+/// battle entry point to route each player through the right MCTS runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelStyle {
+    /// Post-split-ply model: 7-channel encoder, half-move MCTS.
+    Split,
+    /// Pre-split-ply model (V1): 6-channel encoder, joint-move MCTS.
+    Joint,
+}
+
+impl ModelStyle {
+    pub fn board_channels(self) -> usize {
+        match self {
+            ModelStyle::Split => NUM_CHANNELS,
+            ModelStyle::Joint => crate::board_encoding::NUM_CHANNELS_V1,
+        }
+    }
+}
+
+/// Helper trait for the versioned battle loop — minimal "how do I wrap a
+/// shared ZertzBoard into my MCTS's game type?" interface so the generic
+/// inner loop can stay one function instead of two.
+trait BoardForMcts: Game<Move = ZertzMove> + NNGame + Send {
+    fn from_shared(b: &ZertzBoard) -> Self;
+}
+
+impl BoardForMcts for ZertzBoard {
+    fn from_shared(b: &ZertzBoard) -> Self {
+        b.clone_light()
+    }
+}
+
+impl BoardForMcts for JointZertzBoard {
+    fn from_shared(b: &ZertzBoard) -> Self {
+        JointZertzBoard::from_shared(b)
+    }
+}
 
 /// Opaque ticket returned by `BatchEvaluator::submit` and consumed by
 /// `collect`. The implementation chooses what it means: the synchronous
@@ -1229,5 +1268,286 @@ pub fn play_selfplay_core(
         search_depth_std,
         valid_moves_mean,
         valid_moves_std,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Cross-version battle (versioned dispatcher)
+// ---------------------------------------------------------------------------
+
+/// Inner per-player turn loop: cold-init `MctsSearch<G>` for every game in
+/// `game_indices`, run `simulations` sims, pick a move per game, return
+/// (game_index, chosen_move) pairs. `G` is either `ZertzBoard` (Split) or
+/// `JointZertzBoard` (Joint).
+///
+/// Trades the existing `play_battle_core`'s warm-rerooting + pipelined ORT
+/// for simplicity — we re-pay the root NN eval each ply, but cross-version
+/// battle isn't a training hot path. Single batch in flight at a time.
+fn run_turn_batch<G: BoardForMcts + Clone>(
+    shared_boards: &[ZertzBoard],
+    game_indices: &[usize],
+    move_counts: &[u32],
+    simulations: usize,
+    c_puct: f32,
+    play_batch_size: usize,
+    temperature: f32,
+    temp_threshold: u32,
+    evaluator: &mut dyn BatchEvaluator,
+    rng: &mut rand::rngs::ThreadRng,
+) -> Result<Vec<(usize, ZertzMove)>, String> {
+    if game_indices.is_empty() {
+        return Ok(Vec::new());
+    }
+    let board_flat = G::BOARD_CHANNELS * GRID_SIZE * GRID_SIZE;
+
+    let n = game_indices.len();
+    let games: Vec<G> = game_indices
+        .iter()
+        .map(|&gi| G::from_shared(&shared_boards[gi]))
+        .collect();
+    let arena_capacity = simulations + 64;
+    let mut searches: Vec<MctsSearch<G>> = (0..n)
+        .map(|_| {
+            let mut s = MctsSearch::<G>::new(arena_capacity);
+            s.params.cpuct_strategy = CpuctStrategy::Constant { c_puct };
+            s.params.max_children = simulations;
+            s
+        })
+        .collect();
+
+    // Cold init for every game.
+    {
+        let mut flat_boards = vec![0f32; n * board_flat];
+        let mut flat_reserves = vec![0f32; n * RESERVE_SIZE];
+        for (k, g) in games.iter().enumerate() {
+            g.encode_board(
+                &mut flat_boards[k * board_flat..(k + 1) * board_flat],
+                &mut flat_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE],
+            );
+        }
+        let id = evaluator.submit(flat_boards, flat_reserves, n)?;
+        let (init_policy, _) = evaluator.collect(id)?;
+        for (k, g) in games.iter().enumerate() {
+            searches[k].init(g, &init_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE]);
+        }
+    }
+
+    // Simulation rounds — single batch in flight, no pipelining.
+    let mut game_sims: Vec<usize> = vec![0; n];
+    loop {
+        let mut leaf_ids: Vec<NodeId> = Vec::new();
+        let mut leaf_game_idx: Vec<usize> = Vec::new();
+        for _round in 0..play_batch_size {
+            let mut any = false;
+            for i in 0..n {
+                if game_sims[i] >= simulations {
+                    continue;
+                }
+                let leaves = searches[i].select_leaves(1);
+                let count = leaves.len();
+                if count > 0 {
+                    any = true;
+                }
+                for leaf in leaves {
+                    leaf_ids.push(leaf);
+                    leaf_game_idx.push(i);
+                }
+                game_sims[i] += count;
+            }
+            if !any {
+                break;
+            }
+        }
+        if leaf_ids.is_empty() {
+            break;
+        }
+
+        let nl = leaf_ids.len();
+        let mut flat_boards = vec![0f32; nl * board_flat];
+        let mut flat_reserves = vec![0f32; nl * RESERVE_SIZE];
+        for (k, (&leaf, &i)) in leaf_ids.iter().zip(leaf_game_idx.iter()).enumerate() {
+            let (board_enc, reserve_enc) = searches[i].encode_leaf(leaf);
+            flat_boards[k * board_flat..(k + 1) * board_flat].copy_from_slice(&board_enc);
+            flat_reserves[k * RESERVE_SIZE..(k + 1) * RESERVE_SIZE].copy_from_slice(&reserve_enc);
+        }
+
+        let id = evaluator.submit(flat_boards, flat_reserves, nl)?;
+        let (leaf_policy, leaf_values) = evaluator.collect(id)?;
+
+        let mut per_game_policies: Vec<Vec<Vec<f32>>> = (0..n).map(|_| Vec::new()).collect();
+        let mut per_game_values: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
+        for (k, &i) in leaf_game_idx.iter().enumerate() {
+            per_game_policies[i]
+                .push(leaf_policy[k * NN_POLICY_SIZE..(k + 1) * NN_POLICY_SIZE].to_vec());
+            per_game_values[i].push(leaf_values[k]);
+        }
+        for i in 0..n {
+            if per_game_policies[i].is_empty() {
+                continue;
+            }
+            searches[i].expand_and_backprop(&per_game_policies[i], &per_game_values[i], &[]);
+        }
+
+        if game_sims.iter().all(|&s| s >= simulations) {
+            break;
+        }
+    }
+
+    // Pick the move per game.
+    let mut out = Vec::with_capacity(n);
+    for (i, &gi) in game_indices.iter().enumerate() {
+        let dist = searches[i].get_pruned_visit_distribution();
+        let mv = if dist.is_empty() {
+            ZertzMove::Pass
+        } else if move_counts[gi] < temp_threshold && temperature > 0.01 {
+            let weights: Vec<f32> = dist
+                .iter()
+                .map(|(_, p)| p.powf(1.0 / temperature))
+                .collect();
+            let wi = rand::distr::weighted::WeightedIndex::new(&weights)
+                .map_err(|e| e.to_string())?;
+            dist[wi.sample(rng)].0
+        } else {
+            dist.iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .unwrap()
+                .0
+        };
+        out.push((gi, mv));
+    }
+    Ok(out)
+}
+
+/// Battle two models of possibly-different architectures (Split / Joint).
+///
+/// Each ply, active games are partitioned by whose turn it is and which
+/// model owns that side; each subset runs through `run_turn_batch::<G>`
+/// with the appropriate game wrapper. The shared `ZertzBoard` carries the
+/// canonical state — V1's `apply_move(Place)` lands through it atomically,
+/// V2's half-moves through `PlaceMarbleHalf`/`RemoveRingHalf`, and the loop
+/// keeps stepping while any game is still ongoing.
+///
+/// Half the games have model1 as P1 and the other half as P2 (color
+/// balancing). `wins_model1` counts model1 wins regardless of color.
+pub fn play_battle_versioned_core(
+    num_games: usize,
+    simulations: usize,
+    c_puct: f32,
+    play_batch_size: usize,
+    temperature: f32,
+    temp_threshold: u32,
+    style1: ModelStyle,
+    style2: ModelStyle,
+    evaluator1: &mut dyn BatchEvaluator,
+    evaluator2: &mut dyn BatchEvaluator,
+    progress_fn: Option<ProgressFn>,
+) -> Result<BattleResult, String> {
+    let mut rng = rand::rng();
+    let half = num_games / 2;
+    let mut boards: Vec<ZertzBoard> = (0..num_games).map(|_| ZertzBoard::default()).collect();
+    let mut active = vec![true; num_games];
+    let mut move_counts = vec![0u32; num_games];
+
+    let mut wins_model1 = 0u32;
+    let mut wins_model2 = 0u32;
+    let mut draws = 0u32;
+    let mut wins_white = 0u32;
+    let mut wins_grey = 0u32;
+    let mut wins_black = 0u32;
+    let mut wins_combo = 0u32;
+    let mut game_lengths: Vec<u32> = Vec::new();
+
+    let mut finished_count = 0u32;
+    let mut total_moves = 0u32;
+
+    let use_fn1_for = |gi: usize, player: Player| -> bool {
+        (gi < half) == (player == Player::Player1)
+    };
+
+    while active.iter().any(|&a| a) {
+        // Partition active games by which model is on move.
+        let mut for_model1: Vec<usize> = Vec::new();
+        let mut for_model2: Vec<usize> = Vec::new();
+        for gi in 0..num_games {
+            if !active[gi] {
+                continue;
+            }
+            if use_fn1_for(gi, boards[gi].next_player()) {
+                for_model1.push(gi);
+            } else {
+                for_model2.push(gi);
+            }
+        }
+
+        // Dispatch each subset through the right MCTS runtime.
+        let moves1 = match style1 {
+            ModelStyle::Split => run_turn_batch::<ZertzBoard>(
+                &boards, &for_model1, &move_counts, simulations, c_puct, play_batch_size,
+                temperature, temp_threshold, evaluator1, &mut rng,
+            )?,
+            ModelStyle::Joint => run_turn_batch::<JointZertzBoard>(
+                &boards, &for_model1, &move_counts, simulations, c_puct, play_batch_size,
+                temperature, temp_threshold, evaluator1, &mut rng,
+            )?,
+        };
+        let moves2 = match style2 {
+            ModelStyle::Split => run_turn_batch::<ZertzBoard>(
+                &boards, &for_model2, &move_counts, simulations, c_puct, play_batch_size,
+                temperature, temp_threshold, evaluator2, &mut rng,
+            )?,
+            ModelStyle::Joint => run_turn_batch::<JointZertzBoard>(
+                &boards, &for_model2, &move_counts, simulations, c_puct, play_batch_size,
+                temperature, temp_threshold, evaluator2, &mut rng,
+            )?,
+        };
+
+        // Apply moves to shared boards and update bookkeeping.
+        for (gi, mv) in moves1.into_iter().chain(moves2) {
+            boards[gi]
+                .play(mv)
+                .map_err(|e| format!("versioned battle: illegal move on game {gi}: {e}"))?;
+            move_counts[gi] += 1;
+            total_moves += 1;
+
+            if boards[gi].outcome() != Outcome::Ongoing {
+                active[gi] = false;
+                finished_count += 1;
+                game_lengths.push(move_counts[gi]);
+                match boards[gi].outcome() {
+                    Outcome::WonBy(winner) => {
+                        let m1_won = (gi < half) == (winner == Player::Player1);
+                        if m1_won {
+                            wins_model1 += 1;
+                        } else {
+                            wins_model2 += 1;
+                        }
+                        match classify_win(&boards[gi], winner) {
+                            WinType::FourWhite => wins_white += 1,
+                            WinType::FiveGrey => wins_grey += 1,
+                            WinType::SixBlack => wins_black += 1,
+                            WinType::ThreeEach => wins_combo += 1,
+                            WinType::Draw => {}
+                        }
+                    }
+                    _ => draws += 1,
+                }
+            }
+        }
+
+        if let Some(pfn) = &progress_fn {
+            let active_count = active.iter().filter(|&&a| a).count() as u32;
+            pfn(finished_count, num_games as u32, active_count, total_moves);
+        }
+    }
+
+    Ok(BattleResult {
+        wins_model1,
+        wins_model2,
+        draws,
+        wins_white,
+        wins_grey,
+        wins_black,
+        wins_combo,
+        game_lengths,
     })
 }

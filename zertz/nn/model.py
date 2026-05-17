@@ -225,3 +225,25 @@ def load_checkpoint(path: str) -> tuple[ZertzNet, dict]:
         checkpoint["generation"] = checkpoint.pop("iteration")
     model.eval()
     return model, checkpoint
+
+
+def load_checkpoint_any(path: str):
+    """Autodetect-and-load a Zertz checkpoint of either architecture.
+
+    Returns `(model, checkpoint_dict, style)` where `style` is one of
+    `"split"` (post-refactor `ZertzNet`) or `"joint"` (pre-refactor
+    `ZertzNetV1`). The style string matches the values
+    `ZertzSelfPlaySession.play_battle_versioned` expects for `style1`/
+    `style2`, so callers can plumb it through unchanged.
+
+    Detection inspects the state dict for `policy_place_pre_conv.*` —
+    present only in post-refactor checkpoints.
+    """
+    from .model_v1 import is_v1_state_dict, load_v1_checkpoint
+    raw = torch.load(path, weights_only=False)
+    state_dict = raw.get("model_state_dict", raw)
+    if is_v1_state_dict(state_dict):
+        model, ckpt = load_v1_checkpoint(path)
+        return model, ckpt, "joint"
+    model, ckpt = load_checkpoint(path)
+    return model, ckpt, "split"

@@ -12,8 +12,8 @@ use zertz_game::notation::{move_to_str, str_to_move};
 use zertz_game::zertz::{classify_win, WinType, ZertzBoard};
 use core_game::game::{Game, Outcome, Player};
 use zertz_game::search::{
-    best_move_core, play_battle_core, play_battle_vs_bot_core, play_selfplay_core,
-    BatchEvaluator, EvalFn, RequestId, SyncEvaluator,
+    best_move_core, play_battle_core, play_battle_versioned_core, play_battle_vs_bot_core,
+    play_selfplay_core, BatchEvaluator, EvalFn, ModelStyle, RequestId, SyncEvaluator,
 };
 
 use super::inference::{ZertzInferenceResult, ZertzInferenceWorker};
@@ -26,14 +26,28 @@ fn call_python_eval(
     reserves: &[f32],
     batch_size: usize,
 ) -> Result<(Vec<f32>, Vec<f32>), String> {
+    call_python_eval_n(eval_fn, boards, reserves, batch_size, NUM_CHANNELS)
+}
+
+/// Channel-parameterised variant. Lets the V1 (joint) side of versioned
+/// battle reshape its 6-channel board tensors before handing them to the
+/// Python callback (which is wrapping a `ZertzNetV1` checkpoint).
+fn call_python_eval_n(
+    eval_fn: &Py<PyAny>,
+    boards: &[f32],
+    reserves: &[f32],
+    batch_size: usize,
+    board_channels: usize,
+) -> Result<(Vec<f32>, Vec<f32>), String> {
+    let board_flat = board_channels * GRID_SIZE * GRID_SIZE;
     Python::attach(|py| {
         let board_arr = numpy::ndarray::Array2::from_shape_vec(
-            (batch_size, BOARD_FLAT),
+            (batch_size, board_flat),
             boards.to_vec(),
         ).map_err(|e| e.to_string())?;
         let board_np = PyArray2::from_owned_array(py, board_arr);
         let board_4d = board_np
-            .reshape([batch_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE])
+            .reshape([batch_size, board_channels, GRID_SIZE, GRID_SIZE])
             .map_err(|e| e.to_string())?;
 
         let reserve_arr = numpy::ndarray::Array2::from_shape_vec(
@@ -699,6 +713,142 @@ impl PyZertzSelfPlaySession {
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
         };
 
+        Ok(PyZertzBattleResult {
+            wins_model1: r.wins_model1,
+            wins_model2: r.wins_model2,
+            draws: r.draws,
+            wins_white: r.wins_white,
+            wins_grey: r.wins_grey,
+            wins_black: r.wins_black,
+            wins_combo: r.wins_combo,
+            game_lengths: r.game_lengths,
+        })
+    }
+
+    /// Battle two models of possibly-different architectures. `style1` and
+    /// `style2` are `"split"` (post-split-ply, 7-channel input) or
+    /// `"joint"` (V1, pre-split-ply, 6-channel input). Each side may use a
+    /// Python `eval_fn` (sync callback) or a Rust-native ORT worker driven
+    /// by `onnx_path` — independent per side.
+    ///
+    /// Half the games run with model1 as P1, half with model1 as P2;
+    /// `wins_model1` is the model1 count regardless of color.
+    ///
+    /// Compared to `play_battle`, this entry point trades pipelined ORT
+    /// and warm tree rerooting for simplicity — every player turn cold-
+    /// inits its MCTS. Acceptable because cross-version battle isn't a
+    /// training hot path.
+    #[pyo3(signature = (
+        style1, style2,
+        eval_fn1=None, eval_fn2=None,
+        progress_fn=None,
+        onnx_path1=None, onnx_path2=None,
+    ))]
+    fn play_battle_versioned(
+        &self,
+        _py: Python,
+        style1: &str,
+        style2: &str,
+        eval_fn1: Option<Py<PyAny>>,
+        eval_fn2: Option<Py<PyAny>>,
+        progress_fn: Option<Py<PyAny>>,
+        onnx_path1: Option<String>,
+        onnx_path2: Option<String>,
+    ) -> PyResult<PyZertzBattleResult> {
+        fn parse_style(s: &str) -> PyResult<ModelStyle> {
+            match s.to_ascii_lowercase().as_str() {
+                "split" | "v2" | "new" => Ok(ModelStyle::Split),
+                "joint" | "v1" | "old" => Ok(ModelStyle::Joint),
+                other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown model style '{other}' — expected 'split' or 'joint'"
+                ))),
+            }
+        }
+        let s1 = parse_style(style1)?;
+        let s2 = parse_style(style2)?;
+
+        let progress_core = progress_fn.map(|pfn| {
+            let pfn: Py<PyAny> = pfn;
+            Box::new(move |finished: u32, total: u32, active: u32, total_moves: u32| {
+                Python::attach(|py| {
+                    pfn.bind(py).call1((finished, total, active, total_moves)).ok();
+                    py.check_signals().ok();
+                });
+            }) as Box<dyn Fn(u32, u32, u32, u32) + Send + Sync>
+        });
+
+        // Spawn ORT workers per side that requested one. Channel count is
+        // dictated by style (6 for V1, 7 for V2) — must match the .onnx.
+        let worker1 = onnx_path1
+            .map(|path| ZertzInferenceWorker::spawn(path, s1.board_channels(), GRID_SIZE, RESERVE_SIZE))
+            .transpose()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let worker2 = onnx_path2
+            .map(|path| ZertzInferenceWorker::spawn(path, s2.board_channels(), GRID_SIZE, RESERVE_SIZE))
+            .transpose()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+        // Per-side sync evaluator (built only if the worker wasn't).
+        let s1_channels = s1.board_channels();
+        let s2_channels = s2.board_channels();
+        let mut sync_eval1: Option<SyncEvaluator> = if worker1.is_none() {
+            let py_eval = eval_fn1.ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "either eval_fn1 or onnx_path1 must be provided for model1",
+                )
+            })?;
+            let core_eval: EvalFn = Box::new(move |boards, reserves, n| {
+                call_python_eval_n(&py_eval, boards, reserves, n, s1_channels)
+            });
+            Some(SyncEvaluator::new(core_eval))
+        } else { None };
+        let mut sync_eval2: Option<SyncEvaluator> = if worker2.is_none() {
+            let py_eval = eval_fn2.ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "either eval_fn2 or onnx_path2 must be provided for model2",
+                )
+            })?;
+            let core_eval: EvalFn = Box::new(move |boards, reserves, n| {
+                call_python_eval_n(&py_eval, boards, reserves, n, s2_channels)
+            });
+            Some(SyncEvaluator::new(core_eval))
+        } else { None };
+
+        let mut pipelined_eval1 = worker1.as_ref().map(PipelinedEvaluator::new);
+        let mut pipelined_eval2 = worker2.as_ref().map(PipelinedEvaluator::new);
+
+        let result = {
+            let evaluator1: &mut dyn BatchEvaluator = match (&mut pipelined_eval1, &mut sync_eval1) {
+                (Some(p), _) => p,
+                (None, Some(s)) => s,
+                _ => unreachable!("missing evaluator for model1"),
+            };
+            let evaluator2: &mut dyn BatchEvaluator = match (&mut pipelined_eval2, &mut sync_eval2) {
+                (Some(p), _) => p,
+                (None, Some(s)) => s,
+                _ => unreachable!("missing evaluator for model2"),
+            };
+            play_battle_versioned_core(
+                self.num_games,
+                self.simulations,
+                self.c_puct,
+                self.play_batch_size,
+                self.temperature,
+                self.temp_threshold,
+                s1,
+                s2,
+                evaluator1,
+                evaluator2,
+                progress_core,
+            )
+        };
+
+        drop(pipelined_eval1);
+        drop(pipelined_eval2);
+        let _t1 = worker1.map(|w| w.shutdown_and_drain_timing());
+        let _t2 = worker2.map(|w| w.shutdown_and_drain_timing());
+
+        let r = result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         Ok(PyZertzBattleResult {
             wins_model1: r.wins_model1,
             wins_model2: r.wins_model2,

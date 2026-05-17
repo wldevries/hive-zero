@@ -24,6 +24,11 @@ const BOARD_SIZE: usize = crate::hex::BOARD_SIZE;
 
 pub const GRID_SIZE: usize = 7;
 pub const NUM_CHANNELS: usize = 7;
+/// V1 (pre-split-ply) board channel count — same as V2 minus the
+/// mid_placement flag on channel 6. Used by `JointZertzBoard` so V1
+/// checkpoints (trained on 6-channel input) can play inside the new
+/// state machine without seeing the new flag.
+pub const NUM_CHANNELS_V1: usize = 6;
 
 /// Reserve vector (22 elements):
 ///   [0-2]:   supply_W/G/B normalized by initial supply (6, 8, 10)
@@ -127,6 +132,28 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut
         .filter(|r| !matches!(r, Ring::Removed))
         .count();
     reserve_out[21] = rings_remaining as f32 / BOARD_SIZE as f32;
+}
+
+/// V1 board encoder for cross-version battle with pre-split-ply checkpoints.
+///
+/// Same layout as `encode_board` minus channel 6 (the mid_placement flag).
+/// Since `JointZertzBoard`'s MCTS only ever visits non-mid_placement states
+/// (joint `apply_move(Place)` skips through them), dropping the flag is
+/// information-preserving for the V1 MCTS — V1 has nothing it can do with
+/// that channel anyway.
+///
+/// `board_out` must have length NUM_CHANNELS_V1 * GRID_SIZE * GRID_SIZE = 294.
+pub fn encode_board_v1(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut [f32]) {
+    debug_assert_eq!(board_out.len(), NUM_CHANNELS_V1 * GRID_SIZE * GRID_SIZE);
+    debug_assert_eq!(reserve_out.len(), RESERVE_SIZE);
+
+    // Encode into a 7-channel scratch buffer, then copy the first 6 channels.
+    // Slightly wasteful but avoids divergence between the two encoders — one
+    // source of truth, one minus-the-last-channel slice.
+    let mut full = [0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
+    encode_board(board, &mut full, reserve_out);
+    let v1_len = NUM_CHANNELS_V1 * GRID_SIZE * GRID_SIZE;
+    board_out.copy_from_slice(&full[..v1_len]);
 }
 
 #[cfg(test)]
