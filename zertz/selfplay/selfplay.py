@@ -21,6 +21,7 @@ from shared.training_log import csv_comment
 
 from ..nn.model import ZertzNet, _describe_trunk, create_model, load_checkpoint, save_checkpoint, export_onnx
 from ..nn.training import Trainer, ZertzDataset
+from . import TYPICAL_GAME_PLIES
 
 LOG_HEADER = (
     "gen,epoch,"
@@ -146,7 +147,7 @@ class SelfPlayTrainer:
                 f.write(LOG_HEADER)
 
         resolved_buf_dir = buf_dir if buf_dir is not None else self.model_dir
-        max_buffer = games_per_gen * 65 * replay_window
+        max_buffer = games_per_gen * TYPICAL_GAME_PLIES * replay_window
         dataset = ZertzDataset(max_size=max_buffer, buf_dir=resolved_buf_dir)
         dataset.augment_symmetry = augment_symmetry
         os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -222,10 +223,7 @@ class SelfPlayTrainer:
                 **playout_cap.session_kwargs(),
             )
 
-            # Initial total ≈ post-split-ply max game length. Split-ply ~doubled
-            # plies vs joint Zertz, so 85 covers the typical max; pbar auto-
-            # extends in the progress callback if a game outlasts that.
-            pbar = tqdm(total=85, unit="turn", desc="  Self-play", leave=False)
+            pbar = tqdm(total=TYPICAL_GAME_PLIES, unit="turn", desc="  Self-play", leave=False)
             turn = [0]
 
             def progress_fn(finished, total, active, total_moves):
