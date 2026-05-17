@@ -5,6 +5,7 @@ pub mod game;
 pub mod uhp;
 pub mod board_encoding;
 pub mod move_encoding;
+pub mod tokenize;
 pub mod search;
 pub mod alphabeta;
 pub mod sgf;
