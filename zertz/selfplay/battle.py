@@ -136,7 +136,7 @@ def run_battle(
         play_batch_size=play_batch_size,
     )
 
-    pbar = tqdm(total=65, unit="turn", desc="  Battle", leave=False)
+    pbar = tqdm(total=85, unit="turn", desc="  Battle", leave=False)
     turn = [0]
 
     def progress_fn(finished, total, active, total_moves):
@@ -291,7 +291,7 @@ def _run_battle_vs_bot(
         play_batch_size=play_batch_size,
     )
 
-    pbar = tqdm(total=65, unit="turn", desc="  Battle", leave=False)
+    pbar = tqdm(total=85, unit="turn", desc="  Battle", leave=False)
     turn = [0]
 
     def progress_fn(finished, total, active, total_moves):

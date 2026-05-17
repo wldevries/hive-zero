@@ -222,7 +222,10 @@ class SelfPlayTrainer:
                 **playout_cap.session_kwargs(),
             )
 
-            pbar = tqdm(total=65, unit="turn", desc="  Self-play", leave=False)
+            # Initial total ≈ post-split-ply max game length. Split-ply ~doubled
+            # plies vs joint Zertz, so 85 covers the typical max; pbar auto-
+            # extends in the progress callback if a game outlasts that.
+            pbar = tqdm(total=85, unit="turn", desc="  Self-play", leave=False)
             turn = [0]
 
             def progress_fn(finished, total, active, total_moves):
@@ -251,7 +254,7 @@ class SelfPlayTrainer:
             lengths = list(result.game_lengths)
 
             print(
-                f"  Results: P1={_cg(f'{p1}')}  P2={_cr(f'{p2}')}  D/timeout={_cy(f'{d}')}"
+                f"  Results: P1={_cg(f'{p1}')}  P2={_cr(f'{p2}')}  D={_cy(f'{d}')}"
             )
 
             if lengths:
