@@ -717,6 +717,7 @@ pub struct SelfPlayResult {
     pub value_only_flags: Vec<bool>,
     pub capture_turn_flags: Vec<bool>,
     pub mid_capture_turn_flags: Vec<bool>,
+    pub mid_placement_turn_flags: Vec<bool>,
     pub num_samples: usize,
     pub wins_p1: u32,
     pub wins_p2: u32,
@@ -893,7 +894,12 @@ pub fn play_selfplay_core(
     // priors from the previous search; such games skip the root NN eval + init().
     let mut search_warm: Vec<bool> = vec![false; num_games];
 
-    let mut histories: Vec<Vec<(usize, usize, Player, bool, bool, bool, Vec<f32>)>> = (0..num_games).map(|_| Vec::new()).collect();
+    // Per-turn history entry:
+    //   (board_offset, reserve_offset, player_to_move,
+    //    is_value_only, is_capture_turn, is_mid_capture_turn,
+    //    is_mid_placement_turn, policy_vec)
+    let mut histories: Vec<Vec<(usize, usize, Player, bool, bool, bool, bool, Vec<f32>)>> =
+        (0..num_games).map(|_| Vec::new()).collect();
     let mut board_buf: Vec<f32> = Vec::new();
     let mut reserve_buf: Vec<f32> = Vec::new();
 
@@ -1091,7 +1097,17 @@ pub fn play_selfplay_core(
 
             let is_capture_turn = dist.first().map_or(false, |(mv, _)| matches!(mv, ZertzMove::Capture { .. }));
             let is_mid_capture_turn = boards[gi].is_mid_capture();
-            histories[gi].push((turn_board_offsets[i], turn_reserve_offsets[i], boards[gi].next_player(), !is_full[i], is_capture_turn, is_mid_capture_turn, policy_vec));
+            let is_mid_placement_turn = boards[gi].is_mid_placement();
+            histories[gi].push((
+                turn_board_offsets[i],
+                turn_reserve_offsets[i],
+                boards[gi].next_player(),
+                !is_full[i],
+                is_capture_turn,
+                is_mid_capture_turn,
+                is_mid_placement_turn,
+                policy_vec,
+            ));
 
             let mv = if dist.is_empty() {
                 ZertzMove::Pass
@@ -1154,11 +1170,12 @@ pub fn play_selfplay_core(
     let mut value_only_flags = Vec::with_capacity(total_samples);
     let mut capture_turn_flags = Vec::with_capacity(total_samples);
     let mut mid_capture_turn_flags = Vec::with_capacity(total_samples);
+    let mut mid_placement_turn_flags = Vec::with_capacity(total_samples);
 
     for (gi, history) in histories.iter().enumerate() {
         let outcome = boards[gi].outcome();
         for record in history {
-            let (boff, roff, player, is_value_only, is_capture_turn, is_mid_capture_turn, policy_vec) = record;
+            let (boff, roff, player, is_value_only, is_capture_turn, is_mid_capture_turn, is_mid_placement_turn, policy_vec) = record;
             board_data.extend_from_slice(&board_buf[*boff..*boff + BOARD_FLAT]);
             reserve_data.extend_from_slice(&reserve_buf[*roff..*roff + RESERVE_SIZE]);
             policy_data.extend_from_slice(&policy_vec);
@@ -1170,6 +1187,7 @@ pub fn play_selfplay_core(
             value_only_flags.push(*is_value_only);
             capture_turn_flags.push(*is_capture_turn);
             mid_capture_turn_flags.push(*is_mid_capture_turn);
+            mid_placement_turn_flags.push(*is_mid_placement_turn);
         }
     }
 
@@ -1188,6 +1206,7 @@ pub fn play_selfplay_core(
         value_only_flags,
         capture_turn_flags,
         mid_capture_turn_flags,
+        mid_placement_turn_flags,
         num_samples: total_samples,
         wins_p1,
         wins_p2,

@@ -1,9 +1,16 @@
 /// Move encoding: maps ZertzMove to/from a flat policy index.
 ///
-/// Layout:
+/// Layout (legacy joint encoding, used by alpha-beta + heuristic tooling):
 ///   Place:     color(3) * 37 * 37 + place_at(37) * 37 + remove(37)   → [0, 4107)
 ///   PlaceOnly: 4107 + color(3) * 37 + place_at(37)                   → [4107, 4218)
 ///   Capture:   4218 + direction(6) * 37 + from(37)                   → [4218, 4440)
+///
+/// Split-form half-moves (`PlaceMarbleHalf`, `RemoveRingHalf`) reuse the
+/// flat indices of the joint layout that correspond to their first/second
+/// halves — there is no separate region for them. The NN-side encoding
+/// (`encode_distribution_nn` / `get_legal_move_mask_nn`) stays at 490
+/// (`NN_POLICY_SIZE`); placements emit a single `PolicyIndex::Single` into
+/// the appropriate channel cell.
 ///
 /// Direction indices match DIRECTIONS: E=0, NE=1, NW=2, W=3, SW=4, SE=5.
 /// All Zertz captures jump exactly 2 cells in one of these 6 directions.
@@ -46,7 +53,12 @@ pub fn capture_direction(from: crate::hex::Hex, to: crate::hex::Hex) -> usize {
     panic!("invalid capture jump: no direction from {:?} to {:?}", from, to);
 }
 
-/// Encode a ZertzMove as a policy index.
+/// Encode a ZertzMove as a flat (legacy/joint) policy index. Half-moves
+/// project onto the matching joint slot: `PlaceMarbleHalf(c, p)` maps to
+/// the smallest joint index with `(color=c, place_at=p)` (remove=0), and
+/// `RemoveRingHalf(r)` maps to a remove-only slot in the place-only region
+/// (with color=W as a dummy). This flat encoding is only used by tooling
+/// that doesn't distinguish half-moves; the NN-side encoder is independent.
 pub fn encode_move(mv: &ZertzMove) -> usize {
     match *mv {
         ZertzMove::Place {
@@ -61,6 +73,16 @@ pub fn encode_move(mv: &ZertzMove) -> usize {
         }
         ZertzMove::PlaceOnly { color, place_at } => {
             PLACE_ONLY_OFFSET + color.index() * BOARD_SIZE + hex_to_index(place_at)
+        }
+        ZertzMove::PlaceMarbleHalf { color, place_at } => {
+            // Same region as PlaceOnly — same (color, place) signature.
+            PLACE_ONLY_OFFSET + color.index() * BOARD_SIZE + hex_to_index(place_at)
+        }
+        ZertzMove::RemoveRingHalf { remove } => {
+            // Borrow the first slot of PlaceOnly's "white" row, shifted by
+            // the remove cell. Disambiguated from PlaceMarbleHalf at the
+            // type level — encoders that care use the NN-side path.
+            PLACE_ONLY_OFFSET + hex_to_index(remove)
         }
         ZertzMove::Capture { jumps, .. } => {
             let from = jumps[0].0;
@@ -93,8 +115,17 @@ pub fn get_legal_move_mask(board: &ZertzBoard) -> ([f32; POLICY_SIZE], Vec<(usiz
 /// Layout: [place_W(49), place_G(49), place_B(49), remove(49),
 ///          cap_E(49), cap_NE(49), cap_NW(49), cap_W(49), cap_SW(49), cap_SE(49)]
 ///
-/// For Place moves, probability is added to both the color/position cell and the
-/// remove-ring cell (marginal distributions). For PlaceOnly and Capture, one cell only.
+/// MCTS distributions are over a single decision point, so the variants are
+/// mutually exclusive within one call:
+///   - `PlaceMarbleHalf`: probability lands on channels 0-2 (color/position).
+///   - `RemoveRingHalf`: probability lands on channel 3 (remove).
+///   - `PlaceOnly`: terminal placement, channels 0-2 (no removal half).
+///   - `Capture`: channels 4-9 by direction.
+///
+/// The legacy joint `Place` variant is still supported and writes to both
+/// color/position and remove cells (marginalised), but MCTS no longer emits
+/// it — it appears only when this function is called on a joint distribution
+/// for diagnostic tooling.
 pub fn encode_distribution_nn(dist: &[(ZertzMove, f32)]) -> Vec<f32> {
     const G2: usize = GRID_SIZE * GRID_SIZE;
     let mut policy = vec![0.0f32; NN_POLICY_SIZE];
@@ -109,6 +140,14 @@ pub fn encode_distribution_nn(dist: &[(ZertzMove, f32)]) -> Vec<f32> {
             ZertzMove::PlaceOnly { color, place_at } => {
                 let a = color.index() * G2 + hex_to_grid_cell(place_at);
                 policy[a] += prob;
+            }
+            ZertzMove::PlaceMarbleHalf { color, place_at } => {
+                let a = color.index() * G2 + hex_to_grid_cell(place_at);
+                policy[a] += prob;
+            }
+            ZertzMove::RemoveRingHalf { remove } => {
+                let b = 3 * G2 + hex_to_grid_cell(remove);
+                policy[b] += prob;
             }
             ZertzMove::Capture { jumps, .. } => {
                 let from = jumps[0].0;
@@ -136,6 +175,9 @@ pub fn get_legal_move_mask_nn(board: &ZertzBoard) -> (Vec<f32>, Vec<(PolicyIndex
     for mv in moves {
         let pi = match mv {
             ZertzMove::Place { color, place_at, remove } => {
+                // Legacy joint move — still allowed in the mask if it ever
+                // appears (it doesn't from split-form legal_moves), kept as a
+                // Sum so a joint-style prior still scores correctly.
                 let a = color.index() * G2 + hex_to_grid_cell(place_at);
                 let b = 3 * G2 + hex_to_grid_cell(remove);
                 mask[a] = 1.0;
@@ -146,6 +188,16 @@ pub fn get_legal_move_mask_nn(board: &ZertzBoard) -> (Vec<f32>, Vec<(PolicyIndex
                 let a = color.index() * G2 + hex_to_grid_cell(place_at);
                 mask[a] = 1.0;
                 PolicyIndex::Single(a)
+            }
+            ZertzMove::PlaceMarbleHalf { color, place_at } => {
+                let a = color.index() * G2 + hex_to_grid_cell(place_at);
+                mask[a] = 1.0;
+                PolicyIndex::Single(a)
+            }
+            ZertzMove::RemoveRingHalf { remove } => {
+                let b = 3 * G2 + hex_to_grid_cell(remove);
+                mask[b] = 1.0;
+                PolicyIndex::Single(b)
             }
             ZertzMove::Capture { jumps, .. } => {
                 let from = jumps[0].0;

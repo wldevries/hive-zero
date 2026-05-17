@@ -194,12 +194,18 @@ pub enum Ring {
 // Move
 // ---------------------------------------------------------------------------
 
-/// A Zertz move is either:
-/// - Place a marble on an empty ring, then remove an edge ring.
-/// - Capture: jump over an adjacent marble to land on an empty ring (may chain).
+/// A Zertz move is one of:
+/// - `Place`/`PlaceOnly`: joint placement (legacy, kept for SGF replay and alpha-beta).
+/// - `PlaceMarbleHalf` + `RemoveRingHalf`: split placement into two same-player plies
+///   so MCTS can search them independently. `apply_move` accepts the joint forms
+///   too — they execute as the two halves chained atomically without ever leaving
+///   the board in mid_placement state, so SGF replay and AB both keep working.
+/// - `Capture`: jump over an adjacent marble to land on an empty ring (may chain).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ZertzMove {
     /// Place marble of given color at `place_at`, then remove ring `remove`.
+    /// Joint form: applies both halves atomically, never leaves mid_placement set.
+    /// Used by SGF replay and alpha-beta.
     Place {
         color: Marble,
         place_at: Hex,
@@ -209,6 +215,17 @@ pub enum ZertzMove {
     PlaceOnly {
         color: Marble,
         place_at: Hex,
+    },
+    /// First half of a split placement: place marble and enter mid_placement state.
+    /// Same player must follow up with `RemoveRingHalf`.
+    PlaceMarbleHalf {
+        color: Marble,
+        place_at: Hex,
+    },
+    /// Second half of a split placement: remove a ring and end the turn.
+    /// Only legal when board is in mid_placement state.
+    RemoveRingHalf {
+        remove: Hex,
     },
     /// No-op pass move (Zertz never generates this, but the Game trait requires it).
     Pass,
@@ -263,6 +280,12 @@ impl Debug for ZertzMove {
             ZertzMove::PlaceOnly { color, place_at } => {
                 write!(f, "Place({color} @({},{}))", place_at.0, place_at.1)
             }
+            ZertzMove::PlaceMarbleHalf { color, place_at } => {
+                write!(f, "PlaceHalf({color} @({},{}))", place_at.0, place_at.1)
+            }
+            ZertzMove::RemoveRingHalf { remove } => {
+                write!(f, "RemoveHalf(({},{}))", remove.0, remove.1)
+            }
             ZertzMove::Capture { jumps, len } => {
                 write!(f, "Capture(")?;
                 for i in 0..*len as usize {
@@ -301,6 +324,18 @@ pub struct MidCaptureState {
 }
 
 // ---------------------------------------------------------------------------
+// Mid-placement state (sequential placement MCTS)
+// ---------------------------------------------------------------------------
+
+/// Tracks an in-progress placement that has placed a marble but not yet
+/// removed a ring. When set, only `RemoveRingHalf` moves are legal — the same
+/// player keeps moving. No payload is needed: the placed marble is already
+/// on the board (just like any other Occupied ring), and the set of legal
+/// ring removals is determined purely from current board topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MidPlacementState;
+
+// ---------------------------------------------------------------------------
 // ZertzBoard
 // ---------------------------------------------------------------------------
 
@@ -326,6 +361,12 @@ pub struct ZertzBoard {
     /// Mid-capture state: set when a capture chain is in progress.
     /// The same player continues moving until no more hops are available.
     mid_capture: Option<MidCaptureState>,
+    /// Mid-placement state: set when a marble has been placed via
+    /// `PlaceMarbleHalf` but the matching `RemoveRingHalf` has not yet been
+    /// applied. The same player continues moving until the ring is removed.
+    /// Always `None` after legacy joint `Place`/`PlaceOnly` apply because
+    /// those execute both halves atomically.
+    mid_placement: Option<MidPlacementState>,
     /// Undo stack: pushed by `apply_move` before mutation, popped + restored
     /// by `undo`. Empty for boards built via `clone_light` (MCTS hot path)
     /// since MCTS replays from root rather than undoing.
@@ -347,6 +388,7 @@ pub struct ZertzUndo {
     jump_captures: [[u8; 3]; 2],
     isolation_captures: [[u8; 3]; 2],
     mid_capture: Option<MidCaptureState>,
+    mid_placement: Option<MidPlacementState>,
     repetition_key: Option<u64>,
 }
 
@@ -374,6 +416,7 @@ impl ZertzBoard {
         self.captures.hash(&mut h);
         self.next_player.hash(&mut h);
         self.mid_capture.hash(&mut h);
+        self.mid_placement.hash(&mut h);
         self.outcome.hash(&mut h);
         h.finish()
     }
@@ -420,6 +463,7 @@ impl Default for ZertzBoard {
             isolation_captures: [[0; 3]; 2],
             board_full: false,
             mid_capture: None,
+            mid_placement: None,
             apply_history: Vec::new(),
         };
         let key = board.position_key();
@@ -598,7 +642,10 @@ impl ZertzBoard {
         colors
     }
 
-    /// Generate all placement moves.
+    /// Generate joint placement moves (`Place` + `PlaceOnly`) — the legacy
+    /// move space. Used by alpha-beta and any consumer that wants placement
+    /// decided in a single ply. MCTS uses the split form via
+    /// `generate_split_placements` / `generate_ring_removals` instead.
     fn generate_placements(&self) -> Vec<ZertzMove> {
         let mut moves = Vec::new();
 
@@ -645,6 +692,68 @@ impl ZertzBoard {
             }
         }
 
+        moves
+    }
+
+    /// Generate split-form placement first halves: one `PlaceMarbleHalf` per
+    /// (color, empty-position) pair, plus `PlaceOnly` for positions whose
+    /// placement leaves no removable ring (terminal one-ply placement). Used
+    /// by MCTS — the matching `RemoveRingHalf` decision is searched as a
+    /// child node once we're in mid_placement state.
+    fn generate_split_placements(&self) -> Vec<ZertzMove> {
+        let mut moves = Vec::new();
+
+        let colors = self.available_colors();
+        if colors.is_empty() {
+            return moves;
+        }
+
+        // Precompute empty positions and removable edges once.
+        let mut empty_positions = Vec::new();
+        let mut removable_edges = Vec::new();
+        for (i, &ring) in self.rings.iter().enumerate() {
+            if ring == Ring::Empty {
+                let pos = index_to_hex(i);
+                empty_positions.push(pos);
+                if Self::is_edge_static(&self.rings, pos) {
+                    removable_edges.push(pos);
+                }
+            }
+        }
+
+        for &color in &colors {
+            for &place in &empty_positions {
+                // After placing at `place`, would any removable edge other
+                // than `place` itself still exist? If yes, split into two
+                // halves; otherwise the placement is terminal (`PlaceOnly`).
+                let has_post_removal =
+                    removable_edges.iter().any(|&r| r != place);
+                if has_post_removal {
+                    moves.push(ZertzMove::PlaceMarbleHalf { color, place_at: place });
+                } else {
+                    moves.push(ZertzMove::PlaceOnly { color, place_at: place });
+                }
+            }
+        }
+
+        moves
+    }
+
+    /// Generate `RemoveRingHalf` moves: one per removable empty ring on the
+    /// current board. Used during mid_placement: the marble has already been
+    /// placed (and is part of `self.rings`), so removability is computed
+    /// directly off the current ring set.
+    fn generate_ring_removals(&self) -> Vec<ZertzMove> {
+        let mut moves = Vec::new();
+        for (i, &ring) in self.rings.iter().enumerate() {
+            if ring != Ring::Empty {
+                continue;
+            }
+            let pos = index_to_hex(i);
+            if Self::is_edge_static(&self.rings, pos) {
+                moves.push(ZertzMove::RemoveRingHalf { remove: pos });
+            }
+        }
         moves
     }
 
@@ -764,6 +873,7 @@ impl ZertzBoard {
             jump_captures: [[0; 3]; 2],
             isolation_captures: [[0; 3]; 2],
             mid_capture: self.mid_capture,
+            mid_placement: self.mid_placement,
             apply_history: Vec::new(),
         }
     }
@@ -792,6 +902,23 @@ impl ZertzBoard {
             ZertzMove::PlaceOnly { color, place_at } => {
                 self.take_marble(color)?;
                 self.rings[hex_to_index(place_at)] = Ring::Occupied(color);
+                self.resolve_isolation();
+                self.check_winner();
+                self.next_player = self.next_player.opposite();
+            }
+            ZertzMove::PlaceMarbleHalf { color, place_at } => {
+                // First half of split placement: marble lands, mid_placement
+                // is set, same player must follow up with RemoveRingHalf.
+                self.take_marble(color)?;
+                self.rings[hex_to_index(place_at)] = Ring::Occupied(color);
+                self.mid_placement = Some(MidPlacementState);
+                // Do NOT swap player; do NOT resolve isolation or check_winner —
+                // those happen after the ring is removed.
+            }
+            ZertzMove::RemoveRingHalf { remove } => {
+                // Second half: ring removal finalises the turn.
+                self.rings[hex_to_index(remove)] = Ring::Removed;
+                self.mid_placement = None;
                 self.resolve_isolation();
                 self.check_winner();
                 self.next_player = self.next_player.opposite();
@@ -877,6 +1004,7 @@ impl ZertzBoard {
             jump_captures: self.jump_captures,
             isolation_captures: self.isolation_captures,
             mid_capture: self.mid_capture,
+            mid_placement: self.mid_placement,
             repetition_key: None,
         }
     }
@@ -891,6 +1019,7 @@ impl ZertzBoard {
         self.jump_captures = u.jump_captures;
         self.isolation_captures = u.isolation_captures;
         self.mid_capture = u.mid_capture;
+        self.mid_placement = u.mid_placement;
         if let Some(key) = u.repetition_key {
             if let Some(count) = self.history.get_mut(&key) {
                 *count = count.saturating_sub(1);
@@ -938,6 +1067,9 @@ impl ZertzBoard {
                 if self.mid_capture.is_some() {
                     return Err("cannot place a marble during a capture chain".to_string());
                 }
+                if self.mid_placement.is_some() {
+                    return Err("cannot start a new placement during a pending ring removal".to_string());
+                }
                 if !self.generate_first_hops().is_empty() {
                     return Err("captures are mandatory — must capture instead of placing".to_string());
                 }
@@ -964,6 +1096,9 @@ impl ZertzBoard {
                 if self.mid_capture.is_some() {
                     return Err("cannot place a marble during a capture chain".to_string());
                 }
+                if self.mid_placement.is_some() {
+                    return Err("cannot start a new placement during a pending ring removal".to_string());
+                }
                 if !self.generate_first_hops().is_empty() {
                     return Err("captures are mandatory — must capture instead of placing".to_string());
                 }
@@ -985,7 +1120,56 @@ impl ZertzBoard {
                 self.check_winner();
                 self.next_player = self.next_player.opposite();
             }
+            ZertzMove::PlaceMarbleHalf { color, place_at } => {
+                if self.mid_capture.is_some() {
+                    return Err("cannot place a marble during a capture chain".to_string());
+                }
+                if self.mid_placement.is_some() {
+                    return Err("placement first-half already in progress".to_string());
+                }
+                if !self.generate_first_hops().is_empty() {
+                    return Err("captures are mandatory — must capture instead of placing".to_string());
+                }
+                if self.rings[hex_to_index(place_at)] != Ring::Empty {
+                    return Err(format!("({},{}) is not an empty ring", place_at.0, place_at.1));
+                }
+                // Must be a state where some removable ring will still exist
+                // after placement — otherwise PlaceOnly is the correct move.
+                let has_post_removal = self.rings.iter().enumerate().any(|(i, &r)| {
+                    r == Ring::Empty
+                        && index_to_hex(i) != place_at
+                        && Self::is_edge_static(&self.rings, index_to_hex(i))
+                });
+                if !has_post_removal {
+                    return Err(
+                        "no removable ring will exist after placement — use PlaceOnly".to_string()
+                    );
+                }
+                self.take_marble(color)?;
+                self.rings[hex_to_index(place_at)] = Ring::Occupied(color);
+                self.mid_placement = Some(MidPlacementState);
+                // No isolation/winner check yet — the turn is mid-flight.
+            }
+            ZertzMove::RemoveRingHalf { remove } => {
+                if self.mid_placement.is_none() {
+                    return Err("RemoveRingHalf is only legal during mid-placement".to_string());
+                }
+                if self.rings[hex_to_index(remove)] != Ring::Empty {
+                    return Err(format!("({},{}) is not an empty ring to remove", remove.0, remove.1));
+                }
+                if !Self::is_edge_static(&self.rings, remove) {
+                    return Err(format!("({},{}) is not a removable edge ring", remove.0, remove.1));
+                }
+                self.rings[hex_to_index(remove)] = Ring::Removed;
+                self.mid_placement = None;
+                self.resolve_isolation();
+                self.check_winner();
+                self.next_player = self.next_player.opposite();
+            }
             ZertzMove::Capture { jumps, len } => {
+                if self.mid_placement.is_some() {
+                    return Err("cannot capture during a pending ring removal".to_string());
+                }
                 if len == 1 {
                     let (from, over, to) = jumps[0];
                     // During a capture chain, only the active marble may continue.
@@ -1034,8 +1218,12 @@ impl ZertzBoard {
             }
         }
 
-        // History tracking: only record after a complete turn (not mid-capture).
-        if self.mid_capture.is_none() && self.outcome == Outcome::Ongoing {
+        // History tracking: only record after a complete turn (not mid-capture
+        // or mid-placement — those are same-player continuations).
+        if self.mid_capture.is_none()
+            && self.mid_placement.is_none()
+            && self.outcome == Outcome::Ongoing
+        {
             let key = self.position_key();
             let count = self.history.entry(key).or_insert(0);
             *count += 1;
@@ -1056,6 +1244,12 @@ impl ZertzBoard {
         self.mid_capture.is_some()
     }
 
+    /// Whether the board is mid-placement: a marble has been placed via
+    /// `PlaceMarbleHalf` but no `RemoveRingHalf` has been applied yet.
+    pub fn is_mid_placement(&self) -> bool {
+        self.mid_placement.is_some()
+    }
+
     /// Whether this is a capture turn (first-hop or mid-capture).
     /// Captures are mandatory in Zertz, so if any hop exists, it's a capture turn.
     pub fn is_capture_turn(&self) -> bool {
@@ -1067,11 +1261,19 @@ impl ZertzBoard {
         self.mid_capture.map(|mc| mc.marble_pos)
     }
 
-    /// Get all legal moves for the current position.
-    /// During mid-capture, only continuation hops from the active marble.
+    /// Get all legal moves for the current position in the **split** move
+    /// space — what MCTS searches over. Placements are returned as
+    /// `PlaceMarbleHalf` (followed in mid_placement by `RemoveRingHalf`), or
+    /// as `PlaceOnly` for terminal placements with no removable ring left.
+    /// During mid-capture/mid-placement the move space is restricted to the
+    /// continuation moves.
     pub fn legal_moves(&self) -> Vec<ZertzMove> {
         if self.outcome != Outcome::Ongoing {
             return Vec::new();
+        }
+
+        if self.mid_placement.is_some() {
+            return self.generate_ring_removals();
         }
 
         if let Some(mc) = self.mid_capture {
@@ -1081,6 +1283,31 @@ impl ZertzBoard {
         let hops = self.generate_first_hops();
         if !hops.is_empty() {
             // Captures are mandatory.
+            return hops;
+        }
+
+        self.generate_split_placements()
+    }
+
+    /// Get all legal moves in the **joint** move space — placements appear as
+    /// single-ply `Place` / `PlaceOnly` moves. Used by alpha-beta. The board
+    /// must NOT be in mid_placement state (caller should never reach a
+    /// mid_placement state when only joint applies are used).
+    pub fn legal_joint_moves(&self) -> Vec<ZertzMove> {
+        if self.outcome != Outcome::Ongoing {
+            return Vec::new();
+        }
+        debug_assert!(
+            self.mid_placement.is_none(),
+            "legal_joint_moves called on a mid_placement board — joint callers should not visit this state",
+        );
+
+        if let Some(mc) = self.mid_capture {
+            return self.generate_continuation_hops(mc.marble_pos);
+        }
+
+        let hops = self.generate_first_hops();
+        if !hops.is_empty() {
             return hops;
         }
 
@@ -1113,7 +1340,11 @@ impl Game for ZertzBoard {
     }
 
     fn valid_moves(&mut self) -> Vec<ZertzMove> {
-        self.legal_moves()
+        // Alpha-beta is the only Game-trait consumer of `valid_moves` (MCTS
+        // goes through `NNGame::get_legal_move_mask`). AB wants the joint
+        // placement move-space — searching split halves would double the
+        // effective depth for the same game horizon.
+        self.legal_joint_moves()
     }
 
     fn play_move(&mut self, mv: &ZertzMove) -> Result<(), String> {
@@ -1363,5 +1594,178 @@ impl Display for ZertzBoard {
         }
 
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — split-placement state machine
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod split_placement_tests {
+    use super::*;
+
+    /// On a default board, `legal_moves` (split) yields PlaceMarbleHalf moves
+    /// for every (color, empty cell) pair — same count as available_colors() *
+    /// empty_cells. legal_joint_moves yields Place + PlaceOnly.
+    #[test]
+    fn legal_moves_returns_split_form_on_default() {
+        let board = ZertzBoard::default();
+        let split = board.legal_moves();
+        let joint = board.legal_joint_moves();
+        assert!(!split.is_empty());
+        assert!(!joint.is_empty());
+        // Every split move on a default board is PlaceMarbleHalf (no terminal
+        // PlaceOnly because every cell leaves removable rings behind).
+        for mv in &split {
+            assert!(
+                matches!(mv, ZertzMove::PlaceMarbleHalf { .. }),
+                "expected PlaceMarbleHalf, got {:?}", mv
+            );
+        }
+        // Joint move-space is strictly larger than split first-halves (one
+        // half-move expands into many (color, place, remove) joint moves).
+        assert!(joint.len() > split.len());
+    }
+
+    /// Applying PlaceMarbleHalf sets mid_placement, keeps the same player on
+    /// move, and restricts legal_moves to RemoveRingHalf only.
+    #[test]
+    fn place_marble_half_sets_mid_placement() {
+        let mut board = ZertzBoard::default();
+        let before_player = board.next_player();
+        let mv = ZertzMove::PlaceMarbleHalf {
+            color: Marble::White,
+            place_at: (0, 0),
+        };
+        board.play(mv).expect("PlaceMarbleHalf should be legal");
+        assert!(board.is_mid_placement(), "should be mid_placement after PlaceMarbleHalf");
+        assert_eq!(board.next_player(), before_player, "player must not switch mid-placement");
+
+        // Now only ring removals are legal.
+        let next = board.legal_moves();
+        assert!(!next.is_empty());
+        for mv in &next {
+            assert!(
+                matches!(mv, ZertzMove::RemoveRingHalf { .. }),
+                "expected RemoveRingHalf during mid_placement, got {:?}", mv
+            );
+        }
+    }
+
+    /// PlaceMarbleHalf + RemoveRingHalf executed atomically equals the joint
+    /// Place move in terms of resulting board state.
+    #[test]
+    fn split_equals_joint_after_both_halves() {
+        let place = (0i8, 0i8);
+        let remove = (3i8, -3i8); // a corner edge
+
+        let mut split_board = ZertzBoard::default();
+        split_board.play(ZertzMove::PlaceMarbleHalf {
+            color: Marble::White,
+            place_at: place,
+        }).unwrap();
+        split_board.play(ZertzMove::RemoveRingHalf { remove }).unwrap();
+
+        let mut joint_board = ZertzBoard::default();
+        joint_board.play(ZertzMove::Place {
+            color: Marble::White,
+            place_at: place,
+            remove,
+        }).unwrap();
+
+        assert_eq!(split_board.rings(), joint_board.rings());
+        assert_eq!(split_board.captures(), joint_board.captures());
+        assert_eq!(split_board.supply(), joint_board.supply());
+        assert_eq!(split_board.next_player(), joint_board.next_player());
+        assert!(!split_board.is_mid_placement());
+        assert!(!joint_board.is_mid_placement());
+    }
+
+    /// You can't start a new placement, capture, or PlaceOnly while a
+    /// ring removal is pending.
+    #[test]
+    fn other_moves_rejected_during_mid_placement() {
+        let mut board = ZertzBoard::default();
+        board.play(ZertzMove::PlaceMarbleHalf {
+            color: Marble::White,
+            place_at: (0, 0),
+        }).unwrap();
+
+        // Place during mid_placement → error
+        let err = board.play(ZertzMove::Place {
+            color: Marble::White,
+            place_at: (1, 0),
+            remove: (3, -3),
+        });
+        assert!(err.is_err(), "Place should be rejected mid_placement");
+
+        // PlaceOnly during mid_placement → error
+        let err = board.play(ZertzMove::PlaceOnly {
+            color: Marble::White,
+            place_at: (1, 0),
+        });
+        assert!(err.is_err(), "PlaceOnly should be rejected mid_placement");
+
+        // RemoveRingHalf without mid_placement → error
+        let mut fresh = ZertzBoard::default();
+        let err = fresh.play(ZertzMove::RemoveRingHalf { remove: (3, -3) });
+        assert!(err.is_err(), "RemoveRingHalf should be rejected without mid_placement");
+    }
+
+    /// Undo a PlaceMarbleHalf restores both the board AND the cleared
+    /// mid_placement state.
+    #[test]
+    fn undo_through_split_placement() {
+        let mut board = ZertzBoard::default();
+        let before_rings = *board.rings();
+        let before_supply = *board.supply();
+        let before_player = board.next_player();
+
+        board.play(ZertzMove::PlaceMarbleHalf {
+            color: Marble::White,
+            place_at: (0, 0),
+        }).unwrap();
+        assert!(board.is_mid_placement());
+
+        board.play(ZertzMove::RemoveRingHalf { remove: (3, -3) }).unwrap();
+        assert!(!board.is_mid_placement());
+
+        // Undo the ring removal — should re-enter mid_placement.
+        board.undo();
+        assert!(board.is_mid_placement());
+
+        // Undo the marble placement — should be back to default.
+        board.undo();
+        assert!(!board.is_mid_placement());
+        assert_eq!(*board.rings(), before_rings);
+        assert_eq!(*board.supply(), before_supply);
+        assert_eq!(board.next_player(), before_player);
+    }
+
+    /// The board encoder sets the new channel 6 only during mid_placement.
+    #[test]
+    fn encoder_channel_6_tracks_mid_placement() {
+        use crate::board_encoding::{encode_board, GRID_SIZE, NUM_CHANNELS, RESERVE_SIZE};
+        let g2 = GRID_SIZE * GRID_SIZE;
+        let mut buf = vec![0.0f32; NUM_CHANNELS * g2];
+        let mut reserve = vec![0.0f32; RESERVE_SIZE];
+
+        let board = ZertzBoard::default();
+        encode_board(&board, &mut buf, &mut reserve);
+        // Channel 6 should be zero on a default board (not mid_placement).
+        let ch6_sum: f32 = buf[6 * g2..7 * g2].iter().sum();
+        assert_eq!(ch6_sum, 0.0);
+
+        let mut board = ZertzBoard::default();
+        board.play(ZertzMove::PlaceMarbleHalf {
+            color: Marble::White,
+            place_at: (0, 0),
+        }).unwrap();
+        encode_board(&board, &mut buf, &mut reserve);
+        // Channel 6 broadcast — every cell is 1.0.
+        for i in 0..g2 {
+            assert_eq!(buf[6 * g2 + i], 1.0, "ch6 cell {} expected 1.0", i);
+        }
     }
 }

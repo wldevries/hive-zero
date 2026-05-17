@@ -80,7 +80,7 @@ _H5_DATASETS = (
     "board_tensors", "reserve_vectors",
     "policy_targets",
     "value_targets",
-    "value_only", "capture_turn", "mid_capture_turn",
+    "value_only", "capture_turn", "mid_capture_turn", "mid_placement_turn",
 )
 
 
@@ -139,6 +139,16 @@ class ZertzDataset(Dataset):
                         f"Replay buffer policy format changed: stored {stored_policy_size} vs current {POLICY_SIZE}. "
                         f"Delete {h5path} to start fresh with the new format."
                     )
+                # The split-ply refactor (gen 230+, NUM_CHANNELS 6→7) widened
+                # the board tensor: stored channel count must match current
+                # encoder. Same fix as policy_size mismatch — delete + restart.
+                if "board_tensors" in self._h5file:
+                    stored_channels = int(self._h5file["board_tensors"].shape[1])
+                    if stored_channels != NUM_CHANNELS:
+                        raise ValueError(
+                            f"Replay buffer board encoding changed: stored {stored_channels} channels "
+                            f"vs current {NUM_CHANNELS}. Delete {h5path} to start fresh."
+                        )
                 self._count = int(self._h5file.attrs["count"])
                 self._size = int(self._h5file.attrs["size"])
                 print(f"  Replay buffer resumed: {self._size} samples from {h5path}")
@@ -158,13 +168,14 @@ class ZertzDataset(Dataset):
             self._size = 0
             _ds = lambda name, shape, dtype: _zeros(shape, dtype)
 
-        self.board_tensors    = _ds("board_tensors",    (max_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE), np.float32)
-        self.reserve_vectors  = _ds("reserve_vectors",  (max_size, RESERVE_SIZE),                       np.float32)
-        self.policy_targets   = _ds("policy_targets",   (max_size, POLICY_SIZE),                        np.float32)
-        self.value_targets    = _ds("value_targets",    (max_size,),                                    np.float32)
-        self.value_only       = _ds("value_only",       (max_size,),                                    np.bool_)
-        self.capture_turn     = _ds("capture_turn",     (max_size,),                                    np.bool_)
-        self.mid_capture_turn = _ds("mid_capture_turn", (max_size,),                                    np.bool_)
+        self.board_tensors      = _ds("board_tensors",      (max_size, NUM_CHANNELS, GRID_SIZE, GRID_SIZE), np.float32)
+        self.reserve_vectors    = _ds("reserve_vectors",    (max_size, RESERVE_SIZE),                       np.float32)
+        self.policy_targets     = _ds("policy_targets",     (max_size, POLICY_SIZE),                        np.float32)
+        self.value_targets      = _ds("value_targets",      (max_size,),                                    np.float32)
+        self.value_only         = _ds("value_only",         (max_size,),                                    np.bool_)
+        self.capture_turn       = _ds("capture_turn",       (max_size,),                                    np.bool_)
+        self.mid_capture_turn   = _ds("mid_capture_turn",   (max_size,),                                    np.bool_)
+        self.mid_placement_turn = _ds("mid_placement_turn", (max_size,),                                    np.bool_)
 
         if self._h5file is not None:
             self._h5file.flush()
@@ -249,21 +260,24 @@ class ZertzDataset(Dataset):
                   policy_targets: np.ndarray, value_targets: np.ndarray,
                   value_only: list[bool],
                   capture_turn: list[bool] | None = None,
-                  mid_capture_turn: list[bool] | None = None):
+                  mid_capture_turn: list[bool] | None = None,
+                  mid_placement_turn: list[bool] | None = None):
         n = board_tensors.shape[0]
-        boards   = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
-        vo_arr   = np.asarray(value_only, dtype=np.bool_)
-        ct_arr   = np.asarray(capture_turn, dtype=np.bool_) if capture_turn is not None else np.zeros(n, dtype=np.bool_)
-        mct_arr  = np.asarray(mid_capture_turn, dtype=np.bool_) if mid_capture_turn is not None else np.zeros(n, dtype=np.bool_)
+        boards    = board_tensors.reshape(n, NUM_CHANNELS, GRID_SIZE, GRID_SIZE)
+        vo_arr    = np.asarray(value_only, dtype=np.bool_)
+        ct_arr    = np.asarray(capture_turn, dtype=np.bool_) if capture_turn is not None else np.zeros(n, dtype=np.bool_)
+        mct_arr   = np.asarray(mid_capture_turn, dtype=np.bool_) if mid_capture_turn is not None else np.zeros(n, dtype=np.bool_)
+        mpt_arr   = np.asarray(mid_placement_turn, dtype=np.bool_) if mid_placement_turn is not None else np.zeros(n, dtype=np.bool_)
 
         pairs = [
-            (self.board_tensors,    boards),
-            (self.reserve_vectors,  reserve_vectors),
-            (self.policy_targets,   policy_targets),
-            (self.value_targets,    value_targets),
-            (self.value_only,       vo_arr),
-            (self.capture_turn,     ct_arr),
-            (self.mid_capture_turn, mct_arr),
+            (self.board_tensors,      boards),
+            (self.reserve_vectors,    reserve_vectors),
+            (self.policy_targets,     policy_targets),
+            (self.value_targets,      value_targets),
+            (self.value_only,         vo_arr),
+            (self.capture_turn,       ct_arr),
+            (self.mid_capture_turn,   mct_arr),
+            (self.mid_placement_turn, mpt_arr),
         ]
 
         start = self._count % self.max_size
@@ -318,6 +332,7 @@ class ZertzDataset(Dataset):
             torch.tensor(bool(self.value_only[base_idx]), dtype=torch.bool),
             torch.tensor(bool(self.capture_turn[base_idx]), dtype=torch.bool),
             torch.tensor(bool(self.mid_capture_turn[base_idx]), dtype=torch.bool),
+            torch.tensor(bool(self.mid_placement_turn[base_idx]), dtype=torch.bool),
             torch.tensor(sym, dtype=torch.int64),
         )
 
@@ -361,6 +376,7 @@ class ZertzDataset(Dataset):
         vo         = read(self.value_only)
         cap        = read(self.capture_turn)
         mcap       = read(self.mid_capture_turn)
+        mplace     = read(self.mid_placement_turn)
 
         out = []
         for i in range(n):
@@ -372,6 +388,7 @@ class ZertzDataset(Dataset):
                 torch.tensor(bool(vo[i]), dtype=torch.bool),
                 torch.tensor(bool(cap[i]), dtype=torch.bool),
                 torch.tensor(bool(mcap[i]), dtype=torch.bool),
+                torch.tensor(bool(mplace[i]), dtype=torch.bool),
                 torch.tensor(int(syms[i]), dtype=torch.int64),
             ))
         return out
@@ -536,7 +553,7 @@ class Trainer:
 
         device_type = self.device.type
         nb = self.device.type == "cuda"  # non_blocking only helps with pinned source
-        for board, reserve, policy_target, value_target, vo_mask, cap_mask, mid_cap_mask, sym_idx in tqdm(
+        for board, reserve, policy_target, value_target, vo_mask, cap_mask, mid_cap_mask, mid_place_mask, sym_idx in tqdm(
                 loader, desc="  Training", leave=False, unit="batch"):
             board = board.to(self.device, non_blocking=nb)
             reserve = reserve.to(self.device, non_blocking=nb)
@@ -545,6 +562,8 @@ class Trainer:
             vo_mask = vo_mask.to(self.device, non_blocking=nb)
             cap_mask = cap_mask.to(self.device, non_blocking=nb)
             mid_cap_mask = mid_cap_mask.to(self.device, non_blocking=nb)  # kept for value logging split
+            mid_place_mask = mid_place_mask.to(self.device, non_blocking=nb)
+            _ = mid_place_mask  # consumed only as a possible future logging split
             sym_idx = sym_idx.to(self.device, non_blocking=nb)
 
             # D6 symmetry augmentation runs here on GPU rather than per-sample

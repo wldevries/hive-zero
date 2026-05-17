@@ -10,7 +10,7 @@ from shared.nn.resblock import ResBlock
 from shared.nn.seresblock import SEResBlock
 
 # From Rust board encoding
-NUM_CHANNELS = 6
+NUM_CHANNELS = 7  # 0-3 marbles/empty, 4 capture-turn flag, 5 mid-capture src, 6 mid-placement flag
 GRID_SIZE = 7
 POLICY_SIZE = 490  # flat training storage: place_W/G/B/remove[4*49] + cap_dir[6*49]
 RESERVE_SIZE = 22
@@ -35,7 +35,7 @@ def _describe_trunk(trunk_spec: list[dict]) -> str:
 class ZertzNet(nn.Module):
     """AlphaZero-style network for Zertz with direction-based capture policy head.
 
-    Input:  (batch, 6, 7, 7) board tensor + (batch, 22) reserve vector
+    Input:  (batch, 7, 7, 7) board tensor + (batch, 22) reserve vector
     Output: place_logits (batch, 4*7*7),
             cap_dir_logits (batch, 6*7*7),
             value (batch, 1) in [-1, 1]
@@ -101,7 +101,7 @@ class ZertzNet(nn.Module):
         """
         # Broadcast reserve spatially and concat with board tensor
         r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, GRID_SIZE, GRID_SIZE)
-        x = torch.cat([board_tensor, r], dim=1)  # (B, 6+22, 7, 7)
+        x = torch.cat([board_tensor, r], dim=1)  # (B, 7+22, 7, 7)
 
         # Trunk
         x = F.relu(self.input_bn(self.input_conv(x)))
@@ -152,7 +152,7 @@ def save_checkpoint(model: ZertzNet, path: str, generation: int = 0,
 def export_onnx(model: ZertzNet, path: str):
     """Export model to ONNX format for Rust-native inference via ort.
 
-    Inputs: board_tensor (B, 6, 7, 7), reserve (B, 22)
+    Inputs: board_tensor (B, 7, 7, 7), reserve (B, 22)
     Outputs: place (B, 196), cap_dir (B, 294), value (B, 1)
     """
     import os

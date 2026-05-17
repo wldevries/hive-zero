@@ -160,6 +160,7 @@ pub struct PyZertzSelfPlayResult {
     value_only_flags: Vec<bool>,
     capture_turn_flags: Vec<bool>,
     mid_capture_turn_flags: Vec<bool>,
+    mid_placement_turn_flags: Vec<bool>,
     num_samples: usize,
     wins_p1: u32,
     wins_p2: u32,
@@ -187,12 +188,14 @@ pub struct PyZertzSelfPlayResult {
 
 #[pymethods]
 impl PyZertzSelfPlayResult {
-    /// Returns (boards, reserves, policies, values, value_only, capture_turn, mid_capture_turn)
+    /// Returns (boards, reserves, policies, values,
+    ///          value_only, capture_turn, mid_capture_turn, mid_placement_turn)
     fn training_data<'py>(&self, py: Python<'py>) -> (
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray2<f32>>,
         Bound<'py, PyArray1<f32>>,
+        Vec<bool>,
         Vec<bool>,
         Vec<bool>,
         Vec<bool>,
@@ -216,6 +219,7 @@ impl PyZertzSelfPlayResult {
             self.value_only_flags.clone(),
             self.capture_turn_flags.clone(),
             self.mid_capture_turn_flags.clone(),
+            self.mid_placement_turn_flags.clone(),
         )
     }
 
@@ -448,6 +452,7 @@ impl PyZertzSelfPlaySession {
             value_only_flags: r.value_only_flags,
             capture_turn_flags: r.capture_turn_flags,
             mid_capture_turn_flags: r.mid_capture_turn_flags,
+            mid_placement_turn_flags: r.mid_placement_turn_flags,
             num_samples: r.num_samples,
             wins_p1: r.wins_p1,
             wins_p2: r.wins_p2,

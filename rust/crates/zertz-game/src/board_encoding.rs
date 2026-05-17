@@ -2,13 +2,16 @@
 ///
 /// Grid: 7x7 (hex board rows 4-5-6-7-6-5-4 embedded left-aligned).
 ///
-/// Board channels (6 spatial):
+/// Board channels (7 spatial):
 ///   0: White marbles
 ///   1: Grey marbles
 ///   2: Black marbles
 ///   3: Empty rings (valid, unoccupied)
 ///   4: Capture turn flag (1.0 on all cells if first-hop capture or mid-capture)
 ///   5: Mid-capture source (1.0 at the active marble's position during mid-capture)
+///   6: Mid-placement flag (1.0 on all cells when a placement has put down a
+///      marble but the ring removal half-move has not yet been applied —
+///      legal moves are restricted to `RemoveRingHalf`)
 ///
 /// Supply and capture counts are in the reserve vector (see RESERVE_SIZE).
 
@@ -20,7 +23,7 @@ use crate::zertz::{Marble, Ring, ZertzBoard};
 const BOARD_SIZE: usize = crate::hex::BOARD_SIZE;
 
 pub const GRID_SIZE: usize = 7;
-pub const NUM_CHANNELS: usize = 6;
+pub const NUM_CHANNELS: usize = 7;
 
 /// Reserve vector (22 elements):
 ///   [0-2]:   supply_W/G/B normalized by initial supply (6, 8, 10)
@@ -84,6 +87,14 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut
     if let Some(pos) = board.mid_capture_pos() {
         let (row, col) = hex_to_grid(pos);
         board_out[5 * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col] = 1.0;
+    }
+
+    // Channel 6: mid-placement flag (broadcast)
+    if board.is_mid_placement() {
+        let ch6_start = 6 * GRID_SIZE * GRID_SIZE;
+        for i in 0..(GRID_SIZE * GRID_SIZE) {
+            board_out[ch6_start + i] = 1.0;
+        }
     }
 
     // Reserve vector: supply and captures normalized by initial supply per color

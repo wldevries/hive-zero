@@ -4,10 +4,12 @@
 /// Examples: "D4" (center), "A1" (top-left corner of col A).
 ///
 /// Move format:
-///   Place:     "W D4 C3"  (color, place-at, remove)
-///   PlaceOnly: "W D4"     (no ring removed — board edge or isolated)
-///   Capture:   "CAP D4 D6 D8"  (from, then each landing after each hop)
-///   Pass:      "pass"
+///   Place:           "W D4 C3"  (joint: color, place-at, remove)
+///   PlaceOnly:       "W D4"     (no ring removed — board edge or isolated)
+///   PlaceMarbleHalf: "PUT W D4" (split first half: place marble, ring removal pending)
+///   RemoveRingHalf:  "RM C3"    (split second half: remove ring)
+///   Capture:         "CAP D4 D6 D8"  (from, then each landing after each hop)
+///   Pass:            "pass"
 
 use crate::hex::{is_valid, Hex, RADIUS};
 use crate::zertz::{Marble, ZertzMove, MAX_CAPTURE_JUMPS};
@@ -48,6 +50,10 @@ pub fn move_to_str(mv: ZertzMove) -> String {
             format!("{} {} {}", color, hex_to_coord(place_at), hex_to_coord(remove)),
         ZertzMove::PlaceOnly { color, place_at } =>
             format!("{} {}", color, hex_to_coord(place_at)),
+        ZertzMove::PlaceMarbleHalf { color, place_at } =>
+            format!("PUT {} {}", color, hex_to_coord(place_at)),
+        ZertzMove::RemoveRingHalf { remove } =>
+            format!("RM {}", hex_to_coord(remove)),
         ZertzMove::Capture { jumps, len } => {
             let mut s = format!("CAP {}", hex_to_coord(jumps[0].0));
             for i in 0..len as usize {
@@ -94,6 +100,24 @@ pub fn str_to_move(s: &str) -> Result<ZertzMove, String> {
             Ok(ZertzMove::Capture { jumps, len: n_hops as u8 })
         }
         "PASS" => Ok(ZertzMove::Pass),
+        "PUT" => {
+            if parts.len() != 3 {
+                return Err("PUT needs color + place: PUT W D4".to_string());
+            }
+            let color = match parts[1].to_ascii_uppercase().as_str() {
+                "W" => Marble::White,
+                "G" => Marble::Grey,
+                "B" => Marble::Black,
+                other => return Err(format!("PUT color must be W/G/B, got '{}'", other)),
+            };
+            Ok(ZertzMove::PlaceMarbleHalf { color, place_at: coord_to_hex(parts[2])? })
+        }
+        "RM" => {
+            if parts.len() != 2 {
+                return Err("RM needs a coord: RM C3".to_string());
+            }
+            Ok(ZertzMove::RemoveRingHalf { remove: coord_to_hex(parts[1])? })
+        }
         "W" | "G" | "B" => {
             let color = match first.as_str() {
                 "W" => Marble::White,
