@@ -168,14 +168,19 @@ class UHPEngine:
             model = self.model
             device = self.device
 
-            def eval_fn(board_batch, reserve_batch):
-                b = torch.tensor(np.asarray(board_batch)).to(device)
-                r = torch.tensor(np.asarray(reserve_batch)).to(device)
+            def eval_fn(categoricals, positions, flags, mask):
+                cat = torch.from_numpy(np.asarray(categoricals)).to(device=device, dtype=torch.int64)
+                pos = torch.from_numpy(np.asarray(positions)).to(device=device, dtype=torch.int64)
+                flg = torch.from_numpy(np.asarray(flags)).to(device=device, dtype=torch.float32)
+                msk = torch.from_numpy(np.asarray(mask)).to(device=device, dtype=torch.bool)
                 with torch.no_grad():
-                    policy_logits, wdl_logits, _ = model(b, r)
+                    policy, wdl_logits, aux = model(cat, pos, flg, msk)
                     wdl = torch.softmax(wdl_logits, dim=1)
-                policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
-                return policy.astype(np.float32), wdl.cpu().numpy().astype(np.float32)
+                return (
+                    policy.float().cpu().numpy().astype(np.float32),
+                    wdl.cpu().numpy().astype(np.float32),
+                    aux.cpu().numpy().astype(np.float32),
+                )
 
             move_str = self.game.best_move(eval_fn, simulations=self.simulations)
 

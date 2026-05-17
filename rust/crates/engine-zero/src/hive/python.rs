@@ -1,94 +1,214 @@
-/// PyO3 Python bindings for hive.
+/// PyO3 Python bindings for Hive (token-based transformer architecture).
+///
+/// FFI contract for the inference callback (`eval_fn`):
+/// ```text
+///     eval_fn(
+///         categoricals : np.ndarray[B, L, 5]  uint8
+///         positions    : np.ndarray[B, L, 2]  int8
+///         flags        : np.ndarray[B, L, F]  float32
+///         mask         : np.ndarray[B, L]     bool
+///     ) -> (
+///         policy : np.ndarray[B, 2 * L * D]   float32  [Q || K] D-major
+///         wdl    : np.ndarray[B, 3]           float32
+///         aux    : np.ndarray[B, 6]           float32
+///     )
+/// ```
+/// `L = hive_game::tokenize::SEQ_LEN`, `D = hive_game::tokenize::BILINEAR_DIM`.
 
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods};
 
-use core_game::game::PolicyIndex;
-use core_game::mcts::search::{CpuctStrategy, ForcedExploration, RootNoise, SearchParams};
-
-use hive_game::board_encoding::{NUM_CHANNELS, RESERVE_SIZE};
-use super::inference::HiveInference;
-use hive_game::game::{self, Game};
-use hive_game::move_encoding;
-use hive_game::piece::{Piece, PieceColor, PieceType};
-use hive_game::search::{
-    best_move_core, mcts_root_stats_core, HiveTerminalKind,
+use core_game::mcts::search::{
+    CpuctStrategy, ForcedExploration, MctsSearch, RootNoise, SearchParams,
 };
 
-fn call_python_eval(
-    eval_fn: &Bound<'_, PyAny>,
-    boards: &[f32],
-    reserves: &[f32],
-    batch_size: usize,
-    grid_size: usize,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
-    let board_size = NUM_CHANNELS * grid_size * grid_size;
-    let board_arr = numpy::ndarray::Array2::from_shape_vec(
-        (batch_size, board_size),
-        boards.to_vec(),
-    ).map_err(|e| e.to_string())?;
-    let board_np = PyArray2::from_owned_array(eval_fn.py(), board_arr);
-    let board_4d = board_np
-        .reshape([batch_size, NUM_CHANNELS, grid_size, grid_size])
-        .map_err(|e| e.to_string())?;
+use hive_game::game::{self, Game, Move};
+use hive_game::piece::{Piece, PieceColor, PieceType};
+use hive_game::tokenize::{
+    self, TokenBatch, BILINEAR_DIM, F_FLAGS, SEQ_LEN,
+};
 
-    let reserve_arr = numpy::ndarray::Array2::from_shape_vec(
-        (batch_size, RESERVE_SIZE),
-        reserves.to_vec(),
-    ).map_err(|e| e.to_string())?;
-    let reserve_np = PyArray2::from_owned_array(eval_fn.py(), reserve_arr);
+// ---- Python callback bridge: TokenBatch ↔ numpy --------------------------
 
-    let result = eval_fn.call1((board_4d, reserve_np)).map_err(|e| e.to_string())?;
-    let tuple = result
-        .cast::<PyTuple>()
-        .map_err(|_| "eval_fn must return (policy, wdl)".to_string())?;
-    let policy = tuple
-        .get_item(0)
-        .map_err(|e| e.to_string())?
-        .cast::<PyArray2<f32>>()
-        .map_err(|e| e.to_string())?
-        .readonly();
-    let wdl_arr = tuple
-        .get_item(1)
-        .map_err(|e| e.to_string())?
-        .cast::<PyArray2<f32>>()
-        .map_err(|e| e.to_string())?
-        .readonly();
-    let wdl = wdl_arr.as_slice().map_err(|e| e.to_string())?;
-    // Split WDL into the zero-sum W−L scalar and the symmetric D probability so
-    // MCTS can backprop them separately and apply contempt only at evaluation
-    // time. Baking contempt into a scalar here would corrupt the draw component
-    // under the zero-sum sign-flip convention used in backprop.
-    let mut values = Vec::with_capacity(batch_size);
-    let mut draws = Vec::with_capacity(batch_size);
-    for i in 0..batch_size {
-        values.push(wdl[i * 3] - wdl[i * 3 + 2]);
-        draws.push(wdl[i * 3 + 1]);
+/// Pack a slice of token batches into the four-tensor numpy form the
+/// Python model expects.
+fn token_batches_to_numpy<'py>(
+    py: Python<'py>,
+    batches: &[TokenBatch],
+) -> PyResult<(
+    Bound<'py, PyArray3<u8>>,
+    Bound<'py, PyArray3<i8>>,
+    Bound<'py, PyArray3<f32>>,
+    Bound<'py, PyArray2<bool>>,
+)> {
+    let b = batches.len();
+    let l = SEQ_LEN;
+    let f = F_FLAGS;
+
+    // (B, L, 5) categoricals
+    let mut cat = vec![0u8; b * l * 5];
+    for (bi, t) in batches.iter().enumerate() {
+        let base = bi * l * 5;
+        for li in 0..l {
+            cat[base + li * 5 + 0] = t.kind[li];
+            cat[base + li * 5 + 1] = t.piece_type[li];
+            cat[base + li * 5 + 2] = t.color[li];
+            cat[base + li * 5 + 3] = t.stack_depth[li];
+            cat[base + li * 5 + 4] = t.count[li];
+        }
     }
+    let cat_arr = numpy::ndarray::Array3::from_shape_vec((b, l, 5), cat)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // (B, L, 2) positions
+    let mut pos = vec![0i8; b * l * 2];
+    for (bi, t) in batches.iter().enumerate() {
+        let base = bi * l * 2;
+        for li in 0..l {
+            pos[base + li * 2 + 0] = t.q[li];
+            pos[base + li * 2 + 1] = t.r[li];
+        }
+    }
+    let pos_arr = numpy::ndarray::Array3::from_shape_vec((b, l, 2), pos)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // (B, L, F) flags
+    let mut flg = vec![0f32; b * l * f];
+    for (bi, t) in batches.iter().enumerate() {
+        let base = bi * l * f;
+        flg[base..base + l * f].copy_from_slice(&t.flags);
+    }
+    let flg_arr = numpy::ndarray::Array3::from_shape_vec((b, l, f), flg)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // (B, L) mask
+    let mut msk = vec![false; b * l];
+    for (bi, t) in batches.iter().enumerate() {
+        let base = bi * l;
+        msk[base..base + l].copy_from_slice(&t.mask);
+    }
+    let msk_arr = numpy::ndarray::Array2::from_shape_vec((b, l), msk)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
     Ok((
-        policy.as_slice().map_err(|e| e.to_string())?.to_vec(),
-        values,
-        draws,
+        PyArray3::from_owned_array(py, cat_arr),
+        PyArray3::from_owned_array(py, pos_arr),
+        PyArray3::from_owned_array(py, flg_arr),
+        PyArray2::from_owned_array(py, msk_arr),
     ))
 }
 
-/// Create a 1D numpy array from a slice.
-fn make_array1<'py>(py: Python<'py>, data: &[f32]) -> Bound<'py, PyArray1<f32>> {
-    let arr = numpy::ndarray::Array1::from(data.to_vec());
+/// Invoke the Python `eval_fn` on a batch of token batches. Returns per-leaf
+/// (policy_flat, value, draw) — value = W − L; draw = D — to match the
+/// `(Vec<Vec<f32>>, Vec<f32>, Vec<f32>)` shape MCTS' expand_and_backprop wants.
+fn call_python_eval_tokens(
+    eval_fn: &Bound<'_, PyAny>,
+    batches: &[TokenBatch],
+) -> PyResult<(Vec<Vec<f32>>, Vec<f32>, Vec<f32>)> {
+    let py = eval_fn.py();
+    let (cat, pos, flg, msk) = token_batches_to_numpy(py, batches)?;
+    let result = eval_fn.call1((cat, pos, flg, msk))?;
+    let tuple = result
+        .cast::<PyTuple>()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err(
+            "eval_fn must return (policy, wdl, aux)",
+        ))?;
+    let policy = tuple.get_item(0)?.cast::<PyArray2<f32>>()
+        .map_err(|e| pyo3::exceptions::PyTypeError::new_err(e.to_string()))?
+        .readonly();
+    let wdl = tuple.get_item(1)?.cast::<PyArray2<f32>>()
+        .map_err(|e| pyo3::exceptions::PyTypeError::new_err(e.to_string()))?
+        .readonly();
+    let _aux = tuple.get_item(2).ok(); // tolerated but unused at inference
+
+    let policy_slice = policy.as_slice()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let wdl_slice = wdl.as_slice()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    let n = batches.len();
+    let pol_per = 2 * SEQ_LEN * BILINEAR_DIM;
+    let mut policies = Vec::with_capacity(n);
+    let mut values = Vec::with_capacity(n);
+    let mut draws = Vec::with_capacity(n);
+    for i in 0..n {
+        let start = i * pol_per;
+        policies.push(policy_slice[start..start + pol_per].to_vec());
+        // WDL → (W − L, D)
+        values.push(wdl_slice[i * 3] - wdl_slice[i * 3 + 2]);
+        draws.push(wdl_slice[i * 3 + 1]);
+    }
+    Ok((policies, values, draws))
+}
+
+// ---- token-aware best_move loop ------------------------------------------
+
+/// Run MCTS for `simulations` sims using the token-based eval callback and
+/// return the best move. Single-game, no pipelining — the caller drives one
+/// batch at a time.
+fn best_move_token(
+    game: &Game,
+    simulations: usize,
+    play_batch: usize,
+    params: &SearchParams,
+    eval_fn: &Bound<'_, PyAny>,
+) -> PyResult<Move> {
+    let mut search = MctsSearch::<Game>::new(simulations.saturating_add(64));
+
+    // Root expansion: tokenize once, evaluate, init the search.
+    let mut root_game = game.clone();
+    let (root_tokens, _) = tokenize::tokenize_and_priors(&mut root_game);
+    let (root_policies, _, _) = call_python_eval_tokens(eval_fn, &[root_tokens])?;
+    search.init(game, &root_policies[0]);
+
+    // Optional root noise.
+    if let RootNoise::Dirichlet { alpha, epsilon } = params.root_noise {
+        search.params = params.clone();
+        search.apply_root_dirichlet(alpha, epsilon);
+    } else {
+        search.params = params.clone();
+    }
+
+    let mut done = 0;
+    while done < simulations {
+        let want = play_batch.min(simulations - done);
+        let leaves = search.select_leaves(want);
+        if leaves.is_empty() {
+            done += want;
+            continue;
+        }
+        // Tokenize each non-terminal leaf via stashed_game.
+        let mut batches: Vec<TokenBatch> = Vec::with_capacity(leaves.len());
+        for &leaf in &leaves {
+            let mut g = search
+                .stashed_game(leaf)
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                    "stashed leaf missing during select_leaves"))?
+                .clone();
+            let (tb, _) = tokenize::tokenize_and_priors(&mut g);
+            batches.push(tb);
+        }
+        let (policies, values, draws) = call_python_eval_tokens(eval_fn, &batches)?;
+        search.expand_and_backprop(&policies, &values, &draws);
+        done += leaves.len();
+    }
+
+    Ok(search.best_move().unwrap_or(Move::pass()))
+}
+
+// ---- numpy helpers --------------------------------------------------------
+
+fn make_array1<'py, T: numpy::Element>(py: Python<'py>, data: Vec<T>) -> Bound<'py, PyArray1<T>> {
+    let arr = numpy::ndarray::Array1::from(data);
     PyArray1::from_owned_array(py, arr)
 }
 
-/// Create a 3D numpy array from a flat slice with shape.
-fn make_array3<'py>(py: Python<'py>, data: &[f32], d0: usize, d1: usize, d2: usize) -> Bound<'py, PyArray3<f32>> {
-    let arr = numpy::ndarray::Array3::from_shape_vec((d0, d1, d2), data.to_vec()).unwrap();
-    PyArray3::from_owned_array(py, arr)
-}
+// ---- PyGame: Rust Game exposed to Python ---------------------------------
 
-/// Rust Game exposed to Python.
 #[pyclass(name = "HiveGame")]
 pub struct PyGame {
-    pub game: game::Game,
+    pub game: Game,
 }
 
 #[pymethods]
@@ -102,7 +222,8 @@ impl PyGame {
         }
         if grid_size > hive_game::board::GRID_SIZE {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("grid_size {grid_size} exceeds max board size {}", hive_game::board::GRID_SIZE)));
+                format!("grid_size {grid_size} exceeds max board size {}",
+                        hive_game::board::GRID_SIZE)));
         }
         let game = if tournament_mode {
             game::Game::new_tournament_with_grid_size(grid_size)
@@ -112,26 +233,18 @@ impl PyGame {
         Ok(PyGame { game })
     }
 
-    /// Deep copy.
     fn copy(&self) -> PyGame {
         PyGame { game: self.game.clone() }
     }
 
     #[getter]
-    fn tournament_mode(&self) -> bool {
-        self.game.tournament_mode
-    }
-
-    /// Game state as string.
-    #[getter]
-    fn state(&self) -> &str {
-        self.game.state.as_str()
-    }
+    fn tournament_mode(&self) -> bool { self.game.tournament_mode }
 
     #[getter]
-    fn is_game_over(&self) -> bool {
-        self.game.is_game_over()
-    }
+    fn state(&self) -> &str { self.game.state.as_str() }
+
+    #[getter]
+    fn is_game_over(&self) -> bool { self.game.is_game_over() }
 
     #[getter]
     fn turn_color(&self) -> &str {
@@ -142,26 +255,21 @@ impl PyGame {
     }
 
     #[getter]
-    fn turn_number(&self) -> u16 {
-        self.game.turn_number
-    }
+    fn turn_number(&self) -> u16 { self.game.turn_number }
 
     #[getter]
-    fn move_count(&self) -> u16 {
-        self.game.move_count
-    }
+    fn move_count(&self) -> u16 { self.game.move_count }
 
-    /// Get all valid moves as list of (piece_str, from_pos_or_None, to_pos).
+    #[getter]
+    fn grid_size(&self) -> usize { self.game.nn_grid_size }
+
     fn valid_moves(&mut self) -> Vec<(String, Option<(i8, i8)>, (i8, i8))> {
         self.game.valid_moves().iter().map(|mv| {
             let piece_str = mv.piece.unwrap().to_uhp_string();
-            let from = mv.from;
-            let to = mv.to.unwrap();
-            (piece_str, from, to)
+            (piece_str, mv.from, mv.to.unwrap())
         }).collect()
     }
 
-    /// Play a move.
     #[pyo3(signature = (piece_str, from_pos, to_pos))]
     fn play_move(&mut self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) {
         let piece = Piece::from_str(piece_str).expect("invalid piece string");
@@ -172,124 +280,130 @@ impl PyGame {
         self.game.play_move(&mv).unwrap();
     }
 
-    /// Play a pass.
-    fn play_pass(&mut self) {
-        self.game.play_pass();
+    fn play_pass(&mut self) { self.game.play_pass(); }
+    fn undo(&mut self) { self.game.undo(); }
+
+    /// Encode the current position as a token batch.
+    /// Returns `(categoricals[L, 5] uint8, positions[L, 2] int8,
+    ///          flags[L, F] float32, mask[L] bool)`.
+    fn encode_tokens<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, PyArray2<u8>>,
+        Bound<'py, PyArray2<i8>>,
+        Bound<'py, PyArray2<f32>>,
+        Bound<'py, PyArray1<bool>>,
+    )> {
+        let (tb, _) = tokenize::tokenize_and_priors(&mut self.game);
+        // Re-pack from per-field Vecs into (L, K) arrays.
+        let mut cat = vec![0u8; SEQ_LEN * 5];
+        for li in 0..SEQ_LEN {
+            cat[li * 5 + 0] = tb.kind[li];
+            cat[li * 5 + 1] = tb.piece_type[li];
+            cat[li * 5 + 2] = tb.color[li];
+            cat[li * 5 + 3] = tb.stack_depth[li];
+            cat[li * 5 + 4] = tb.count[li];
+        }
+        let cat_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, 5), cat)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let mut pos = vec![0i8; SEQ_LEN * 2];
+        for li in 0..SEQ_LEN {
+            pos[li * 2 + 0] = tb.q[li];
+            pos[li * 2 + 1] = tb.r[li];
+        }
+        let pos_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, 2), pos)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let flg_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, F_FLAGS), tb.flags)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok((
+            PyArray2::from_owned_array(py, cat_arr),
+            PyArray2::from_owned_array(py, pos_arr),
+            PyArray2::from_owned_array(py, flg_arr),
+            make_array1(py, tb.mask),
+        ))
     }
 
-    /// Undo last move.
-    fn undo(&mut self) {
-        self.game.undo();
-    }
-
-    /// Encode board state as numpy arrays.
-    /// Returns (board_tensor[C,H,W], reserve_vector[10]).
-    fn encode_board<'py>(&self, py: Python<'py>) -> (Bound<'py, PyArray3<f32>>, Bound<'py, PyArray1<f32>>) {
-        let gs = self.game.nn_grid_size;
-        let mut board_data = vec![0.0f32; NUM_CHANNELS * gs * gs];
-        let mut reserve_data = vec![0.0f32; RESERVE_SIZE];
-        hive_game::board_encoding::encode_board(&self.game, &mut board_data, &mut reserve_data, gs);
-
-        let board_tensor = make_array3(py, &board_data, NUM_CHANNELS, gs, gs);
-        let reserve_vec = make_array1(py, &reserve_data);
-        (board_tensor, reserve_vec)
-    }
-
-    /// Get the NN encoding grid size.
-    #[getter]
-    fn grid_size(&self) -> usize {
-        self.game.nn_grid_size
-    }
-
-    /// Get legal move mask and indexed moves.
-    /// Returns (mask, moves) where each move has:
-    ///   (primary_idx, secondary_idx_or_none, piece_str, from_pos, to_pos)
-    /// Placements: secondary = None (Single index).
-    /// Movements:  secondary = Some(dst_idx) (Sum of src + dst indices).
-    fn get_legal_move_mask<'py>(
-        &mut self, py: Python<'py>
-    ) -> (Bound<'py, PyArray1<f32>>, Vec<(usize, Option<usize>, String, Option<(i8, i8)>, (i8, i8))>) {
+    /// Tokenize the current position and also return per-legal-move slot pairs.
+    ///
+    /// Returns `(categoricals, positions, flags, mask, moves)` where each
+    /// entry of `moves` is `(mover_slot, dest_slot, piece_uhp, from_or_None,
+    /// to)`. This is the entry point training-data writers will use to
+    /// translate MCTS visit distributions into (mover, dest) token-pair
+    /// targets.
+    fn encode_tokens_with_moves<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, PyArray2<u8>>,
+        Bound<'py, PyArray2<i8>>,
+        Bound<'py, PyArray2<f32>>,
+        Bound<'py, PyArray1<bool>>,
+        Vec<(usize, usize, String, Option<(i8, i8)>, (i8, i8))>,
+    )> {
         use core_game::game::PolicyIndex;
-        let gs = self.game.nn_grid_size;
-        let (mask, indexed_moves) = move_encoding::get_legal_move_mask(&mut self.game, gs);
-        let mask_array = make_array1(py, &mask);
-        let moves_list: Vec<_> = indexed_moves.iter().map(|(enc, mv)| {
-            let piece_str = mv.piece.unwrap().to_uhp_string();
-            let (primary, secondary) = match *enc {
-                PolicyIndex::Single(idx) => (idx, None),
-                PolicyIndex::Sum(a, b) => (a, Some(b)),
-                PolicyIndex::DotProduct { src_cell, dst_cell, .. } => (src_cell, Some(dst_cell)),
+        let (tb, indexed) = tokenize::tokenize_and_priors(&mut self.game);
+
+        let mut cat = vec![0u8; SEQ_LEN * 5];
+        for li in 0..SEQ_LEN {
+            cat[li * 5 + 0] = tb.kind[li];
+            cat[li * 5 + 1] = tb.piece_type[li];
+            cat[li * 5 + 2] = tb.color[li];
+            cat[li * 5 + 3] = tb.stack_depth[li];
+            cat[li * 5 + 4] = tb.count[li];
+        }
+        let cat_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, 5), cat)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let mut pos = vec![0i8; SEQ_LEN * 2];
+        for li in 0..SEQ_LEN {
+            pos[li * 2 + 0] = tb.q[li];
+            pos[li * 2 + 1] = tb.r[li];
+        }
+        let pos_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, 2), pos)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let flg_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, F_FLAGS), tb.flags)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let moves: Vec<_> = indexed.iter().map(|(enc, mv)| {
+            let (mover_slot, dest_slot) = match *enc {
+                PolicyIndex::DotProduct { src_cell, dst_cell, .. } => (src_cell, dst_cell),
+                _ => unreachable!("tokenize must emit DotProduct"),
             };
-            (primary, secondary, piece_str, mv.from, mv.to.unwrap())
+            (mover_slot, dest_slot, mv.piece.unwrap().to_uhp_string(), mv.from, mv.to.unwrap())
         }).collect();
-        (mask_array, moves_list)
+        Ok((
+            PyArray2::from_owned_array(py, cat_arr),
+            PyArray2::from_owned_array(py, pos_arr),
+            PyArray2::from_owned_array(py, flg_arr),
+            make_array1(py, tb.mask),
+            moves,
+        ))
     }
 
-    /// Encode a placement move as flat policy index. Returns -1 if out of grid.
-    /// For movement encoding use encode_move instead.
-    #[pyo3(signature = (piece_str, to_pos))]
-    fn encode_placement(&self, piece_str: &str, to_pos: (i8, i8)) -> i64 {
-        let piece = Piece::from_str(piece_str).expect("invalid piece string");
-        match move_encoding::encode_placement_flat(piece, to_pos, self.game.nn_grid_size) {
-            Some(idx) => idx as i64,
-            None => -1,
-        }
-    }
-
-    /// Encode any move as (primary_idx, secondary_idx).
-    /// For placements: returns (flat_idx, -1) where flat_idx ∈ [0, 5*G²). Returns (-1, -1) if out of grid.
-    /// For movements: returns (src_cell, dst_cell) where both are flat cell indices ∈ [0, G²).
-    ///   Returns (-1, -1) if out of grid or non-base piece.
-    #[pyo3(signature = (piece_str, from_pos, to_pos))]
-    fn encode_move(&self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) -> (i64, i64) {
-        let piece = Piece::from_str(piece_str).expect("invalid piece string");
-        let gs = self.game.nn_grid_size;
-        if let Some(from) = from_pos {
-            match move_encoding::encode_movement(from, piece, to_pos, gs) {
-                Some(PolicyIndex::DotProduct { src_cell, dst_cell, .. }) => (src_cell as i64, dst_cell as i64),
-                _ => (-1, -1),
-            }
-        } else {
-            match move_encoding::encode_placement_flat(piece, to_pos, gs) {
-                Some(idx) => (idx as i64, -1),
-                None => (-1, -1),
-            }
-        }
-    }
-
-    /// Check if piece is in reserve.
     fn reserve_has(&self, piece_str: &str) -> bool {
         let piece = Piece::from_str(piece_str).expect("invalid piece string");
         self.game.reserve_has(piece)
     }
 
-    /// Get reserve count for a piece type.
     fn reserve_count(&self, color: &str, piece_type: &str) -> u8 {
         let c = match color {
             "w" => PieceColor::White,
             "b" => PieceColor::Black,
             _ => panic!("invalid color"),
         };
-        let pt = PieceType::from_char(piece_type.chars().next().unwrap()).expect("invalid piece type");
+        let pt = PieceType::from_char(piece_type.chars().next().unwrap())
+            .expect("invalid piece type");
         self.game.reserve_count(c, pt)
     }
 
-    /// Get turn string like "White[1]".
-    fn turn_string(&self) -> String {
-        self.game.turn_string()
-    }
+    fn turn_string(&self) -> String { self.game.turn_string() }
 
-    /// All (hex, top_piece_str) pairs for occupied positions.
-    /// Returns list of ((q, r), piece_str) e.g. [((0, 0), "wQ"), ((-1, 0), "bA1")].
     fn all_top_pieces(&self) -> Vec<((i8, i8), String)> {
         self.game.board.all_top_pieces().iter().map(|(hex, piece)| {
             (*hex, piece.to_uhp_string())
         }).collect()
     }
 
-    /// Board dimension stats over occupied hexes (axial coords q, r, s=-q-r).
-    /// Returns (max_abs_q, max_abs_r, max_abs_s, span_q, span_r, span_s).
-    /// Returns all zeros if the board is empty.
     fn board_dims(&self) -> (i32, i32, i32, i32, i32, i32) {
         let mut min_q = i32::MAX; let mut max_q = i32::MIN;
         let mut min_r = i32::MAX; let mut max_r = i32::MIN;
@@ -309,34 +423,22 @@ impl PyGame {
         (max_abs_q, max_abs_r, max_abs_s, max_q - min_q, max_r - min_r, max_s - min_s)
     }
 
-    /// Full stack at a position (bottom to top) as list of piece strings.
     #[pyo3(signature = (q, r))]
     fn stack_at(&self, q: i8, r: i8) -> Vec<String> {
         let slot = self.game.board.stack_at((q, r));
         slot.iter().map(|p| p.to_uhp_string()).collect()
     }
 
-    /// Render the board as ANSI-coloured flat-top hex ASCII art.
-    /// Automatically highlights the last move: destination in orange, source in gray.
-    /// Coordinates are adjusted using the last move's recentering shift.
     fn render_board(&self) -> String {
         let (source, highlight) = self.game.last_move_display_coords();
         self.game.board.render(highlight, source)
     }
 
-    /// Heuristic value for unfinished games.
-    /// Returns (white_score, black_score) based on queen pressure.
-    fn evaluate(&self) -> (f32, f32) {
-        self.game.evaluate()
-    }
+    fn evaluate(&self) -> (f32, f32) { self.game.evaluate() }
 
-    /// UHP GameString: "Base;State;Turn;move1;move2;..."
     #[getter]
-    fn game_string(&self) -> String {
-        self.game.game_string()
-    }
+    fn game_string(&self) -> String { self.game.game_string() }
 
-    /// Format a move as UHP MoveString in the current game context.
     #[pyo3(signature = (piece_str, from_pos, to_pos))]
     fn format_move_uhp(&self, piece_str: &str, from_pos: Option<(i8, i8)>, to_pos: (i8, i8)) -> String {
         let piece = Piece::from_str(piece_str).expect("invalid piece string");
@@ -347,25 +449,29 @@ impl PyGame {
         hive_game::uhp::format_move_uhp(&self.game, &mv)
     }
 
-    /// Play a move given a UHP move string (e.g. "wQ", "wS1 wA1-", "pass").
-    /// Parses the reference piece and direction to resolve the target hex, then
-    /// finds and plays the matching valid move.
-    /// Returns True if the move was found and played, False if not valid.
     fn play_move_uhp(&mut self, move_str: &str) -> bool {
         hive_game::uhp::parse_and_play_uhp(&mut self.game, move_str)
     }
 
-    /// Recentering shift (dq, dr) applied to all pieces by the last move.
-    /// Accumulate these to convert current-frame axial coords back to SGF-frame coords.
-    fn last_recenter_shift(&self) -> (i8, i8) {
-        self.game.last_recenter_shift()
-    }
+    fn last_recenter_shift(&self) -> (i8, i8) { self.game.last_recenter_shift() }
 
     /// Run MCTS for `simulations` sims and return the best move as a UHP string.
-    /// eval_fn(board_4d[N, C, H, W], reserve[N, R]) -> (policy[N, P], wdl[N, 3])
-    /// `dir_alpha`/`dir_epsilon` default to 0 (no noise → deterministic). Set
-    /// both >0 to add Dirichlet noise at the root for diversity.
-    #[pyo3(signature = (eval_fn, simulations=800, c_puct=1.5, draw_contempt=0.0, dir_alpha=0.0, dir_epsilon=0.0))]
+    ///
+    /// `eval_fn(categoricals[B, L, 5] uint8, positions[B, L, 2] int8,
+    ///          flags[B, L, F] float32, mask[B, L] bool) ->
+    ///          (policy[B, 2*L*D] float32, wdl[B, 3] float32, aux[B, 6] float32)`
+    ///
+    /// `play_batch` controls how many leaves are selected and evaluated per
+    /// inference call (typical: 8–32 for batched GPU efficiency).
+    #[pyo3(signature = (
+        eval_fn,
+        simulations=800,
+        c_puct=1.5,
+        draw_contempt=0.0,
+        dir_alpha=0.0,
+        dir_epsilon=0.0,
+        play_batch=8,
+    ))]
     fn best_move(
         &mut self,
         _py: Python<'_>,
@@ -375,6 +481,7 @@ impl PyGame {
         draw_contempt: f32,
         dir_alpha: f32,
         dir_epsilon: f32,
+        play_batch: usize,
     ) -> PyResult<String> {
         if self.game.is_game_over() {
             return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
@@ -383,23 +490,19 @@ impl PyGame {
             return Ok("pass".to_string());
         }
 
-        let gs = self.game.nn_grid_size;
-        let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
-            call_python_eval(eval_fn, boards, reserves, batch_size, gs)
-        });
         let root_noise = if dir_alpha > 0.0 && dir_epsilon > 0.0 {
             RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon }
         } else {
             RootNoise::None
         };
-        let mut search_params = SearchParams::new(
+        let mut params = SearchParams::new(
             CpuctStrategy::Constant { c_puct },
             ForcedExploration::None,
             root_noise,
         );
-        search_params.draw_contempt = draw_contempt;
-        let best = best_move_core(&self.game, simulations, &search_params, core_eval)
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        params.draw_contempt = draw_contempt;
+
+        let best = best_move_token(&self.game, simulations, play_batch.max(1), &params, eval_fn)?;
         Ok(if best.piece.is_none() {
             "pass".to_string()
         } else {
@@ -408,8 +511,7 @@ impl PyGame {
     }
 
     /// Run alphabeta search to the given depth using the built-in heuristic
-    /// evaluation, returning the best move as a UHP string. No NN involved —
-    /// useful for fast best-move queries and as a self-play opponent.
+    /// evaluation, returning the best move as a UHP string. No NN involved.
     #[pyo3(signature = (depth=3))]
     fn best_move_alphabeta(&mut self, depth: u32) -> PyResult<String> {
         if self.game.is_game_over() {
@@ -426,206 +528,33 @@ impl PyGame {
         })
     }
 
-    /// Run MCTS using a pre-loaded ORT/QNN session (no Python eval callback).
-    /// Use `HiveOrtSession` to load the session once; reuse it across calls.
-    /// `dir_alpha`/`dir_epsilon` default to 0 (no noise → deterministic). Set
-    /// both >0 to add Dirichlet noise at the root for diversity.
-    #[pyo3(signature = (ort_session, simulations=800, c_puct=1.5, draw_contempt=0.0, dir_alpha=0.0, dir_epsilon=0.0))]
+    /// Run MCTS using a pre-loaded ORT/QNN session — DEFERRED for the token
+    /// architecture. Phase G (ORT) will reimplement this.
+    #[pyo3(signature = (_ort_session, _simulations=800, _c_puct=1.5, _draw_contempt=0.0,
+                       _dir_alpha=0.0, _dir_epsilon=0.0, _play_batch=8))]
     fn best_move_ort(
         &mut self,
-        ort_session: &mut PyHiveOrtSession,
-        simulations: usize,
-        c_puct: f32,
-        draw_contempt: f32,
-        dir_alpha: f32,
-        dir_epsilon: f32,
+        _ort_session: Bound<'_, PyAny>,
+        _simulations: usize,
+        _c_puct: f32,
+        _draw_contempt: f32,
+        _dir_alpha: f32,
+        _dir_epsilon: f32,
+        _play_batch: usize,
     ) -> PyResult<String> {
-        if self.game.is_game_over() {
-            return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
-        }
-        if self.game.valid_moves().is_empty() {
-            return Ok("pass".to_string());
-        }
-
-        let gs = self.game.nn_grid_size;
-        let engine = &mut ort_session.engine;
-        let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
-            engine
-                .infer_batch(boards, reserves, batch_size, NUM_CHANNELS, gs, RESERVE_SIZE)
-                .map(|r: super::inference::HiveInferenceResult| {
-                    // Split WDL into W−L (zero-sum) and D (symmetric); contempt
-                    // is applied at value() time inside MCTS, not baked here.
-                    let mut values = Vec::with_capacity(batch_size);
-                    let mut draws = Vec::with_capacity(batch_size);
-                    for i in 0..batch_size {
-                        values.push(r.wdl[i * 3] - r.wdl[i * 3 + 2]);
-                        draws.push(r.wdl[i * 3 + 1]);
-                    }
-                    (r.policy, values, draws)
-                })
-                .map_err(|e| e.to_string())
-        });
-        let root_noise = if dir_alpha > 0.0 && dir_epsilon > 0.0 {
-            RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon }
-        } else {
-            RootNoise::None
-        };
-        let mut search_params = SearchParams::new(
-            CpuctStrategy::Constant { c_puct },
-            ForcedExploration::None,
-            root_noise,
-        );
-        search_params.draw_contempt = draw_contempt;
-        let best = best_move_core(&self.game, simulations, &search_params, core_eval)
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        Ok(if best.piece.is_none() {
-            "pass".to_string()
-        } else {
-            hive_game::uhp::format_move_uhp(&self.game, &best)
-        })
-    }
-
-    /// Diagnostic: run MCTS at the current position and return per-root-child
-    /// stats (visit count, Q from root POV, raw policy prior, terminal kind).
-    /// Mirrors `best_move_ort`'s search path but exposes the full distribution
-    /// instead of just the best move. `forced_playouts=true` switches to the
-    /// KataGo-style soft forced-exploration that self-play uses (selection_k=0.5).
-    #[pyo3(signature = (
-        ort_session,
-        simulations=800,
-        c_puct=1.5,
-        forced_playouts=false,
-        draw_contempt=0.0,
-        dir_alpha=0.0,
-        dir_epsilon=0.0,
-        play_batch_size=8,
-    ))]
-    fn mcts_root_stats(
-        &mut self,
-        ort_session: &mut PyHiveOrtSession,
-        simulations: usize,
-        c_puct: f32,
-        forced_playouts: bool,
-        draw_contempt: f32,
-        dir_alpha: f32,
-        dir_epsilon: f32,
-        play_batch_size: usize,
-    ) -> PyResult<PyMctsRootStats> {
-        if self.game.is_game_over() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Game is already over",
-            ));
-        }
-        if self.game.clone().valid_moves().is_empty() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Only pass is legal at root",
-            ));
-        }
-
-        let gs = self.game.nn_grid_size;
-        let engine = &mut ort_session.engine;
-        let core_eval: hive_game::search::EvalFn<'_> = Box::new(move |boards, reserves, batch_size| {
-            engine
-                .infer_batch(boards, reserves, batch_size, NUM_CHANNELS, gs, RESERVE_SIZE)
-                .map(|r: super::inference::HiveInferenceResult| {
-                    let mut values = Vec::with_capacity(batch_size);
-                    let mut draws = Vec::with_capacity(batch_size);
-                    for i in 0..batch_size {
-                        values.push(r.wdl[i * 3] - r.wdl[i * 3 + 2]);
-                        draws.push(r.wdl[i * 3 + 1]);
-                    }
-                    (r.policy, values, draws)
-                })
-                .map_err(|e| e.to_string())
-        });
-
-        let root_noise = if dir_alpha > 0.0 && dir_epsilon > 0.0 {
-            RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon }
-        } else {
-            RootNoise::None
-        };
-        let forced = if forced_playouts {
-            ForcedExploration::Soft { selection_k: 0.5, pruning_k: 2.0 }
-        } else {
-            ForcedExploration::None
-        };
-        let mut search_params = SearchParams::new(
-            CpuctStrategy::Constant { c_puct },
-            forced,
-            root_noise,
-        );
-        search_params.draw_contempt = draw_contempt;
-
-        let stats = mcts_root_stats_core(
-            &self.game,
-            simulations,
-            &search_params,
-            play_batch_size,
-            core_eval,
-        )
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-
-        let children = stats
-            .children
-            .into_iter()
-            .map(|c| PyMctsChildStat {
-                uhp_move: c.uhp_move,
-                visits: c.visit_count,
-                value: c.value,
-                prior: c.policy_prior,
-                terminal: terminal_kind_str(c.terminal).to_string(),
-            })
-            .collect();
-
-        Ok(PyMctsRootStats {
-            root_visits: stats.root_visit_count,
-            root_value: stats.root_value_raw,
-            children,
-        })
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "best_move_ort is not yet ported to the token architecture (Phase G)",
+        ))
     }
 }
 
-fn terminal_kind_str(k: HiveTerminalKind) -> &'static str {
-    match k {
-        HiveTerminalKind::NonTerminal => "ongoing",
-        HiveTerminalKind::WinForRoot => "win",
-        HiveTerminalKind::LossForRoot => "loss",
-        HiveTerminalKind::Draw => "draw",
-    }
-}
+// ---- module-level helpers exposed to Python ------------------------------
 
-/// One entry in `MctsRootStats.children`. `terminal` is one of
-/// "ongoing" / "win" / "loss" / "draw", from the root player's POV
-/// (a "loss" child is a suicide move that surrenders the game).
-#[pyclass(name = "MctsChildStat", get_all, skip_from_py_object)]
-#[derive(Clone)]
-pub struct PyMctsChildStat {
-    pub uhp_move: String,
-    pub visits: u32,
-    pub value: f32,
-    pub prior: f32,
-    pub terminal: String,
-}
-
-#[pyclass(name = "MctsRootStats", get_all)]
-pub struct PyMctsRootStats {
-    pub root_visits: u32,
-    /// Search-improved Q from the root player's perspective (no contempt).
-    pub root_value: f32,
-    pub children: Vec<PyMctsChildStat>,
-}
-
-/// Compute the 12 D6 symmetry gather-permutation tables for a grid_size x grid_size board.
-///
-/// Returns a list of 12 numpy arrays, each of shape (grid_size*grid_size,).
-/// perm[output_cell] = input_cell, or grid_size*grid_size (sentinel for out-of-bounds → zero).
 #[pyfunction]
 fn d6_grid_permutations<'py>(py: Python<'py>, grid_size: usize) -> Vec<Bound<'py, PyArray1<i64>>> {
     use core_game::symmetry::{D6Symmetry, Symmetry};
-
     let center = grid_size as i32 / 2;
     let num_cells = grid_size * grid_size;
-
     D6Symmetry::all().iter().map(|sym| {
         let mut perm = vec![num_cells as i64; num_cells];
         for row in 0..grid_size {
@@ -645,10 +574,47 @@ fn d6_grid_permutations<'py>(py: Python<'py>, grid_size: usize) -> Vec<Bound<'py
     }).collect()
 }
 
-/// Parse SGF content and return list of UHP move strings.
+/// 12 D6 axial-coordinate transform matrices, each (2, 2) int8 mapping
+/// `[q, r]^T → R · [q, r]^T`. Used by the training pipeline to permute
+/// per-token (q, r) positions during D6 symmetry augmentation.
+#[pyfunction]
+fn d6_axial_transforms<'py>(py: Python<'py>) -> Vec<Bound<'py, PyArray2<i8>>> {
+    use core_game::symmetry::{D6Symmetry, Symmetry};
+    D6Symmetry::all().iter().map(|sym| {
+        // Each row is the image of (1, 0) and (0, 1) under sym.
+        let (a, b) = sym.transform_hex(1, 0);
+        let (c, d) = sym.transform_hex(0, 1);
+        let mat: Vec<i8> = vec![a as i8, b as i8, c as i8, d as i8];
+        let arr = numpy::ndarray::Array2::from_shape_vec((2, 2), mat).unwrap();
+        PyArray2::from_owned_array(py, arr)
+    }).collect()
+}
+
+/// Hex direction permutation table for D6: shape (12, 6). Row `s` gives the
+/// permutation `pi` such that direction `d` maps to direction `pi[d]` under
+/// symmetry index `s`. Used by training to remap direction-keyed relative-bias
+/// buckets in HexRelativeBias.
 ///
-/// Rejects expansion-piece games (Mosquito/Ladybug/Pillbug) with a `ValueError`
-/// — base-only `Game` cannot store them and would panic on `linear_index`.
+/// Hex direction ordering matches `core_game::hex::HEX_DIRS`:
+///   0=E (1,0), 1=NE (1,-1), 2=NW (0,-1), 3=W (-1,0), 4=SW (-1,1), 5=SE (0,1)
+#[pyfunction]
+fn d6_direction_permutations<'py>(py: Python<'py>) -> Bound<'py, PyArray2<i8>> {
+    use core_game::hex::DIRECTIONS;
+    use core_game::symmetry::{D6Symmetry, Symmetry};
+    let mut table = vec![0i8; 12 * 6];
+    for (si, sym) in D6Symmetry::all().iter().enumerate() {
+        for (di, &(dq, dr)) in DIRECTIONS.iter().enumerate() {
+            let (mq, mr) = sym.transform_hex(dq as i32, dr as i32);
+            // Find which hex-dir index this matches.
+            let mapped = DIRECTIONS.iter().position(|&(q, r)| q as i32 == mq && r as i32 == mr)
+                .expect("hex dir image must be one of the 6 dirs");
+            table[si * 6 + di] = mapped as i8;
+        }
+    }
+    let arr = numpy::ndarray::Array2::from_shape_vec((12, 6), table).unwrap();
+    PyArray2::from_owned_array(py, arr)
+}
+
 #[pyfunction]
 fn parse_sgf_moves(content: &str) -> PyResult<Vec<String>> {
     if hive_game::sgf::game_type(content) != "base" {
@@ -668,33 +634,19 @@ fn parse_sgf_moves(content: &str) -> PyResult<Vec<String>> {
     Ok(moves)
 }
 
-/// A loaded ORT/QNN inference session for Hive, kept alive across `best_move_ort`
-/// calls so the QNN graph is compiled only once at construction time.
-///
-/// Export your model with a static batch size of 1 for QNN/HTP:
-///   `uv run python scripts/export_onnx.py model.pt --batch-size 1`
-#[pyclass(name = "HiveOrtSession")]
-pub struct PyHiveOrtSession {
-    engine: super::inference::HiveOrtEngine,
+/// Token vocabulary sizes exposed to Python so the training and self-play
+/// code doesn't have to duplicate the constants.
+#[pyfunction]
+fn token_vocab() -> (usize, usize, usize) {
+    (SEQ_LEN, F_FLAGS, BILINEAR_DIM)
 }
 
-#[pymethods]
-impl PyHiveOrtSession {
-    #[new]
-    fn new(onnx_path: String) -> PyResult<Self> {
-        let engine = super::inference::HiveOrtEngine::load(&onnx_path)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(PyHiveOrtSession { engine })
-    }
-}
-
-/// Register Python module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGame>()?;
-    m.add_class::<PyHiveOrtSession>()?;
-    m.add_class::<PyMctsRootStats>()?;
-    m.add_class::<PyMctsChildStat>()?;
     m.add_function(wrap_pyfunction!(parse_sgf_moves, m)?)?;
     m.add_function(wrap_pyfunction!(d6_grid_permutations, m)?)?;
+    m.add_function(wrap_pyfunction!(d6_axial_transforms, m)?)?;
+    m.add_function(wrap_pyfunction!(d6_direction_permutations, m)?)?;
+    m.add_function(wrap_pyfunction!(token_vocab, m)?)?;
     Ok(())
 }
