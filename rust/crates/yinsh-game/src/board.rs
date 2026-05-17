@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex};
+use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex, Priors};
 use core_game::symmetry::UnitSymmetry;
 
 use crate::hex::{
@@ -767,6 +767,12 @@ impl Game for YinshBoard {
     fn play_move(&mut self, mv: &YinshMove) -> Result<(), String> { self.apply_move(*mv) }
     fn pass_move() -> YinshMove { YinshMove::Pass }
     fn is_pass(mv: &YinshMove) -> bool { matches!(mv, YinshMove::Pass) }
+}
+
+impl Priors for YinshBoard {
+    fn legal_moves_with_priors(&mut self) -> Vec<(PolicyIndex, Self::Move)> {
+        <Self as NNGame>::get_legal_move_mask(self).1
+    }
 }
 
 impl NNGame for YinshBoard {

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex, Undoable};
+use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex, Priors, Undoable};
 
 use crate::hex::{
     self, hex_add, hex_neighbors, hex_to_index, index_to_hex, is_valid, Hex, DIRECTIONS,
@@ -1357,6 +1357,12 @@ impl Game for ZertzBoard {
 
     fn is_pass(mv: &ZertzMove) -> bool {
         matches!(mv, ZertzMove::Pass)
+    }
+}
+
+impl Priors for ZertzBoard {
+    fn legal_moves_with_priors(&mut self) -> Vec<(PolicyIndex, Self::Move)> {
+        <Self as NNGame>::get_legal_move_mask(self).1
     }
 }
 

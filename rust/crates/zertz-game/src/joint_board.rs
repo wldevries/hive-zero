@@ -16,7 +16,7 @@
 //! without ever leaving mid_placement set. V1's MCTS therefore navigates
 //! only the "between-turn" board states V1 was trained on.
 
-use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex, Undoable};
+use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex, Priors, Undoable};
 
 use crate::zertz::{ZertzBoard, ZertzMove};
 
@@ -80,6 +80,12 @@ impl Game for JointZertzBoard {
 
     fn is_pass(mv: &ZertzMove) -> bool {
         matches!(mv, ZertzMove::Pass)
+    }
+}
+
+impl Priors for JointZertzBoard {
+    fn legal_moves_with_priors(&mut self) -> Vec<(PolicyIndex, Self::Move)> {
+        <Self as NNGame>::get_legal_move_mask(self).1
     }
 }
 

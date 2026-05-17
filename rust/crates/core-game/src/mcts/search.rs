@@ -3,7 +3,7 @@
 
 use super::arena::{NodeArena, NodeId};
 use super::node::{MctsNode, Proven};
-use crate::game::{GameEngine, Outcome, Player, PolicyIndex};
+use crate::game::{NNGame, Outcome, Player, PolicyIndex, Priors};
 
 const DEFAULT_C_PUCT: f32 = 1.5;
 
@@ -437,7 +437,7 @@ pub fn terminal_value(outcome: Outcome, perspective: Player) -> (f32, f32) {
 /// Expand a node with a policy vector, adding children to the arena.
 /// `game` is the reconstructed game state at this node (not stored in the node).
 /// `max_children` caps how many children are created (top by softmaxed policy score).
-fn expand_with_policy<G: GameEngine>(
+fn expand_with_policy<G: Priors>(
     arena: &mut NodeArena<G::Move>,
     node_id: NodeId,
     game: &mut G,
@@ -452,7 +452,7 @@ fn expand_with_policy<G: GameEngine>(
     // `game.next_player()`. See the fix-up call there for the invariant.
     let child_turn = game.next_player().opposite();
 
-    let (_mask, indexed_moves) = game.get_legal_move_mask();
+    let indexed_moves = game.legal_moves_with_priors();
     if indexed_moves.is_empty() {
         // Pass — pass always alternates the turn.
         let child_id = arena.alloc(Some(node_id), G::pass_move(), 1.0, child_turn);
@@ -530,9 +530,10 @@ fn expand_with_policy<G: GameEngine>(
     arena.get_mut(node_id).child_count = keep as u16;
 }
 
-/// Single-game MCTS search engine, generic over any GameEngine.
-/// Game states are reconstructed by replaying moves from root_game.
-pub struct MctsSearch<G: GameEngine> {
+/// Single-game MCTS search engine, generic over any game that can produce
+/// per-move priors. Game states are reconstructed by replaying moves from
+/// root_game.
+pub struct MctsSearch<G: Priors> {
     arena: NodeArena<G::Move>,
     root: NodeId,
     root_game: Option<G>,
@@ -546,7 +547,7 @@ pub struct MctsSearch<G: GameEngine> {
     depth_count: u64,
 }
 
-impl<G: GameEngine> MctsSearch<G> {
+impl<G: Priors> MctsSearch<G> {
     pub fn new(capacity: usize) -> Self {
         MctsSearch {
             arena: NodeArena::new(capacity, G::pass_move()),
@@ -648,19 +649,23 @@ impl<G: GameEngine> MctsSearch<G> {
         leaf_ids
     }
 
-    /// Encode a stashed leaf's board state for NN evaluation.
-    /// The leaf must have been returned by a prior select_leaves call.
-    pub fn encode_leaf(&self, leaf: NodeId) -> (Vec<f32>, Vec<f32>) {
-        // Fast path: most recent stash entry (common when called right after select_leaves)
+    /// Borrow the reconstructed game state for a stashed leaf. Returns `None`
+    /// if the leaf isn't in the current stash (e.g. it was already
+    /// expand_and_backprop'd or it was a terminal handled immediately).
+    ///
+    /// Token-based callers (Hive) use this to run their own variable-shape
+    /// encoder on the leaf state; CNN-style callers use `encode_leaf` below
+    /// instead, which yields the canonical fixed-shape `(board, reserve)`
+    /// pair via `NNGame::encode_board`.
+    pub fn stashed_game(&self, leaf: NodeId) -> Option<&G> {
         if let Some((id, game)) = self.stashed_leaves.last() {
             if *id == leaf {
-                return Self::encode_game(game);
+                return Some(game);
             }
         }
         self.stashed_leaves.iter()
             .find(|(id, _)| *id == leaf)
-            .map(|(_, g)| Self::encode_game(g))
-            .expect("encode_leaf: leaf not found in stash — call select_leaves first")
+            .map(|(_, g)| g)
     }
 
     /// Get the player whose turn it is at a stashed leaf.
@@ -1166,6 +1171,20 @@ impl<G: GameEngine> MctsSearch<G> {
         -root.value_sum / n as f32
     }
 
+}
+
+/// CNN-style fixed-shape encoding helpers, available only for games that
+/// implement `NNGame`. Token-based games (Hive transformer) skip this and
+/// encode through `stashed_game` directly in their PyO3 layer.
+impl<G: NNGame> MctsSearch<G> {
+    /// Encode a stashed leaf's board state for NN evaluation.
+    /// The leaf must have been returned by a prior select_leaves call.
+    pub fn encode_leaf(&self, leaf: NodeId) -> (Vec<f32>, Vec<f32>) {
+        self.stashed_game(leaf)
+            .map(Self::encode_game)
+            .expect("encode_leaf: leaf not found in stash — call select_leaves first")
+    }
+
     /// Encode a game state for NN evaluation.
     pub fn encode_game(game: &G) -> (Vec<f32>, Vec<f32>) {
         let mut board = vec![0.0f32; game.board_tensor_size()];
@@ -1186,7 +1205,7 @@ mod tests {
     //! post-move `next_player`, not a hardcoded `parent.opposite()`.
 
     use super::*;
-    use crate::game::{Game, NNGame, Outcome, Player, PolicyIndex, Undoable};
+    use crate::game::{Game, NNGame, Outcome, Player, PolicyIndex, Priors, Undoable};
     use crate::symmetry::UnitSymmetry;
 
     /// Tiny synthetic game with a single legal move that *keeps* the player
@@ -1250,6 +1269,12 @@ mod tests {
             self.depth = d;
             self.player = p;
             self.last_mover = lm;
+        }
+    }
+
+    impl Priors for ChainGame {
+        fn legal_moves_with_priors(&mut self) -> Vec<(PolicyIndex, Self::Move)> {
+            <Self as NNGame>::get_legal_move_mask(self).1
         }
     }
 

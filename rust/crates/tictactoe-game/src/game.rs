@@ -1,4 +1,4 @@
-use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex, Undoable};
+use core_game::game::{Game, NNGame, Outcome, Player, PolicyIndex, Priors, Undoable};
 use core_game::symmetry::UnitSymmetry;
 
 pub const GRID_SIZE: usize = 3;
@@ -197,6 +197,12 @@ impl Undoable for TicTacToe {
         self.outcome = snap.outcome;
         self.move_count = snap.move_count;
         self.history = snap.history;
+    }
+}
+
+impl Priors for TicTacToe {
+    fn legal_moves_with_priors(&mut self) -> Vec<(PolicyIndex, Self::Move)> {
+        <Self as NNGame>::get_legal_move_mask(self).1
     }
 }
 

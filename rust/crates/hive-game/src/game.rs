@@ -6,7 +6,7 @@ use crate::piece::{Piece, PieceColor, PieceType, PIECE_COUNTS, ALL_PIECE_TYPES, 
 use crate::rules::{get_moves, get_placements};
 use std::collections::HashMap;
 
-use core_game::game::{Game as GameTrait, NNGame, Player, Outcome, PolicyIndex};
+use core_game::game::{Game as GameTrait, NNGame, Player, Outcome, PolicyIndex, Priors};
 use core_game::symmetry::D6Symmetry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -844,6 +844,12 @@ impl GameTrait for Game {
 
     fn is_pass(mv: &Move) -> bool {
         mv.is_pass()
+    }
+}
+
+impl Priors for Game {
+    fn legal_moves_with_priors(&mut self) -> Vec<(PolicyIndex, Self::Move)> {
+        <Self as NNGame>::get_legal_move_mask(self).1
     }
 }
 

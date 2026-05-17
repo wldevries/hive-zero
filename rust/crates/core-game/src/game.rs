@@ -77,8 +77,19 @@ pub enum PolicyIndex {
     },
 }
 
+/// Minimal trait MCTS needs to expand a node: enumerate legal moves, each tagged
+/// with a `PolicyIndex` describing how to look up its prior in the flat policy
+/// vector the NN returned. Decoupled from `NNGame`'s fixed-shape encoding so
+/// games with variable-length encodings (e.g. token-based Hive) can drive MCTS
+/// without lying about their tensor shape.
+pub trait Priors: Game {
+    fn legal_moves_with_priors(&mut self) -> Vec<(PolicyIndex, Self::Move)>;
+}
+
 /// Neural network encoding trait — tensor encoding and policy masks for AlphaZero training.
-pub trait NNGame: Game {
+/// Used by games whose NN input is a fixed-shape `(BOARD_CHANNELS, G, G)` tensor
+/// plus a reserve vector (Zertz, Yinsh, TicTacToe, legacy CNN Hive).
+pub trait NNGame: Priors {
     /// Number of channels in the board tensor encoding.
     const BOARD_CHANNELS: usize;
     /// Size of the reserve/auxiliary input vector.
