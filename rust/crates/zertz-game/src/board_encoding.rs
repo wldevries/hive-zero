@@ -2,13 +2,16 @@
 ///
 /// Grid: 7x7 (hex board rows 4-5-6-7-6-5-4 embedded left-aligned).
 ///
-/// Board channels (6 spatial):
+/// Board channels (7 spatial):
 ///   0: White marbles
 ///   1: Grey marbles
 ///   2: Black marbles
 ///   3: Empty rings (valid, unoccupied)
 ///   4: Capture turn flag (1.0 on all cells if first-hop capture or mid-capture)
 ///   5: Mid-capture source (1.0 at the active marble's position during mid-capture)
+///   6: Mid-placement flag (1.0 on all cells when a placement has put down a
+///      marble but the ring removal half-move has not yet been applied —
+///      legal moves are restricted to `RemoveRingHalf`)
 ///
 /// Supply and capture counts are in the reserve vector (see RESERVE_SIZE).
 
@@ -20,7 +23,12 @@ use crate::zertz::{Marble, Ring, ZertzBoard};
 const BOARD_SIZE: usize = crate::hex::BOARD_SIZE;
 
 pub const GRID_SIZE: usize = 7;
-pub const NUM_CHANNELS: usize = 6;
+pub const NUM_CHANNELS: usize = 7;
+/// V1 (pre-split-ply) board channel count — same as V2 minus the
+/// mid_placement flag on channel 6. Used by `JointZertzBoard` so V1
+/// checkpoints (trained on 6-channel input) can play inside the new
+/// state machine without seeing the new flag.
+pub const NUM_CHANNELS_V1: usize = 6;
 
 /// Reserve vector (22 elements):
 ///   [0-2]:   supply_W/G/B normalized by initial supply (6, 8, 10)
@@ -86,6 +94,14 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut
         board_out[5 * GRID_SIZE * GRID_SIZE + row * GRID_SIZE + col] = 1.0;
     }
 
+    // Channel 6: mid-placement flag (broadcast)
+    if board.is_mid_placement() {
+        let ch6_start = 6 * GRID_SIZE * GRID_SIZE;
+        for i in 0..(GRID_SIZE * GRID_SIZE) {
+            board_out[ch6_start + i] = 1.0;
+        }
+    }
+
     // Reserve vector: supply and captures normalized by initial supply per color
     reserve_out[0] = supply[0] as f32 / INITIAL_SUPPLY[0];
     reserve_out[1] = supply[1] as f32 / INITIAL_SUPPLY[1];
@@ -116,6 +132,28 @@ pub fn encode_board(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut
         .filter(|r| !matches!(r, Ring::Removed))
         .count();
     reserve_out[21] = rings_remaining as f32 / BOARD_SIZE as f32;
+}
+
+/// V1 board encoder for cross-version battle with pre-split-ply checkpoints.
+///
+/// Same layout as `encode_board` minus channel 6 (the mid_placement flag).
+/// Since `JointZertzBoard`'s MCTS only ever visits non-mid_placement states
+/// (joint `apply_move(Place)` skips through them), dropping the flag is
+/// information-preserving for the V1 MCTS — V1 has nothing it can do with
+/// that channel anyway.
+///
+/// `board_out` must have length NUM_CHANNELS_V1 * GRID_SIZE * GRID_SIZE = 294.
+pub fn encode_board_v1(board: &ZertzBoard, board_out: &mut [f32], reserve_out: &mut [f32]) {
+    debug_assert_eq!(board_out.len(), NUM_CHANNELS_V1 * GRID_SIZE * GRID_SIZE);
+    debug_assert_eq!(reserve_out.len(), RESERVE_SIZE);
+
+    // Encode into a 7-channel scratch buffer, then copy the first 6 channels.
+    // Slightly wasteful but avoids divergence between the two encoders — one
+    // source of truth, one minus-the-last-channel slice.
+    let mut full = [0.0f32; NUM_CHANNELS * GRID_SIZE * GRID_SIZE];
+    encode_board(board, &mut full, reserve_out);
+    let v1_len = NUM_CHANNELS_V1 * GRID_SIZE * GRID_SIZE;
+    board_out.copy_from_slice(&full[..v1_len]);
 }
 
 #[cfg(test)]

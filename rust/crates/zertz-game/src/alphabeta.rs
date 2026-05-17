@@ -358,6 +358,9 @@ impl MoveOrdering<ZertzBoard> for ZertzMove {
                 let dir = direction_index(from, over)?;
                 Some(CAPTURE_BASE + hex_to_index(from) * 6 + dir)
             }
+            // Half-moves never appear in AB's move list (it uses
+            // legal_joint_moves), but the trait match has to be exhaustive.
+            ZertzMove::PlaceMarbleHalf { .. } | ZertzMove::RemoveRingHalf { .. } => None,
             ZertzMove::Capture { .. } | ZertzMove::Pass => None,
         }
     }
@@ -380,7 +383,11 @@ impl MoveOrdering<ZertzBoard> for ZertzMove {
             // Capture turns: small fan-out (every legal capture must be
             // searched anyway) and no real ordering payoff. Skip.
             // Pass: never produced by Zertz's valid_moves.
-            ZertzMove::Capture { .. } | ZertzMove::Pass => 0,
+            // Half-moves: AB doesn't see them (joint move-space).
+            ZertzMove::Capture { .. }
+            | ZertzMove::Pass
+            | ZertzMove::PlaceMarbleHalf { .. }
+            | ZertzMove::RemoveRingHalf { .. } => 0,
         }
     }
 }
@@ -458,7 +465,7 @@ mod tests {
     fn alphabeta_does_not_mutate_caller() {
         let mut board = ZertzBoard::default();
         // Play one opening move so the position isn't trivial.
-        let opening = board.legal_moves()[0];
+        let opening = board.legal_joint_moves()[0];
         board.play(opening).unwrap();
 
         let rings_before = *board.rings();
@@ -485,7 +492,7 @@ mod tests {
         // Open game, no captures forced — search must return a placement.
         let board = ZertzBoard::default();
         let mv = alphabeta_best_move(&board, 2);
-        let legal = board.legal_moves();
+        let legal = board.legal_joint_moves();
         assert!(
             legal.iter().any(|m| *m == mv),
             "alphabeta returned non-legal move {:?}",
@@ -510,10 +517,10 @@ mod tests {
         let mut board = ZertzBoard::default();
         // Play a few moves to create asymmetry.
         for _ in 0..3 {
-            let mv = board.legal_moves()[0];
+            let mv = board.legal_joint_moves()[0];
             board.play(mv).unwrap();
         }
-        let legal = board.legal_moves();
+        let legal = board.legal_joint_moves();
         let scores = alphabeta_root_scores(&board, 1);
         assert_eq!(scores.len(), legal.len(), "one score per legal move expected");
         for (mv, _) in &scores {
@@ -527,7 +534,7 @@ mod tests {
         // history should be fully drained (all undo frames popped).
         let mut start = ZertzBoard::default();
         for _ in 0..3 {
-            let mv = start.legal_moves()[0];
+            let mv = start.legal_joint_moves()[0];
             start.play(mv).unwrap();
         }
 
@@ -557,7 +564,7 @@ mod tests {
         // search with the TT bypassed.
         let mut start = ZertzBoard::default();
         for _ in 0..3 {
-            let mv = start.legal_moves()[0];
+            let mv = start.legal_joint_moves()[0];
             start.play(mv).unwrap();
         }
         let mut eval = evaluate;
@@ -589,7 +596,7 @@ mod tests {
     fn ordering_does_not_change_search_result() {
         let mut start = ZertzBoard::default();
         for _ in 0..3 {
-            let mv = start.legal_moves()[0];
+            let mv = start.legal_joint_moves()[0];
             start.play(mv).unwrap();
         }
         let mut eval = evaluate;
@@ -623,7 +630,7 @@ mod tests {
         // within HISTORY_SIZE — out-of-bounds indices would silently
         // corrupt the killer/history tables.
         let board = ZertzBoard::default();
-        for mv in board.legal_moves() {
+        for mv in board.legal_joint_moves() {
             if let Some(idx) = mv.history_index() {
                 assert!(
                     idx < <ZertzMove as MoveOrdering<ZertzBoard>>::HISTORY_SIZE,

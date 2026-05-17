@@ -1,6 +1,7 @@
 pub mod alphabeta;
 pub mod board_encoding;
 pub mod hex;
+pub mod joint_board;
 pub mod move_encoding;
 pub mod notation;
 pub mod search;

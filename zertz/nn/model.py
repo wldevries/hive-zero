@@ -10,7 +10,7 @@ from shared.nn.resblock import ResBlock
 from shared.nn.seresblock import SEResBlock
 
 # From Rust board encoding
-NUM_CHANNELS = 6
+NUM_CHANNELS = 7  # 0-3 marbles/empty, 4 capture-turn flag, 5 mid-capture src, 6 mid-placement flag
 GRID_SIZE = 7
 POLICY_SIZE = 490  # flat training storage: place_W/G/B/remove[4*49] + cap_dir[6*49]
 RESERVE_SIZE = 22
@@ -35,7 +35,7 @@ def _describe_trunk(trunk_spec: list[dict]) -> str:
 class ZertzNet(nn.Module):
     """AlphaZero-style network for Zertz with direction-based capture policy head.
 
-    Input:  (batch, 6, 7, 7) board tensor + (batch, 22) reserve vector
+    Input:  (batch, 7, 7, 7) board tensor + (batch, 22) reserve vector
     Output: place_logits (batch, 4*7*7),
             cap_dir_logits (batch, 6*7*7),
             value (batch, 1) in [-1, 1]
@@ -52,8 +52,13 @@ class ZertzNet(nn.Module):
     Each spec entry has a "type" field and an optional "count" (default 1).
     Example: [{"type": "seres", "count": 6}, {"type": "gpba"}, {"type": "seres", "count": 2}]
 
-    Policy heads are conv1x1 over the trunk (no flatten/FC).
-    Rust MCTS scores each capture as cap_dir[direction][source_pos].
+    Policy heads — each gets its own per-cell MLP (Conv1×1 + BN + ReLU)
+    before the final projection. Post split-ply refactor, marble placement,
+    ring removal, and capture-direction are three independent MCTS decision
+    types: forcing them to share a single projection layer makes them fight
+    over features instead of specialising. Mirrors Hive's place/Q/K pattern.
+    The marble-placement (3ch) and ring-removal (1ch) projections concat to
+    reproduce the existing 4-channel place_logits layout — Rust untouched.
     """
 
     def __init__(self, channels: int = 64, trunk: list[dict] | None = None):
@@ -81,9 +86,21 @@ class ZertzNet(nn.Module):
                 else:
                     raise ValueError(f"Unknown trunk layer type: {layer_type!r}")
 
-        # Policy heads (conv1x1 over trunk)
-        self.policy_place = nn.Conv2d(channels, PLACE_HEAD_CHANNELS, 1)
-        self.policy_cap_dir = nn.Conv2d(channels, NUM_DIR_CHANNELS, 1)
+        # Per-head pre-projection: Conv1×1(C→C) + BN + ReLU lets each policy
+        # head specialise on different feature semantics from the trunk.
+        self.policy_place_pre_conv  = nn.Conv2d(channels, channels, 1, bias=False)
+        self.policy_place_pre_bn    = nn.BatchNorm2d(channels)
+        self.policy_remove_pre_conv = nn.Conv2d(channels, channels, 1, bias=False)
+        self.policy_remove_pre_bn   = nn.BatchNorm2d(channels)
+        self.policy_cap_pre_conv    = nn.Conv2d(channels, channels, 1, bias=False)
+        self.policy_cap_pre_bn      = nn.BatchNorm2d(channels)
+
+        # Final projections — three independent heads. place_marble + remove_ring
+        # concatenate to a 4-channel block matching the Rust place_logits layout
+        # (ch 0-2 = W/G/B, ch 3 = remove).
+        self.policy_place_marble = nn.Conv2d(channels, 3, 1)
+        self.policy_remove_ring  = nn.Conv2d(channels, 1, 1)
+        self.policy_cap_dir      = nn.Conv2d(channels, NUM_DIR_CHANNELS, 1)
 
         # Value head: conv1x1 → flatten → FC(256) → tanh
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
@@ -101,16 +118,25 @@ class ZertzNet(nn.Module):
         """
         # Broadcast reserve spatially and concat with board tensor
         r = reserve_vector.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, GRID_SIZE, GRID_SIZE)
-        x = torch.cat([board_tensor, r], dim=1)  # (B, 6+22, 7, 7)
+        x = torch.cat([board_tensor, r], dim=1)  # (B, 7+22, 7, 7)
 
         # Trunk
         x = F.relu(self.input_bn(self.input_conv(x)))
         for layer in self.trunk:
             x = layer(x)
 
-        # Policy heads (conv1x1 over trunk, then flatten for Rust)
-        place_logits = self.policy_place(x).view(x.size(0), -1)    # (B, 196)
-        cap_dir_logits = self.policy_cap_dir(x).view(x.size(0), -1) # (B, 294)
+        # Per-head pre-projection — each policy head sees specialised features.
+        place_p  = F.relu(self.policy_place_pre_bn(self.policy_place_pre_conv(x)))
+        remove_p = F.relu(self.policy_remove_pre_bn(self.policy_remove_pre_conv(x)))
+        cap_p    = F.relu(self.policy_cap_pre_bn(self.policy_cap_pre_conv(x)))
+
+        # Final projections. Concat place_marble (3ch) + remove_ring (1ch) into
+        # a 4-channel block so the Rust-facing place_logits keeps its layout
+        # (ch 0-2 = W/G/B, ch 3 = remove).
+        place_marble = self.policy_place_marble(place_p)   # (B, 3, 7, 7)
+        remove_ring  = self.policy_remove_ring(remove_p)    # (B, 1, 7, 7)
+        place_logits = torch.cat([place_marble, remove_ring], dim=1).view(x.size(0), -1)  # (B, 196)
+        cap_dir_logits = self.policy_cap_dir(cap_p).view(x.size(0), -1)                    # (B, 294)
 
         # Value head
         v = F.relu(self.value_bn(self.value_conv(x)))
@@ -152,7 +178,7 @@ def save_checkpoint(model: ZertzNet, path: str, generation: int = 0,
 def export_onnx(model: ZertzNet, path: str):
     """Export model to ONNX format for Rust-native inference via ort.
 
-    Inputs: board_tensor (B, 6, 7, 7), reserve (B, 22)
+    Inputs: board_tensor (B, 7, 7, 7), reserve (B, 22)
     Outputs: place (B, 196), cap_dir (B, 294), value (B, 1)
     """
     import os
@@ -199,3 +225,25 @@ def load_checkpoint(path: str) -> tuple[ZertzNet, dict]:
         checkpoint["generation"] = checkpoint.pop("iteration")
     model.eval()
     return model, checkpoint
+
+
+def load_checkpoint_any(path: str):
+    """Autodetect-and-load a Zertz checkpoint of either architecture.
+
+    Returns `(model, checkpoint_dict, style)` where `style` is one of
+    `"split"` (post-refactor `ZertzNet`) or `"joint"` (pre-refactor
+    `ZertzNetV1`). The style string matches the values
+    `ZertzSelfPlaySession.play_battle_versioned` expects for `style1`/
+    `style2`, so callers can plumb it through unchanged.
+
+    Detection inspects the state dict for `policy_place_pre_conv.*` —
+    present only in post-refactor checkpoints.
+    """
+    from .model_v1 import is_v1_state_dict, load_v1_checkpoint
+    raw = torch.load(path, weights_only=False)
+    state_dict = raw.get("model_state_dict", raw)
+    if is_v1_state_dict(state_dict):
+        model, ckpt = load_v1_checkpoint(path)
+        return model, ckpt, "joint"
+    model, ckpt = load_checkpoint(path)
+    return model, ckpt, "split"
