@@ -142,27 +142,27 @@ fn call_python_eval_tokens(
     Ok((policies, values, draws))
 }
 
-// ---- token-aware best_move loop ------------------------------------------
+// ---- token-aware MCTS loop ------------------------------------------------
 
-/// Run MCTS for `simulations` sims using the token-based eval callback and
-/// return the best move. Single-game, no pipelining — the caller drives one
-/// batch at a time.
-fn best_move_token(
+/// Run MCTS for `simulations` sims using the token-based eval callback.
+/// Returns the configured `MctsSearch` and the *root* token batch + legal-move
+/// index (so callers can map root children to (mover_slot, dest_slot)).
+fn run_mcts_token(
     game: &Game,
     simulations: usize,
     play_batch: usize,
     params: &SearchParams,
     eval_fn: &Bound<'_, PyAny>,
-) -> PyResult<Move> {
+) -> PyResult<(MctsSearch<Game>, TokenBatch, Vec<(core_game::game::PolicyIndex, Move)>)> {
     let mut search = MctsSearch::<Game>::new(simulations.saturating_add(64));
 
-    // Root expansion: tokenize once, evaluate, init the search.
+    // Root expansion: tokenize once, evaluate, init the search. Hold on to
+    // the root TokenBatch + indexed_moves — Phase F self-play needs them.
     let mut root_game = game.clone();
-    let (root_tokens, _) = tokenize::tokenize_and_priors(&mut root_game);
-    let (root_policies, _, _) = call_python_eval_tokens(eval_fn, &[root_tokens])?;
+    let (root_tokens, root_indexed) = tokenize::tokenize_and_priors(&mut root_game);
+    let (root_policies, _, _) = call_python_eval_tokens(eval_fn, &[root_tokens.clone()])?;
     search.init(game, &root_policies[0]);
 
-    // Optional root noise.
     if let RootNoise::Dirichlet { alpha, epsilon } = params.root_noise {
         search.params = params.clone();
         search.apply_root_dirichlet(alpha, epsilon);
@@ -178,7 +178,6 @@ fn best_move_token(
             done += want;
             continue;
         }
-        // Tokenize each non-terminal leaf via stashed_game.
         let mut batches: Vec<TokenBatch> = Vec::with_capacity(leaves.len());
         for &leaf in &leaves {
             let mut g = search
@@ -194,6 +193,19 @@ fn best_move_token(
         done += leaves.len();
     }
 
+    Ok((search, root_tokens, root_indexed))
+}
+
+/// Convenience wrapper: run MCTS and pick the best move (highest visit count
+/// with the standard tier preference).
+fn best_move_token(
+    game: &Game,
+    simulations: usize,
+    play_batch: usize,
+    params: &SearchParams,
+    eval_fn: &Bound<'_, PyAny>,
+) -> PyResult<Move> {
+    let (search, _, _) = run_mcts_token(game, simulations, play_batch, params, eval_fn)?;
     Ok(search.best_move().unwrap_or(Move::pass()))
 }
 
@@ -202,6 +214,44 @@ fn best_move_token(
 fn make_array1<'py, T: numpy::Element>(py: Python<'py>, data: Vec<T>) -> Bound<'py, PyArray1<T>> {
     let arr = numpy::ndarray::Array1::from(data);
     PyArray1::from_owned_array(py, arr)
+}
+
+/// Pack a single TokenBatch into the four per-sample (L, …) numpy arrays
+/// used by both encode_tokens and mcts_run.
+fn token_batch_to_per_sample_numpy<'py>(
+    py: Python<'py>,
+    tb: &TokenBatch,
+) -> PyResult<(
+    Bound<'py, PyArray2<u8>>,
+    Bound<'py, PyArray2<i8>>,
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray1<bool>>,
+)> {
+    let mut cat = vec![0u8; SEQ_LEN * 5];
+    for li in 0..SEQ_LEN {
+        cat[li * 5 + 0] = tb.kind[li];
+        cat[li * 5 + 1] = tb.piece_type[li];
+        cat[li * 5 + 2] = tb.color[li];
+        cat[li * 5 + 3] = tb.stack_depth[li];
+        cat[li * 5 + 4] = tb.count[li];
+    }
+    let cat_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, 5), cat)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let mut pos = vec![0i8; SEQ_LEN * 2];
+    for li in 0..SEQ_LEN {
+        pos[li * 2 + 0] = tb.q[li];
+        pos[li * 2 + 1] = tb.r[li];
+    }
+    let pos_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, 2), pos)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let flg_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, F_FLAGS), tb.flags.clone())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok((
+        PyArray2::from_owned_array(py, cat_arr),
+        PyArray2::from_owned_array(py, pos_arr),
+        PyArray2::from_owned_array(py, flg_arr),
+        make_array1(py, tb.mask.clone()),
+    ))
 }
 
 // ---- PyGame: Rust Game exposed to Python ---------------------------------
@@ -296,32 +346,7 @@ impl PyGame {
         Bound<'py, PyArray1<bool>>,
     )> {
         let (tb, _) = tokenize::tokenize_and_priors(&mut self.game);
-        // Re-pack from per-field Vecs into (L, K) arrays.
-        let mut cat = vec![0u8; SEQ_LEN * 5];
-        for li in 0..SEQ_LEN {
-            cat[li * 5 + 0] = tb.kind[li];
-            cat[li * 5 + 1] = tb.piece_type[li];
-            cat[li * 5 + 2] = tb.color[li];
-            cat[li * 5 + 3] = tb.stack_depth[li];
-            cat[li * 5 + 4] = tb.count[li];
-        }
-        let cat_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, 5), cat)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        let mut pos = vec![0i8; SEQ_LEN * 2];
-        for li in 0..SEQ_LEN {
-            pos[li * 2 + 0] = tb.q[li];
-            pos[li * 2 + 1] = tb.r[li];
-        }
-        let pos_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, 2), pos)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        let flg_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, F_FLAGS), tb.flags)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok((
-            PyArray2::from_owned_array(py, cat_arr),
-            PyArray2::from_owned_array(py, pos_arr),
-            PyArray2::from_owned_array(py, flg_arr),
-            make_array1(py, tb.mask),
-        ))
+        token_batch_to_per_sample_numpy(py, &tb)
     }
 
     /// Tokenize the current position and also return per-legal-move slot pairs.
@@ -343,27 +368,7 @@ impl PyGame {
     )> {
         use core_game::game::PolicyIndex;
         let (tb, indexed) = tokenize::tokenize_and_priors(&mut self.game);
-
-        let mut cat = vec![0u8; SEQ_LEN * 5];
-        for li in 0..SEQ_LEN {
-            cat[li * 5 + 0] = tb.kind[li];
-            cat[li * 5 + 1] = tb.piece_type[li];
-            cat[li * 5 + 2] = tb.color[li];
-            cat[li * 5 + 3] = tb.stack_depth[li];
-            cat[li * 5 + 4] = tb.count[li];
-        }
-        let cat_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, 5), cat)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        let mut pos = vec![0i8; SEQ_LEN * 2];
-        for li in 0..SEQ_LEN {
-            pos[li * 2 + 0] = tb.q[li];
-            pos[li * 2 + 1] = tb.r[li];
-        }
-        let pos_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, 2), pos)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        let flg_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, F_FLAGS), tb.flags)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
+        let (cat_arr, pos_arr, flg_arr, msk_arr) = token_batch_to_per_sample_numpy(py, &tb)?;
         let moves: Vec<_> = indexed.iter().map(|(enc, mv)| {
             let (mover_slot, dest_slot) = match *enc {
                 PolicyIndex::DotProduct { src_cell, dst_cell, .. } => (src_cell, dst_cell),
@@ -371,13 +376,7 @@ impl PyGame {
             };
             (mover_slot, dest_slot, mv.piece.unwrap().to_uhp_string(), mv.from, mv.to.unwrap())
         }).collect();
-        Ok((
-            PyArray2::from_owned_array(py, cat_arr),
-            PyArray2::from_owned_array(py, pos_arr),
-            PyArray2::from_owned_array(py, flg_arr),
-            make_array1(py, tb.mask),
-            moves,
-        ))
+        Ok((cat_arr, pos_arr, flg_arr, msk_arr, moves))
     }
 
     fn reserve_has(&self, piece_str: &str) -> bool {
@@ -508,6 +507,125 @@ impl PyGame {
         } else {
             hive_game::uhp::format_move_uhp(&self.game, &best)
         })
+    }
+
+    /// Run MCTS for `simulations` sims and return everything Python self-play
+    /// needs to record one ply of training data:
+    ///
+    ///   1. Root token batch (categoricals, positions, flags, mask) as the
+    ///      per-sample arrays the model and replay buffer consume.
+    ///   2. (mover_slots, dest_slots, visit_probs) arrays over the root's
+    ///      children — the MCTS visit distribution mapped onto token-pair
+    ///      indices ready for `HiveDataset.add_sample`.
+    ///   3. `root_q_raw`: search-improved Q from root POV, no contempt
+    ///      applied (the value the trainer will use as the q-mix target).
+    ///   4. `best_uhp_move`: visit-argmax move as a UHP string, for callers
+    ///      that don't want to do their own temperature sampling.
+    #[pyo3(signature = (
+        eval_fn,
+        simulations=800,
+        c_puct=1.5,
+        draw_contempt=0.0,
+        dir_alpha=0.0,
+        dir_epsilon=0.0,
+        play_batch=8,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn mcts_run<'py>(
+        &mut self,
+        py: Python<'py>,
+        eval_fn: &Bound<'_, PyAny>,
+        simulations: usize,
+        c_puct: f32,
+        draw_contempt: f32,
+        dir_alpha: f32,
+        dir_epsilon: f32,
+        play_batch: usize,
+    ) -> PyResult<(
+        Bound<'py, PyArray2<u8>>,
+        Bound<'py, PyArray2<i8>>,
+        Bound<'py, PyArray2<f32>>,
+        Bound<'py, PyArray1<bool>>,
+        Bound<'py, PyArray1<u8>>,
+        Bound<'py, PyArray1<u8>>,
+        Bound<'py, PyArray1<f32>>,
+        f32,
+        String,
+    )> {
+        use core_game::game::PolicyIndex;
+
+        if self.game.is_game_over() {
+            return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
+        }
+        if self.game.valid_moves().is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Only pass is legal at root",
+            ));
+        }
+
+        let root_noise = if dir_alpha > 0.0 && dir_epsilon > 0.0 {
+            RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon }
+        } else {
+            RootNoise::None
+        };
+        let mut params = SearchParams::new(
+            CpuctStrategy::Constant { c_puct },
+            ForcedExploration::None,
+            root_noise,
+        );
+        params.draw_contempt = draw_contempt;
+
+        let (search, root_tokens, root_indexed) = run_mcts_token(
+            &self.game, simulations, play_batch.max(1), &params, eval_fn,
+        )?;
+
+        // Map each root-child Move → its (mover_slot, dest_slot) pair via the
+        // root tokenization. Build aligned arrays for the visit distribution.
+        let visits = search.get_visit_distribution();
+        let mut mover_slots = Vec::with_capacity(visits.len());
+        let mut dest_slots = Vec::with_capacity(visits.len());
+        let mut visit_probs = Vec::with_capacity(visits.len());
+        for (mv, prob) in &visits {
+            // Find a matching (PolicyIndex, Move) in root_indexed. Move's
+            // PartialEq covers (piece, from, to). `mv` from the search may be
+            // a pass; pass moves don't appear in root_indexed (tokenize emits
+            // no moves when valid_moves is empty), so guard against that.
+            let mut matched = None;
+            for (enc, imv) in &root_indexed {
+                if imv == mv {
+                    matched = Some(*enc);
+                    break;
+                }
+            }
+            if let Some(PolicyIndex::DotProduct { src_cell, dst_cell, .. }) = matched {
+                mover_slots.push(src_cell as u8);
+                dest_slots.push(dst_cell as u8);
+                visit_probs.push(*prob);
+            }
+        }
+
+        let (cat_arr, pos_arr, flg_arr, msk_arr) = token_batch_to_per_sample_numpy(py, &root_tokens)?;
+        let mover_arr = make_array1(py, mover_slots);
+        let dest_arr  = make_array1(py, dest_slots);
+        let prob_arr  = make_array1(py, visit_probs);
+
+        let root_q = search.root_value_raw();
+        let best = search.best_move().unwrap_or(Move::pass());
+        let best_uhp = if best.piece.is_none() {
+            "pass".to_string()
+        } else {
+            hive_game::uhp::format_move_uhp(&self.game, &best)
+        };
+
+        Ok((cat_arr, pos_arr, flg_arr, msk_arr,
+            mover_arr, dest_arr, prob_arr,
+            root_q, best_uhp))
+    }
+
+    /// Heuristic value for unfinished games (per side, [-1, 1]).
+    /// Used by Python self-play when assigning value targets to timeout games.
+    fn heuristic_value(&self) -> (f32, f32) {
+        self.game.evaluate()
     }
 
     /// Run alphabeta search to the given depth using the built-in heuristic
