@@ -28,6 +28,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from ..nn.training import HiveDataset, Trainer
 from ..nn.transformer import (
@@ -149,7 +150,24 @@ def run_training(cfg: TrainConfig) -> None:
             t0 = time.time()
             outcomes: list[str] = []
             total_samples = 0
-            for game_idx in range(cfg.games_per_gen):
+            pbar = tqdm(
+                range(cfg.games_per_gen),
+                desc=f"  gen {gen} selfplay",
+                unit="game",
+                dynamic_ncols=True,
+            )
+            for game_idx in pbar:
+                # Per-move callback updates the tqdm postfix every ply so the
+                # user can see turns advancing even when single-move latency
+                # is large (slow GPU / high sim count).
+                def _on_move(move_n: int, last_uhp: str, root_q: float,
+                             _pbar=pbar, _gi=game_idx):
+                    _pbar.set_postfix_str(
+                        f"game={_gi+1}/{cfg.games_per_gen} ply={move_n}/"
+                        f"{cfg.max_moves} last={last_uhp} q={root_q:+.2f}",
+                        refresh=True,
+                    )
+
                 result = play_one_game(
                     eval_fn=None,
                     ort_session=session,
@@ -166,9 +184,17 @@ def run_training(cfg: TrainConfig) -> None:
                     tournament_mode=cfg.tournament_mode,
                     skip_timeout_data=cfg.skip_timeout_data,
                     rng_seed=gen * 10_000 + game_idx,
+                    on_move=_on_move,
                 )
                 outcomes.append(result.outcome)
                 total_samples += result.samples_written
+                pbar.set_postfix_str(
+                    f"played={game_idx+1}/{cfg.games_per_gen} "
+                    f"{_summarize_outcomes(outcomes)} "
+                    f"samples={total_samples}",
+                    refresh=True,
+                )
+            pbar.close()
             t_play = time.time() - t0
             print(
                 f"  selfplay: {cfg.games_per_gen} games  "

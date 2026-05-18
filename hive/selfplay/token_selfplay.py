@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -121,6 +121,7 @@ def play_one_game(
     tournament_mode: bool = False,
     skip_timeout_data: bool = True,
     rng_seed: int | None = None,
+    on_move: Callable[[int, str, float], None] | None = None,
 ) -> GameResult:
     """Play one self-play game and append the per-ply samples to `dataset`.
 
@@ -212,6 +213,9 @@ def play_one_game(
             )
         if not game.play_move_uhp(chosen_uhp):
             raise RuntimeError(f"failed to play sampled move {chosen_uhp!r}")
+
+        if on_move is not None:
+            on_move(game.move_count, chosen_uhp, float(root_q))
 
     # Determine value target. Real outcomes (decisive or draw) train with z;
     # timeouts are dropped if requested.

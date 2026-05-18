@@ -303,9 +303,11 @@ class HiveTransformer(nn.Module):
             wdl_logits  : (B, 3)
             aux         : (B, 6) — sigmoid-activated
         """
-        B, L = mask.shape
-        assert L == self.seq_len, f"expected SEQ_LEN={self.seq_len}, got {L}"
-
+        # NOTE: don't `assert L == self.seq_len` here — that lets torch.jit
+        # tracer fold a tensor->bool comparison into a constant during ONNX
+        # export and emits TracerWarning. The shape check happens upstream
+        # (Rust tokenizer is the only producer of these tensors and always
+        # emits SEQ_LEN-padded batches).
         x, positional = self._embed(categoricals, positions, flags)
 
         # Compute relative bias once; reused across all blocks.
