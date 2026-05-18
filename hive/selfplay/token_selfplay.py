@@ -103,9 +103,10 @@ def _outcome_to_value(outcome: str) -> Optional[float]:
 
 
 def play_one_game(
-    eval_fn: EvalFn,
+    eval_fn: EvalFn | None,
     dataset: HiveDataset,
     *,
+    ort_session=None,
     simulations: int = 64,
     play_batch: int = 8,
     c_puct: float = 1.5,
@@ -133,6 +134,9 @@ def play_one_game(
 
     Returns a `GameResult` summary for the caller's logging.
     """
+    if (eval_fn is None) == (ort_session is None):
+        raise ValueError("pass exactly one of `eval_fn` or `ort_session`")
+
     rng = random.Random(rng_seed)
     game = HiveGame(tournament_mode=tournament_mode, grid_size=grid_size)
     samples: list[PlySample] = []
@@ -143,15 +147,26 @@ def play_one_game(
             game.play_pass()
             continue
 
-        cat, pos, flg, msk, msrc, mdst, mprob, root_q, _best_uhp = game.mcts_run(
-            eval_fn,
-            simulations=simulations,
-            c_puct=c_puct,
-            draw_contempt=draw_contempt,
-            dir_alpha=dir_alpha,
-            dir_epsilon=dir_epsilon,
-            play_batch=play_batch,
-        )
+        if ort_session is not None:
+            cat, pos, flg, msk, msrc, mdst, mprob, root_q, _best_uhp = game.mcts_run_ort(
+                ort_session,
+                simulations=simulations,
+                c_puct=c_puct,
+                draw_contempt=draw_contempt,
+                dir_alpha=dir_alpha,
+                dir_epsilon=dir_epsilon,
+                play_batch=play_batch,
+            )
+        else:
+            cat, pos, flg, msk, msrc, mdst, mprob, root_q, _best_uhp = game.mcts_run(
+                eval_fn,
+                simulations=simulations,
+                c_puct=c_puct,
+                draw_contempt=draw_contempt,
+                dir_alpha=dir_alpha,
+                dir_epsilon=dir_epsilon,
+                play_batch=play_batch,
+            )
         cat = np.asarray(cat); pos = np.asarray(pos)
         flg = np.asarray(flg); msk = np.asarray(msk)
         msrc = np.asarray(msrc); mdst = np.asarray(mdst); mprob = np.asarray(mprob)

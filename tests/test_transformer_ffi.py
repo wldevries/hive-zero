@@ -83,14 +83,15 @@ def test_two_ply_round_trip_does_not_panic():
     assert g.move_count == 2
 
 
-def test_best_move_ort_is_not_implemented():
-    """Phase G hasn't ported ORT yet; calling it should error clearly so
-    callers can fall back to the Python callback path."""
+def test_best_move_ort_rejects_non_session_arg():
+    """`best_move_ort` requires a `HiveOrtSession`; passing arbitrary Python
+    objects must produce a clear type error rather than crashing inside the
+    inference loop."""
     from engine_zero import HiveGame
 
     g = HiveGame(grid_size=7)
-    with pytest.raises(NotImplementedError):
-        g.best_move_ort(None)  # ort_session is ignored; defaults are fine
+    with pytest.raises(TypeError):
+        g.best_move_ort(None)  # None is not a HiveOrtSession
 
 
 def test_encode_tokens_with_moves_returns_token_slot_pairs():

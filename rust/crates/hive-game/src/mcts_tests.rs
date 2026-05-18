@@ -9,13 +9,13 @@
 
 #[cfg(test)]
 mod tests {
-    use core_game::game::{Game as GameTrait, NNGame, Outcome, Player};
+    use core_game::game::{Game as GameTrait, Outcome, Player};
     use core_game::mcts::search::{
         CpuctStrategy, ForcedExploration, MctsSearch, RootNoise, SearchParams,
     };
 
     use crate::game::{Game, Move};
-    use crate::move_encoding::policy_size;
+    use crate::tokenize::{tokenize_and_priors, BILINEAR_DIM, SEQ_LEN};
     use crate::piece::{Piece, PieceColor, PieceType};
 
     // -------------------------------------------------------------------------
@@ -42,11 +42,16 @@ mod tests {
     /// so MCTS never leaves the first child it visits. The lookahead policy
     /// fixes that without compromising what we're actually testing (value
     /// backprop sign convention).
+    /// Token-shape lookahead policy: gives 10× higher weight to moves that
+    /// immediately end the game (win or forced win). For the bilinear Q·K
+    /// head the prior of a move is Q[mover_slot] · K[dest_slot] / √D, so
+    /// we set Q[mover, 0] = K[dest, 0] = √weight, leaving other embedding
+    /// dimensions at 0. After softmax over legal moves, terminal-winning
+    /// moves dominate.
     fn lookahead_policy(game: &mut Game) -> Vec<f32> {
-        let grid_size = game.nn_grid_size;
-        let ps = policy_size(grid_size);
+        let ps = 2 * SEQ_LEN * BILINEAR_DIM;
         let mut policy = vec![0.0f32; ps];
-        let (_, indexed_moves) = game.get_legal_move_mask();
+        let indexed_moves = tokenize_and_priors(game).1;
 
         const WIN_BOOST: f32 = 10.0;
 
@@ -57,22 +62,17 @@ mod tests {
 
             use core_game::game::PolicyIndex;
             match enc {
-                PolicyIndex::Single(idx) => policy[*idx] += weight,
-                // For bilinear head: set Q and K embeddings for src and dst such that
-                // the dot product Q[src]·K[dst] is boosted for the winning move.
-                // Simplest oracle: set Q[src][0] = K[dst][0] = sqrt(weight), others = 0.
                 PolicyIndex::DotProduct { q_offset, k_offset, src_cell, dst_cell, .. } => {
-                    policy[q_offset + src_cell] = weight.sqrt();
-                    policy[k_offset + dst_cell] = weight.sqrt();
+                    // Layout: policy[q_offset + d * SEQ_LEN + token_slot].
+                    // Set the d=0 row for the mover and dest tokens — leaves
+                    // all other (d, slot) entries at 0 so Q · K just picks up
+                    // the boost on this pair.
+                    let qi = q_offset + 0 * SEQ_LEN + src_cell;
+                    let ki = k_offset + 0 * SEQ_LEN + dst_cell;
+                    policy[qi] = weight.sqrt();
+                    policy[ki] = weight.sqrt();
                 }
-                PolicyIndex::Sum(_, _) => {} // legacy, unused for Hive
-            }
-        }
-
-        let total: f32 = policy.iter().sum();
-        if total > 0.0 {
-            for p in policy.iter_mut() {
-                *p /= total;
+                _ => {} // tokenize emits only DotProduct
             }
         }
         policy
@@ -409,16 +409,14 @@ mod tests {
 
         // Print lookahead policy for winning move
         let mut game_copy = game.clone();
-        let policy = lookahead_policy(&mut game_copy);
-        let (_, indexed_moves) = game_copy.get_legal_move_mask();
+        let _policy = lookahead_policy(&mut game_copy);
+        let indexed_moves = tokenize_and_priors(&mut game_copy).1;
         eprintln!("Lookahead policy for winning move bB1→(0,1):");
         for (enc, mv) in &indexed_moves {
             if mv.piece == Some(beetle1) && mv.to == Some((0, 1)) {
                 use core_game::game::PolicyIndex;
-                match enc {
-                    PolicyIndex::Single(i) => eprintln!("  Single({i}): p={:.6}", policy[*i]),
-                    PolicyIndex::Sum(a, b) => eprintln!("  Sum({a},{b}): p[a]={:.6} p[b]={:.6} sum={:.6}", policy[*a], policy[*b], policy[*a]+policy[*b]),
-                    PolicyIndex::DotProduct { src_cell, dst_cell, .. } => eprintln!("  DotProduct(src={src_cell},dst={dst_cell})"),
+                if let PolicyIndex::DotProduct { src_cell, dst_cell, .. } = enc {
+                    eprintln!("  DotProduct(src={src_cell},dst={dst_cell})");
                 }
             }
         }

@@ -29,6 +29,8 @@ use hive_game::tokenize::{
     self, TokenBatch, BILINEAR_DIM, F_FLAGS, SEQ_LEN,
 };
 
+use super::inference::HiveTokenOrtEngine;
+
 // ---- Python callback bridge: TokenBatch ↔ numpy --------------------------
 
 /// Pack a slice of token batches into the four-tensor numpy form the
@@ -144,23 +146,24 @@ fn call_python_eval_tokens(
 
 // ---- token-aware MCTS loop ------------------------------------------------
 
-/// Run MCTS for `simulations` sims using the token-based eval callback.
-/// Returns the configured `MctsSearch` and the *root* token batch + legal-move
-/// index (so callers can map root children to (mover_slot, dest_slot)).
-fn run_mcts_token(
+/// Generic token-MCTS driver. The `eval_batches` closure abstracts over
+/// "Python eval callback" vs "Rust ORT engine"; both produce
+/// `(policies, values, draws)` for a list of `TokenBatch` leaves.
+fn run_mcts_token_with<F>(
     game: &Game,
     simulations: usize,
     play_batch: usize,
     params: &SearchParams,
-    eval_fn: &Bound<'_, PyAny>,
-) -> PyResult<(MctsSearch<Game>, TokenBatch, Vec<(core_game::game::PolicyIndex, Move)>)> {
+    mut eval_batches: F,
+) -> Result<(MctsSearch<Game>, TokenBatch, Vec<(core_game::game::PolicyIndex, Move)>), String>
+where
+    F: FnMut(&[TokenBatch]) -> Result<(Vec<Vec<f32>>, Vec<f32>, Vec<f32>), String>,
+{
     let mut search = MctsSearch::<Game>::new(simulations.saturating_add(64));
 
-    // Root expansion: tokenize once, evaluate, init the search. Hold on to
-    // the root TokenBatch + indexed_moves — Phase F self-play needs them.
     let mut root_game = game.clone();
     let (root_tokens, root_indexed) = tokenize::tokenize_and_priors(&mut root_game);
-    let (root_policies, _, _) = call_python_eval_tokens(eval_fn, &[root_tokens.clone()])?;
+    let (root_policies, _, _) = eval_batches(&[root_tokens.clone()])?;
     search.init(game, &root_policies[0]);
 
     if let RootNoise::Dirichlet { alpha, epsilon } = params.root_noise {
@@ -182,13 +185,12 @@ fn run_mcts_token(
         for &leaf in &leaves {
             let mut g = search
                 .stashed_game(leaf)
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                    "stashed leaf missing during select_leaves"))?
+                .ok_or_else(|| "stashed leaf missing during select_leaves".to_string())?
                 .clone();
             let (tb, _) = tokenize::tokenize_and_priors(&mut g);
             batches.push(tb);
         }
-        let (policies, values, draws) = call_python_eval_tokens(eval_fn, &batches)?;
+        let (policies, values, draws) = eval_batches(&batches)?;
         search.expand_and_backprop(&policies, &values, &draws);
         done += leaves.len();
     }
@@ -196,8 +198,38 @@ fn run_mcts_token(
     Ok((search, root_tokens, root_indexed))
 }
 
-/// Convenience wrapper: run MCTS and pick the best move (highest visit count
-/// with the standard tier preference).
+/// Python-callback variant: wraps `call_python_eval_tokens` as the batch eval.
+fn run_mcts_token_py(
+    game: &Game,
+    simulations: usize,
+    play_batch: usize,
+    params: &SearchParams,
+    eval_fn: &Bound<'_, PyAny>,
+) -> PyResult<(MctsSearch<Game>, TokenBatch, Vec<(core_game::game::PolicyIndex, Move)>)> {
+    run_mcts_token_with(game, simulations, play_batch, params, |batches| {
+        call_python_eval_tokens(eval_fn, batches).map_err(|e| e.to_string())
+    })
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// ORT-engine variant: drives MCTS through `HiveTokenOrtEngine` directly,
+/// no Python interaction inside the simulation loop.
+fn run_mcts_token_ort(
+    game: &Game,
+    simulations: usize,
+    play_batch: usize,
+    params: &SearchParams,
+    engine: &mut HiveTokenOrtEngine,
+) -> PyResult<(MctsSearch<Game>, TokenBatch, Vec<(core_game::game::PolicyIndex, Move)>)> {
+    run_mcts_token_with(game, simulations, play_batch, params, |batches| {
+        engine
+            .infer_token_batches(batches)
+            .map_err(|e| e.to_string())
+    })
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// Convenience wrapper for the Python-callback flow.
 fn best_move_token(
     game: &Game,
     simulations: usize,
@@ -205,7 +237,7 @@ fn best_move_token(
     params: &SearchParams,
     eval_fn: &Bound<'_, PyAny>,
 ) -> PyResult<Move> {
-    let (search, _, _) = run_mcts_token(game, simulations, play_batch, params, eval_fn)?;
+    let (search, _, _) = run_mcts_token_py(game, simulations, play_batch, params, eval_fn)?;
     Ok(search.best_move().unwrap_or(Move::pass()))
 }
 
@@ -575,7 +607,7 @@ impl PyGame {
         );
         params.draw_contempt = draw_contempt;
 
-        let (search, root_tokens, root_indexed) = run_mcts_token(
+        let (search, root_tokens, root_indexed) = run_mcts_token_py(
             &self.game, simulations, play_batch.max(1), &params, eval_fn,
         )?;
 
@@ -646,23 +678,172 @@ impl PyGame {
         })
     }
 
-    /// Run MCTS using a pre-loaded ORT/QNN session — DEFERRED for the token
-    /// architecture. Phase G (ORT) will reimplement this.
-    #[pyo3(signature = (_ort_session, _simulations=800, _c_puct=1.5, _draw_contempt=0.0,
-                       _dir_alpha=0.0, _dir_epsilon=0.0, _play_batch=8))]
+    /// Run MCTS using a pre-loaded ORT/QNN session — same return shape as
+    /// `best_move`, but drives MCTS through `HiveTokenOrtEngine` directly
+    /// (no Python callback in the simulation loop, no GIL trips per batch).
+    /// Use this for any self-play / battle / long-running workload — the
+    /// Python-callback path holds the GIL across every inference call which
+    /// has been observed to crash long runs on the user's machine.
+    #[pyo3(signature = (ort_session, simulations=800, c_puct=1.5, draw_contempt=0.0,
+                       dir_alpha=0.0, dir_epsilon=0.0, play_batch=8))]
     fn best_move_ort(
         &mut self,
-        _ort_session: Bound<'_, PyAny>,
-        _simulations: usize,
-        _c_puct: f32,
-        _draw_contempt: f32,
-        _dir_alpha: f32,
-        _dir_epsilon: f32,
-        _play_batch: usize,
+        ort_session: &mut PyHiveOrtSession,
+        simulations: usize,
+        c_puct: f32,
+        draw_contempt: f32,
+        dir_alpha: f32,
+        dir_epsilon: f32,
+        play_batch: usize,
     ) -> PyResult<String> {
-        Err(pyo3::exceptions::PyNotImplementedError::new_err(
-            "best_move_ort is not yet ported to the token architecture (Phase G)",
-        ))
+        if self.game.is_game_over() {
+            return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
+        }
+        if self.game.valid_moves().is_empty() {
+            return Ok("pass".to_string());
+        }
+        let root_noise = if dir_alpha > 0.0 && dir_epsilon > 0.0 {
+            RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon }
+        } else {
+            RootNoise::None
+        };
+        let mut params = SearchParams::new(
+            CpuctStrategy::Constant { c_puct },
+            ForcedExploration::None,
+            root_noise,
+        );
+        params.draw_contempt = draw_contempt;
+
+        let (search, _, _) = run_mcts_token_ort(
+            &self.game, simulations, play_batch.max(1), &params, &mut ort_session.engine,
+        )?;
+        let best = search.best_move().unwrap_or(Move::pass());
+        Ok(if best.piece.is_none() {
+            "pass".to_string()
+        } else {
+            hive_game::uhp::format_move_uhp(&self.game, &best)
+        })
+    }
+
+    /// Same return shape as `mcts_run`, but the inference loop runs through
+    /// the ORT engine (no Python callback). This is the primary path for
+    /// long-running self-play.
+    #[pyo3(signature = (
+        ort_session,
+        simulations=800,
+        c_puct=1.5,
+        draw_contempt=0.0,
+        dir_alpha=0.0,
+        dir_epsilon=0.0,
+        play_batch=8,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn mcts_run_ort<'py>(
+        &mut self,
+        py: Python<'py>,
+        ort_session: &mut PyHiveOrtSession,
+        simulations: usize,
+        c_puct: f32,
+        draw_contempt: f32,
+        dir_alpha: f32,
+        dir_epsilon: f32,
+        play_batch: usize,
+    ) -> PyResult<(
+        Bound<'py, PyArray2<u8>>,
+        Bound<'py, PyArray2<i8>>,
+        Bound<'py, PyArray2<f32>>,
+        Bound<'py, PyArray1<bool>>,
+        Bound<'py, PyArray1<u8>>,
+        Bound<'py, PyArray1<u8>>,
+        Bound<'py, PyArray1<f32>>,
+        f32,
+        String,
+    )> {
+        use core_game::game::PolicyIndex;
+
+        if self.game.is_game_over() {
+            return Err(pyo3::exceptions::PyValueError::new_err("Game is already over"));
+        }
+        if self.game.valid_moves().is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Only pass is legal at root",
+            ));
+        }
+
+        let root_noise = if dir_alpha > 0.0 && dir_epsilon > 0.0 {
+            RootNoise::Dirichlet { alpha: dir_alpha, epsilon: dir_epsilon }
+        } else {
+            RootNoise::None
+        };
+        let mut params = SearchParams::new(
+            CpuctStrategy::Constant { c_puct },
+            ForcedExploration::None,
+            root_noise,
+        );
+        params.draw_contempt = draw_contempt;
+
+        let (search, root_tokens, root_indexed) = run_mcts_token_ort(
+            &self.game, simulations, play_batch.max(1), &params, &mut ort_session.engine,
+        )?;
+
+        let visits = search.get_visit_distribution();
+        let mut mover_slots = Vec::with_capacity(visits.len());
+        let mut dest_slots = Vec::with_capacity(visits.len());
+        let mut visit_probs = Vec::with_capacity(visits.len());
+        for (mv, prob) in &visits {
+            let mut matched = None;
+            for (enc, imv) in &root_indexed {
+                if imv == mv {
+                    matched = Some(*enc);
+                    break;
+                }
+            }
+            if let Some(PolicyIndex::DotProduct { src_cell, dst_cell, .. }) = matched {
+                mover_slots.push(src_cell as u8);
+                dest_slots.push(dst_cell as u8);
+                visit_probs.push(*prob);
+            }
+        }
+
+        let (cat_arr, pos_arr, flg_arr, msk_arr) =
+            token_batch_to_per_sample_numpy(py, &root_tokens)?;
+        let mover_arr = make_array1(py, mover_slots);
+        let dest_arr = make_array1(py, dest_slots);
+        let prob_arr = make_array1(py, visit_probs);
+
+        let root_q = search.root_value_raw();
+        let best = search.best_move().unwrap_or(Move::pass());
+        let best_uhp = if best.piece.is_none() {
+            "pass".to_string()
+        } else {
+            hive_game::uhp::format_move_uhp(&self.game, &best)
+        };
+
+        Ok((cat_arr, pos_arr, flg_arr, msk_arr,
+            mover_arr, dest_arr, prob_arr,
+            root_q, best_uhp))
+    }
+}
+
+/// A loaded ORT/QNN inference session for the token-based Hive transformer,
+/// kept alive across MCTS calls so the QNN/CUDA graph is compiled only once
+/// at construction time.
+///
+/// Export your model via `hive.nn.transformer.export_onnx` (the wrapper
+/// names inputs `categoricals` / `positions` / `flags` / `mask` and outputs
+/// `policy` / `wdl` / `aux` to match what this session expects).
+#[pyclass(name = "HiveOrtSession")]
+pub struct PyHiveOrtSession {
+    engine: HiveTokenOrtEngine,
+}
+
+#[pymethods]
+impl PyHiveOrtSession {
+    #[new]
+    fn new(onnx_path: String) -> PyResult<Self> {
+        let engine = HiveTokenOrtEngine::load(&onnx_path)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyHiveOrtSession { engine })
     }
 }
 
@@ -761,6 +942,7 @@ fn token_vocab() -> (usize, usize, usize) {
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGame>()?;
+    m.add_class::<PyHiveOrtSession>()?;
     m.add_function(wrap_pyfunction!(parse_sgf_moves, m)?)?;
     m.add_function(wrap_pyfunction!(d6_grid_permutations, m)?)?;
     m.add_function(wrap_pyfunction!(d6_axial_transforms, m)?)?;

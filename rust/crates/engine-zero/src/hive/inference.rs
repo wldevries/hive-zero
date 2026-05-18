@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use ort::session::Session;
 use ort::value::TensorRef;
 
+use hive_game::tokenize::{TokenBatch, BILINEAR_DIM, F_FLAGS, SEQ_LEN};
+
 use crate::ort_common::{
     find_onnxruntime_dylib, find_qnn_htp_dll, prepend_qnn_dir_to_path, register_qnn_plugin,
 };
@@ -315,5 +317,125 @@ impl Drop for HiveInferenceWorker {
             drop(std::mem::replace(&mut self.request_tx, dummy_tx));
             let _ = handle.join();
         }
+    }
+}
+
+// ===========================================================================
+// Token-based ORT engine for the HiveTransformer architecture
+// ===========================================================================
+
+/// ONNX Runtime inference engine for the token-based Hive transformer.
+/// Accepts a batch of `TokenBatch`es, returns the per-sample
+/// (policy_flat, value, draw) tuple in the same shape MCTS' expand_and_backprop
+/// consumes. Independent of the CNN-side `HiveOrtEngine` so both can coexist
+/// during the transition.
+pub struct HiveTokenOrtEngine {
+    session: Session,
+    t_input: Duration,
+    t_run: Duration,
+    t_extract: Duration,
+}
+
+impl HiveTokenOrtEngine {
+    pub fn load(onnx_path: &str) -> Result<Self, ort::Error> {
+        prepend_qnn_dir_to_path();
+        ort::init_from(find_onnxruntime_dylib())?.commit();
+        register_qnn_plugin();
+
+        let session = Session::builder()?
+            .with_execution_providers([
+                ort::ep::CUDA::default().build(),
+                ort::ep::QNN::default()
+                    .with_backend_path(find_qnn_htp_dll())
+                    .with_htp_fp16_precision(true)
+                    .with_htp_graph_finalization_optimization_mode(3)
+                    .build(),
+            ])?
+            .commit_from_file(onnx_path)?;
+        Ok(Self {
+            session,
+            t_input: Duration::ZERO,
+            t_run: Duration::ZERO,
+            t_extract: Duration::ZERO,
+        })
+    }
+
+    pub fn phase_times(&self) -> (Duration, Duration, Duration) {
+        (self.t_input, self.t_run, self.t_extract)
+    }
+
+    /// Run inference on a batch of token batches.
+    ///
+    /// Returns `(policies, values, draws)` where:
+    ///   - `policies[i]`: flat policy tensor for leaf `i` (length `2*L*D`),
+    ///     `[Q || K]` D-major, exactly what `PolicyIndex::DotProduct` reads.
+    ///   - `values[i]`: W − L (zero-sum) — already split from WDL.
+    ///   - `draws[i]`: D probability (symmetric).
+    pub fn infer_token_batches(
+        &mut self,
+        batches: &[TokenBatch],
+    ) -> Result<(Vec<Vec<f32>>, Vec<f32>, Vec<f32>), ort::Error> {
+        let b = batches.len();
+        let l = SEQ_LEN;
+        let f = F_FLAGS;
+
+        // ---- pack inputs into contiguous buffers in the right dtype --------
+        let t0 = Instant::now();
+        let mut cat = vec![0i64; b * l * 5];
+        let mut pos = vec![0i64; b * l * 2];
+        let mut flg = vec![0f32; b * l * f];
+        let mut msk = vec![false; b * l];
+        for (bi, tok) in batches.iter().enumerate() {
+            let cat_base = bi * l * 5;
+            let pos_base = bi * l * 2;
+            let flg_base = bi * l * f;
+            let msk_base = bi * l;
+            for li in 0..l {
+                cat[cat_base + li * 5 + 0] = tok.kind[li] as i64;
+                cat[cat_base + li * 5 + 1] = tok.piece_type[li] as i64;
+                cat[cat_base + li * 5 + 2] = tok.color[li] as i64;
+                cat[cat_base + li * 5 + 3] = tok.stack_depth[li] as i64;
+                cat[cat_base + li * 5 + 4] = tok.count[li] as i64;
+                pos[pos_base + li * 2 + 0] = tok.q[li] as i64;
+                pos[pos_base + li * 2 + 1] = tok.r[li] as i64;
+            }
+            flg[flg_base..flg_base + l * f].copy_from_slice(&tok.flags);
+            msk[msk_base..msk_base + l].copy_from_slice(&tok.mask);
+        }
+
+        let cat_t = TensorRef::from_array_view(([b, l, 5usize], cat.as_slice()))?;
+        let pos_t = TensorRef::from_array_view(([b, l, 2usize], pos.as_slice()))?;
+        let flg_t = TensorRef::from_array_view(([b, l, f], flg.as_slice()))?;
+        let msk_t = TensorRef::from_array_view(([b, l], msk.as_slice()))?;
+        self.t_input += t0.elapsed();
+
+        // ---- run ORT session ----------------------------------------------
+        let t1 = Instant::now();
+        let outputs = self.session.run(ort::inputs![
+            "categoricals" => cat_t,
+            "positions"    => pos_t,
+            "flags"        => flg_t,
+            "mask"         => msk_t,
+        ])?;
+        self.t_run += t1.elapsed();
+
+        // ---- extract policy + wdl -----------------------------------------
+        let t2 = Instant::now();
+        let (_, policy_data) = outputs["policy"].try_extract_tensor::<f32>()?;
+        let (_, wdl_data)    = outputs["wdl"].try_extract_tensor::<f32>()?;
+
+        let pol_per = 2 * SEQ_LEN * BILINEAR_DIM;
+        let mut policies = Vec::with_capacity(b);
+        let mut values   = Vec::with_capacity(b);
+        let mut draws    = Vec::with_capacity(b);
+        for i in 0..b {
+            let start = i * pol_per;
+            policies.push(policy_data[start..start + pol_per].to_vec());
+            // WDL layout is [P(win), P(draw), P(loss)] per sample.
+            values.push(wdl_data[i * 3] - wdl_data[i * 3 + 2]);
+            draws.push(wdl_data[i * 3 + 1]);
+        }
+        self.t_extract += t2.elapsed();
+        Ok((policies, values, draws))
     }
 }

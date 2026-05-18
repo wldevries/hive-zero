@@ -849,7 +849,13 @@ impl GameTrait for Game {
 
 impl Priors for Game {
     fn legal_moves_with_priors(&mut self) -> Vec<(PolicyIndex, Self::Move)> {
-        <Self as NNGame>::get_legal_move_mask(self).1
+        // Route through the token encoder, NOT the legacy CNN
+        // get_legal_move_mask: the rest of the token pipeline (PyGame
+        // mcts_run / mcts_run_ort, the HiveTransformer policy head, the
+        // ORT engine output layout) all assume tokens. Using the cell-
+        // based legacy index here would silently read past the policy
+        // buffer because the layouts have different (g2, embed_dim).
+        crate::tokenize::tokenize_and_priors(self).1
     }
 }
 

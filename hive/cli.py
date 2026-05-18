@@ -360,6 +360,13 @@ def main():
     )
     train_parser.set_defaults(export_sgf=True)
     train_parser.add_argument(
+        "--keep-timeout-data",
+        action="store_true",
+        help="Keep samples from games that hit --max-moves (default: skip). "
+             "Timeouts get a heuristic value target instead of being discarded — "
+             "useful on early generations where decisive games are rare.",
+    )
+    train_parser.add_argument(
         "--show-timing",
         action="store_true",
         help="Print per-phase wall-clock breakdown for the ORT self-play "
@@ -641,74 +648,45 @@ def main():
             )
 
     elif args.command == "train":
-        from shared.selfplay_config import MctsConfig, OpeningRandomConfig, PlayoutCapConfig
-        from hive.selfplay.selfplay import SelfPlayTrainer
+        from hive.selfplay.token_train import TrainConfig, run_training
 
-        if args.resign_threshold > 0:
-            parser.error(
-                f"--resign-threshold must be negative (e.g. -0.95), got {args.resign_threshold}"
-            )
+        # Model config: only used to seed the transformer hyperparams on a
+        # fresh checkpoint. CNN-era keys (channels, trunk, …) are silently
+        # ignored by create_model. If --model-config wasn't given, use an
+        # empty dict (HiveTransformer defaults).
+        model_cfg = {}
+        if args.model_config is not None:
+            try:
+                model_cfg = _load_model_config(args.model_config)
+            except FileNotFoundError:
+                parser.error(f"--model-config {args.model_config!r} not found")
+        grid_size = int(model_cfg.get("grid_size", 23))
 
-        lr_scheduler = None
-        if args.lr_schedule:
-            lr_scheduler = lr_scheduler_from_string(args.lr_schedule)
-
-        trainer = SelfPlayTrainer(
+        cfg = TrainConfig(
             name=args.name,
-            device=_resolve_device(args.device),
-            model_config=_load_model_config(args.model_config),
-            lr=args.lr,
-            lr_scheduler=lr_scheduler,
-        )
-        mcts = MctsConfig(
+            generations=args.generations,
+            games_per_gen=args.games,
             simulations=args.simulations,
-            c_puct=args.c_puct,
+            play_batch=getattr(args, "play_batch_sims", 8),
+            epochs_per_gen=args.epochs,
+            training_batch_size=args.training_batch_size,
+            max_moves=args.max_moves,
+            temperature_moves=getattr(args, "temp_threshold", 12),
+            temperature_start=getattr(args, "temperature", 1.0),
             dir_alpha=args.dir_alpha,
             dir_epsilon=args.dir_epsilon,
-            forced_playouts=args.forced_playouts,
-            draw_contempt=args.draw_contempt,
-            asymmetric_contempt=args.asymmetric_contempt,
-            play_batch_size=args.play_batch_sims,
-            temperature=args.temperature,
-            temp_threshold=args.temp_threshold,
-        )
-        playout_cap = PlayoutCapConfig(p=args.playout_cap_p, fast_cap=args.fast_cap)
-        opening = OpeningRandomConfig.from_cli_arg(args.random_opening_moves)
-        trainer.run(
-            mcts=mcts,
-            playout_cap=playout_cap,
-            opening=opening,
-            num_generations=args.generations,
-            games_per_gen=args.games,
-            epochs_per_gen=args.epochs,
-            buffer_warmup_epochs=args.buffer_warmup_epochs,
-            batch_size=args.training_batch_size,
-            max_moves=args.max_moves,
+            c_puct=args.c_puct,
+            lr=args.lr if args.lr is not None else 0.02,
+            device=_resolve_device(args.device),
+            grid_size=grid_size,
+            augment_symmetry=args.augment_symmetry,
+            buffer_size=args.replay_window * args.games * args.max_moves,
+            model_config=model_cfg,
             time_limit_minutes=args.time_limit,
             checkpoint_every=args.checkpoint_every,
-            checkpoint_eval=args.checkpoint_eval,
-            replay_window=args.replay_window,
-            fixed_batch_size=args.fixed_batch_size,
-            resign_threshold=args.resign_threshold,
-            resign_min_moves=args.resign_min_moves,
-            opening_games_csv=args.opening_book,
-            opening_boardspace_dir=args.opening_boardspace_dir,
-            boardspace_frac=args.boardspace_frac,
-            timeout_target=args.timeout_target,
-            q_mix_lambda=args.q_mix_lambda,
-            augment_symmetry=args.augment_symmetry,
-            comment=args.comment,
-            use_ort=args.use_ort,
-            value_loss_scale=args.value_loss_scale,
-            aux_loss_scale=args.aux_loss_scale,
-            training_subsample_frac=args.training_subsample_frac,
-            training_num_workers=args.training_num_workers,
-            buf_dir=args.buf_dir,
-            export_sgf=args.export_sgf,
-            bot_frac=args.bot_frac if args.opponent_bot == "alphabeta" else 0.0,
-            bot_depth=args.bot_depth,
-            show_timing=args.show_timing,
+            skip_timeout_data=not args.keep_timeout_data,
         )
+        run_training(cfg)
     else:
         # Default: UHP engine
         from hive.uhp.engine import UHPEngine
