@@ -346,7 +346,10 @@ def main():
     train_parser.add_argument(
         "--use-ort",
         action="store_true",
-        help="Use Rust-native ORT inference instead of Python eval (requires .onnx model)",
+        help="[no-op] Kept for backward CLI compatibility. The token "
+             "transformer trainer always uses Rust-native ORT inference "
+             "(the Python-callback path holds the GIL across every "
+             "inference batch and has been seen to crash long runs).",
     )
     train_parser.add_argument(
         "--buf-dir",

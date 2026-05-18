@@ -60,6 +60,7 @@ class GameResult:
     move_count: int
     samples_written: int
     final_uhp: str         # the game's final UHP GameString, for SGF export
+    final_board_render: str = ""  # ANSI-coloured hex board snapshot at game end
 
 
 def _sample_move_index(visit_probs: np.ndarray, temperature: float, rng: random.Random) -> int:
@@ -227,6 +228,7 @@ def play_one_game(
             move_count=game.move_count,
             samples_written=0,
             final_uhp=game.game_string,
+            final_board_render=game.render_board(),
         )
 
     if white_value is None:
@@ -264,6 +266,7 @@ def play_one_game(
         move_count=game.move_count,
         samples_written=written,
         final_uhp=game.game_string,
+        final_board_render=game.render_board(),
     )
 
 

@@ -34,7 +34,7 @@ from ..nn.training import HiveDataset, Trainer
 from ..nn.transformer import (
     HiveTransformer, create_model, export_onnx, save_checkpoint, load_checkpoint,
 )
-from .token_selfplay import play_one_game
+from .token_selfplay import GameResult, play_one_game
 
 
 @dataclass
@@ -99,6 +99,53 @@ def _summarize_outcomes(outcomes: list[str]) -> str:
     )
 
 
+def _print_game_length_stats(results: list[GameResult]) -> None:
+    """Game length stats over all games + decisive subset, mirroring the
+    legacy CNN trainer's per-gen summary block."""
+    if not results:
+        return
+    lengths = sorted(r.move_count for r in results)
+    decisive = sorted(
+        r.move_count for r in results
+        if r.outcome in ("WhiteWins", "BlackWins")
+    )
+    print(
+        f"  game length:  "
+        f"min={lengths[0]}  avg={sum(lengths) / len(lengths):.0f}  "
+        f"med={lengths[len(lengths) // 2]}  max={lengths[-1]}",
+        end="",
+    )
+    if decisive:
+        d_avg = sum(decisive) / len(decisive)
+        d_med = decisive[len(decisive) // 2]
+        print(f"   decisive: avg={d_avg:.0f}  med={d_med}")
+    else:
+        print()
+
+
+def _print_sample_board(results: list[GameResult]) -> None:
+    """Render the final board of one decisive game (preferred) or the first
+    timeout game otherwise. Single board only — we want this to stay
+    compact across many generations of training output."""
+    if not results:
+        return
+    chosen = next(
+        (r for r in results if r.outcome in ("WhiteWins", "BlackWins")),
+        None,
+    )
+    if chosen is None:
+        chosen = next(
+            (r for r in results if r.outcome in ("Draw", "DrawByRepetition")),
+            None,
+        )
+    if chosen is None:
+        chosen = results[0]  # timeout
+    label = f"{chosen.outcome} ({chosen.move_count} moves)"
+    print(f"  sample game: {label}")
+    for line in chosen.final_board_render.splitlines():
+        print(f"    {line}")
+
+
 def run_training(cfg: TrainConfig) -> None:
     """Drive the play → train → export → repeat loop until `generations`
     are done or `time_limit_minutes` elapses."""
@@ -148,7 +195,7 @@ def run_training(cfg: TrainConfig) -> None:
 
             # ---- 3. Self-play N games -----------------------------------
             t0 = time.time()
-            outcomes: list[str] = []
+            results: list[GameResult] = []
             total_samples = 0
             pbar = tqdm(
                 range(cfg.games_per_gen),
@@ -157,9 +204,9 @@ def run_training(cfg: TrainConfig) -> None:
                 dynamic_ncols=True,
             )
             for game_idx in pbar:
-                # Per-move callback updates the tqdm postfix every ply so the
-                # user can see turns advancing even when single-move latency
-                # is large (slow GPU / high sim count).
+                # Per-move callback updates the tqdm postfix every ply so
+                # the user can see turns advancing even when single-move
+                # latency is large (slow GPU / high sim count).
                 def _on_move(move_n: int, last_uhp: str, root_q: float,
                              _pbar=pbar, _gi=game_idx):
                     _pbar.set_postfix_str(
@@ -186,22 +233,26 @@ def run_training(cfg: TrainConfig) -> None:
                     rng_seed=gen * 10_000 + game_idx,
                     on_move=_on_move,
                 )
-                outcomes.append(result.outcome)
+                results.append(result)
                 total_samples += result.samples_written
                 pbar.set_postfix_str(
                     f"played={game_idx+1}/{cfg.games_per_gen} "
-                    f"{_summarize_outcomes(outcomes)} "
+                    f"{_summarize_outcomes([r.outcome for r in results])} "
                     f"samples={total_samples}",
                     refresh=True,
                 )
             pbar.close()
             t_play = time.time() - t0
+            outcomes = [r.outcome for r in results]
             print(
                 f"  selfplay: {cfg.games_per_gen} games  "
                 f"{_summarize_outcomes(outcomes)}  "
                 f"+{total_samples} samples  "
                 f"({t_play:.1f}s, {total_samples / max(t_play, 1e-3):.0f} samp/s)"
             )
+            _print_game_length_stats(results)
+            _print_sample_board(results)
+            print(f"  buffer: {dataset.raw_size}/{dataset.max_size}")
         finally:
             try:
                 os.unlink(onnx_path)
@@ -224,7 +275,10 @@ def run_training(cfg: TrainConfig) -> None:
                     f"total={stats['total_loss']:.4f}  "
                     f"policy={stats['policy_loss']:.4f}  "
                     f"value={stats['value_loss']:.4f}  "
-                    f"aux={stats['aux_loss']:.4f}"
+                    f"aux={stats['aux_loss']:.4f}  "
+                    f"(qd={stats.get('qd_loss', 0):.4f} "
+                    f"qe={stats.get('qe_loss', 0):.4f} "
+                    f"mob={stats.get('mob_loss', 0):.4f})"
                 )
         t_train = time.time() - t0
         print(f"  train: {t_train:.1f}s")
