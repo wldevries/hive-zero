@@ -372,13 +372,27 @@ fn sample_chosen_move(
     };
 
     if t <= 0.0 {
-        // Argmax.
-        let mut best_i = 0usize;
-        let mut best_v = f32::NEG_INFINITY;
-        for (i, (_, p)) in visits.iter().enumerate() {
-            if *p > best_v { best_v = *p; best_i = i; }
-        }
-        return Ok(visits[best_i].0);
+        // Argmax — but uniformly randomise across visit-count ties so
+        // an untrained net's roughly-uniform visit distribution doesn't
+        // collapse onto the first move in valid_moves() order. Without
+        // this, every game opens with the same piece/cell and self-play
+        // converges to DrawByRepetition. Once the net is trained the
+        // top visit count usually wins outright and the tie-break is a
+        // no-op.
+        let best_v = visits.iter().map(|(_, p)| *p)
+            .fold(f32::NEG_INFINITY, f32::max);
+        // Treat anything within 1e-6 of best_v as tied.
+        let tied: Vec<usize> = visits.iter().enumerate()
+            .filter(|(_, (_, p))| (best_v - *p).abs() < 1e-6)
+            .map(|(i, _)| i)
+            .collect();
+        let pick = if tied.len() == 1 {
+            tied[0]
+        } else {
+            let r = next_unit_f32(&mut slot.rng_state);
+            tied[((r * tied.len() as f32) as usize).min(tied.len() - 1)]
+        };
+        return Ok(visits[pick].0);
     }
 
     // visits are already normalized; reshape by 1/T then sample.
