@@ -147,6 +147,12 @@ class TransformerBlock(nn.Module):
         assert d_model % num_heads == 0
         self.num_heads = num_heads
         self.head_dim = d_model // num_heads
+        # Precompute the 1/sqrt(head_dim) scale as a Python constant so it
+        # gets folded into the ONNX graph as a static value rather than a
+        # runtime `Slice → Cast → Sqrt → Cast → Div` chain. That chain
+        # rounds through fp32 inside an otherwise-fp16 graph and pulls
+        # host↔device Memcpy nodes (one per block).
+        self.attn_scale = 1.0 / math.sqrt(self.head_dim)
 
         self.ln1 = nn.LayerNorm(d_model)
         self.qkv = nn.Linear(d_model, 3 * d_model)
@@ -159,11 +165,15 @@ class TransformerBlock(nn.Module):
             nn.Linear(ffn_mult * d_model, d_model),
         )
 
-    def forward(self, x: torch.Tensor, attn_bias: torch.Tensor, key_padding_mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         """
-        x:                  (B, L, d_model)
-        attn_bias:          (B, num_heads, L, L) — added pre-softmax
-        key_padding_mask:   (B, L) bool — True for real tokens, False for pad
+        x:          (B, L, d_model)
+        attn_mask:  (B, num_heads, L, L) float — additive bias already
+                    composed with the pad-key mask (pad columns set to
+                    -inf upstream). Always float (no bool tensors enter
+                    per-block code — keeps the graph on CUDA without the
+                    Cast→Where→Memcpy fallback to CPU that hits when bool
+                    ops have no GPU impl).
         """
         B, L, D = x.shape
         # ---- self-attention ----
@@ -171,12 +181,9 @@ class TransformerBlock(nn.Module):
         qkv = self.qkv(h).reshape(B, L, 3, self.num_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)  # each (B, H, L, head_dim)
 
-        # Combine attn_bias with pad-key mask. For pad columns, add -inf so
-        # they don't get attended to. SDPA accepts an additive float mask.
-        pad_cols = (~key_padding_mask).unsqueeze(1).unsqueeze(1)        # (B, 1, 1, L)
-        mask = attn_bias.masked_fill(pad_cols, float('-inf'))            # (B, H, L, L)
-
-        attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        attn_out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, scale=self.attn_scale,
+        )
         attn_out = attn_out.permute(0, 2, 1, 3).reshape(B, L, D)
         x = x + self.out_proj(attn_out)
 
@@ -315,8 +322,23 @@ class HiveTransformer(nn.Module):
         r_pos = positions[..., 1].long()
         attn_bias = self.rel_bias(q_pos, r_pos, positional)   # (B, H, L, L)
 
+        # Compose attn_bias + pad-key mask once at the model entry as
+        # PURE FLOAT math. Bool ops (~, masked_fill, Where on bool)
+        # frequently lack CUDA kernels in ORT's CUDA EP and get
+        # partitioned to CPU — each fallback per block adds a host↔device
+        # Memcpy node and breaks the all-GPU graph. By doing one
+        # bool→float Cast (which IS CUDA-supported) at the entry and
+        # working in float thereafter, every per-block self-attention
+        # call sees a plain float additive mask, no Cast/Where/Memcpy
+        # round-trips. We use -1e9 instead of -inf so fp16/bf16 stays
+        # well under the dtype's max representable value (softmax still
+        # treats it as zero contribution).
+        mask_f = mask.to(attn_bias.dtype)                       # (B, L) 1.0 real, 0.0 pad
+        pad_bias = (1.0 - mask_f).unsqueeze(1).unsqueeze(1) * -1e9  # (B, 1, 1, L)
+        attn_mask = attn_bias + pad_bias                         # (B, H, L, L)
+
         for block in self.blocks:
-            x = block(x, attn_bias, key_padding_mask=mask)
+            x = block(x, attn_mask)
 
         h = self.final_norm(x)
 

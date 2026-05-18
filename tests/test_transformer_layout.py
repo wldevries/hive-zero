@@ -73,9 +73,12 @@ def test_policy_d_major_layout():
         # Run the trunk by reusing internals, then check the policy head.
         x, positional = m._embed(cat, pos, flg)
         attn_bias = m.rel_bias(pos[..., 0].long(), pos[..., 1].long(), positional)
+        mask_f = mask.to(attn_bias.dtype)
+        pad_bias = (1.0 - mask_f).unsqueeze(1).unsqueeze(1) * -1e9
+        attn_mask = attn_bias + pad_bias
         h = x
         for block in m.blocks:
-            h = block(h, attn_bias, key_padding_mask=mask)
+            h = block(h, attn_mask)
         h = m.final_norm(h)
         q_emb = m.policy_q(h)              # (B, L, D)
         k_emb = m.policy_k(h)              # (B, L, D)

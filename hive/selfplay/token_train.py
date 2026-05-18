@@ -35,6 +35,7 @@ from ..nn.transformer import (
     HiveTransformer, create_model, export_onnx, save_checkpoint, load_checkpoint,
 )
 from .token_selfplay import GameResult, play_one_game
+from .token_selfplay_concurrent import play_games_concurrent
 
 
 @dataclass
@@ -193,56 +194,66 @@ def run_training(cfg: TrainConfig) -> None:
             from engine_zero import HiveOrtSession
             session = HiveOrtSession(onnx_path)
 
-            # ---- 3. Self-play N games -----------------------------------
+            # ---- 3. Self-play N games concurrently with cross-game ------
+            # batching. The Rust runner drives all K games through one
+            # shared ORT session, batching MCTS leaves from every active
+            # game into single inference calls (effective batch size up
+            # to K * play_batch). One ply-level tqdm bar updated from a
+            # progress callback in the Rust round-loop.
             t0 = time.time()
-            results: list[GameResult] = []
-            total_samples = 0
             pbar = tqdm(
-                range(cfg.games_per_gen),
+                total=cfg.games_per_gen * cfg.max_moves,
                 desc=f"  gen {gen} selfplay",
-                unit="game",
+                unit="ply",
                 dynamic_ncols=True,
             )
-            for game_idx in pbar:
-                # Per-move callback updates the tqdm postfix every ply so
-                # the user can see turns advancing even when single-move
-                # latency is large (slow GPU / high sim count).
-                def _on_move(move_n: int, last_uhp: str, root_q: float,
-                             _pbar=pbar, _gi=game_idx):
-                    _pbar.set_postfix_str(
-                        f"game={_gi+1}/{cfg.games_per_gen} ply={move_n}/"
-                        f"{cfg.max_moves} last={last_uhp} q={root_q:+.2f}",
-                        refresh=True,
-                    )
+            # Track previous total move-count snapshot so we can report
+            # ply deltas to tqdm.
+            prev_total_plies = [0]
 
-                result = play_one_game(
-                    eval_fn=None,
-                    ort_session=session,
-                    dataset=dataset,
-                    simulations=cfg.simulations,
-                    play_batch=cfg.play_batch,
-                    c_puct=cfg.c_puct,
-                    dir_alpha=cfg.dir_alpha,
-                    dir_epsilon=cfg.dir_epsilon,
-                    max_moves=cfg.max_moves,
-                    temperature_moves=cfg.temperature_moves,
-                    temperature_start=cfg.temperature_start,
-                    grid_size=cfg.grid_size,
-                    tournament_mode=cfg.tournament_mode,
-                    skip_timeout_data=cfg.skip_timeout_data,
-                    rng_seed=gen * 10_000 + game_idx,
-                    on_move=_on_move,
-                )
-                results.append(result)
-                total_samples += result.samples_written
+            def _progress(round_idx: int, active: int, batch: int,
+                          per_game: list[tuple[int, int]]):
+                total_plies = sum(m for (m, _) in per_game)
+                # `per_game` lists ACTIVE games only; finished games' ply
+                # contributions stay at their last value. Approximate by
+                # tracking the running sum we've already credited.
+                delta = total_plies - prev_total_plies[0]
+                if delta > 0:
+                    pbar.update(delta)
+                    prev_total_plies[0] = total_plies
                 pbar.set_postfix_str(
-                    f"played={game_idx+1}/{cfg.games_per_gen} "
-                    f"{_summarize_outcomes([r.outcome for r in results])} "
-                    f"samples={total_samples}",
+                    f"round={round_idx} active={active}/{cfg.games_per_gen} "
+                    f"batch={batch}",
                     refresh=True,
                 )
+
+            results = play_games_concurrent(
+                session,
+                dataset,
+                num_games=cfg.games_per_gen,
+                simulations=cfg.simulations,
+                play_batch=cfg.play_batch,
+                c_puct=cfg.c_puct,
+                draw_contempt=0.0,
+                dir_alpha=cfg.dir_alpha,
+                dir_epsilon=cfg.dir_epsilon,
+                max_moves=cfg.max_moves,
+                temperature_moves=cfg.temperature_moves,
+                temperature_start=cfg.temperature_start,
+                grid_size=cfg.grid_size,
+                tournament_mode=cfg.tournament_mode,
+                skip_timeout_data=cfg.skip_timeout_data,
+                rng_seed=gen * 10_000,
+                progress_cb=_progress,
+            )
+            # Final tick to fill the bar in case some games didn't fully
+            # update (the per-active-game snapshot drops finished games).
+            total_plies_final = sum(r.move_count for r in results)
+            if total_plies_final > prev_total_plies[0]:
+                pbar.update(total_plies_final - prev_total_plies[0])
             pbar.close()
             t_play = time.time() - t0
+            total_samples = sum(r.samples_written for r in results)
             outcomes = [r.outcome for r in results]
             print(
                 f"  selfplay: {cfg.games_per_gen} games  "

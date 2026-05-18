@@ -30,6 +30,9 @@ use hive_game::tokenize::{
 };
 
 use super::inference::HiveTokenOrtEngine;
+use super::concurrent_selfplay::{
+    self, ConcurrentSelfPlayConfig, ProgressFn,
+};
 
 // ---- Python callback bridge: TokenBatch ↔ numpy --------------------------
 
@@ -940,6 +943,136 @@ fn token_vocab() -> (usize, usize, usize) {
     (SEQ_LEN, F_FLAGS, BILINEAR_DIM)
 }
 
+/// Play `num_games` games of token self-play CONCURRENTLY through a single
+/// ORT session, batching MCTS leaves across all games for high GPU
+/// utilization. Returns a list of per-game dicts:
+///
+///   {
+///     "outcome": str,
+///     "move_count": int,
+///     "final_uhp": str,
+///     "final_board_render": str,
+///     "samples": [
+///        {
+///           "categoricals": np.ndarray[L, 5] uint8,
+///           "positions":    np.ndarray[L, 2] int8,
+///           "flags":        np.ndarray[L, F] float32,
+///           "mask":         np.ndarray[L] bool,
+///           "move_src":     np.ndarray[K] uint8,
+///           "move_dst":     np.ndarray[K] uint8,
+///           "move_probs":   np.ndarray[K] float32,
+///           "root_q":       float,
+///           "mover_is_white": bool,
+///        }, ...
+///     ],
+///   }
+///
+/// `progress_cb`, if provided, is called once per inference round with
+/// `(round_idx, active_games, batch_size, [(move_count, sims_for_move),
+/// ...])` for the active games. Use it to drive a tqdm bar.
+#[pyfunction]
+#[pyo3(signature = (
+    ort_session,
+    num_games,
+    simulations = 100,
+    play_batch = 8,
+    c_puct = 1.5,
+    draw_contempt = 0.0,
+    dir_alpha = 0.3,
+    dir_epsilon = 0.25,
+    max_moves = 200,
+    temperature_moves = 12,
+    temperature_start = 1.0,
+    temperature_end = 0.0,
+    grid_size = 23,
+    tournament_mode = false,
+    rng_seed = 0u64,
+    progress_cb = None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn play_games_concurrent_ort<'py>(
+    py: Python<'py>,
+    ort_session: &mut PyHiveOrtSession,
+    num_games: usize,
+    simulations: usize,
+    play_batch: usize,
+    c_puct: f32,
+    draw_contempt: f32,
+    dir_alpha: f32,
+    dir_epsilon: f32,
+    max_moves: u32,
+    temperature_moves: u32,
+    temperature_start: f32,
+    temperature_end: f32,
+    grid_size: usize,
+    tournament_mode: bool,
+    rng_seed: u64,
+    progress_cb: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Vec<Py<PyAny>>> {
+    use pyo3::types::PyDict;
+
+    let cfg = ConcurrentSelfPlayConfig {
+        num_games,
+        simulations,
+        play_batch: play_batch.max(1),
+        c_puct,
+        draw_contempt,
+        dir_alpha,
+        dir_epsilon,
+        max_moves,
+        temperature_moves,
+        temperature_start,
+        temperature_end,
+        grid_size,
+        tournament_mode,
+        rng_seed,
+    };
+
+    // Optional progress callback. ProgressFn is 'a tied to the engine
+    // borrow; we own the Py<PyAny> and re-attach the GIL inside the closure.
+    let cb_owned: Option<Py<PyAny>> = progress_cb.map(|c| c.clone().unbind());
+    let mut progress: Option<ProgressFn<'_>> = cb_owned.as_ref().map(|cb_obj| {
+        Box::new(move |round_idx: usize, active: usize, batch: usize, per_game: &[(u32, usize)]| {
+            Python::attach(|py| {
+                let _ = cb_obj.call1(py, (round_idx, active, batch, per_game.to_vec()));
+            });
+        }) as ProgressFn<'_>
+    });
+
+    let results = concurrent_selfplay::play_games_concurrent_ort(
+        &cfg, &mut ort_session.engine, progress.take(),
+    )
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+    // Pack each result as a Python dict with numpy arrays for each sample.
+    let mut out: Vec<Py<PyAny>> = Vec::with_capacity(results.len());
+    for r in results {
+        let dict = PyDict::new(py);
+        dict.set_item("outcome", r.outcome)?;
+        dict.set_item("move_count", r.move_count)?;
+        dict.set_item("final_uhp", r.final_uhp)?;
+        dict.set_item("final_board_render", r.final_board_render)?;
+        let mut samples: Vec<Py<PyAny>> = Vec::with_capacity(r.samples.len());
+        for s in r.samples {
+            let sd = PyDict::new(py);
+            let (cat, pos, flg, msk) = token_batch_to_per_sample_numpy(py, &s.tokens)?;
+            sd.set_item("categoricals", cat)?;
+            sd.set_item("positions", pos)?;
+            sd.set_item("flags", flg)?;
+            sd.set_item("mask", msk)?;
+            sd.set_item("move_src", make_array1(py, s.move_src))?;
+            sd.set_item("move_dst", make_array1(py, s.move_dst))?;
+            sd.set_item("move_probs", make_array1(py, s.move_probs))?;
+            sd.set_item("root_q", s.root_q)?;
+            sd.set_item("mover_is_white", s.mover_is_white)?;
+            samples.push(sd.into_pyobject(py)?.unbind().into());
+        }
+        dict.set_item("samples", samples)?;
+        out.push(dict.into_pyobject(py)?.unbind().into());
+    }
+    Ok(out)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGame>()?;
     m.add_class::<PyHiveOrtSession>()?;
@@ -948,5 +1081,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(d6_axial_transforms, m)?)?;
     m.add_function(wrap_pyfunction!(d6_direction_permutations, m)?)?;
     m.add_function(wrap_pyfunction!(token_vocab, m)?)?;
+    m.add_function(wrap_pyfunction!(play_games_concurrent_ort, m)?)?;
     Ok(())
 }
