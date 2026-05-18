@@ -215,51 +215,6 @@ pub fn get_legal_move_mask_nn(board: &ZertzBoard) -> (Vec<f32>, Vec<(PolicyIndex
     (mask, indexed)
 }
 
-/// Joint-form policy mask for V1 (pre-split-ply) MCTS. Same NN policy
-/// layout (490 floats), but `Place` moves are scored as the **sum** of the
-/// color/position cell and the remove-ring cell — V1's native prior dialect.
-/// Used by `JointZertzBoard` so V1 checkpoints can play in their training
-/// distribution without seeing half-moves or mid_placement states.
-pub fn get_legal_move_mask_nn_joint(board: &ZertzBoard) -> (Vec<f32>, Vec<(PolicyIndex, ZertzMove)>) {
-    const G2: usize = GRID_SIZE * GRID_SIZE;
-    let mut mask = vec![0.0f32; NN_POLICY_SIZE];
-    let moves = board.legal_joint_moves();
-    let mut indexed = Vec::with_capacity(moves.len());
-
-    for mv in moves {
-        let pi = match mv {
-            ZertzMove::Place { color, place_at, remove } => {
-                let a = color.index() * G2 + hex_to_grid_cell(place_at);
-                let b = 3 * G2 + hex_to_grid_cell(remove);
-                mask[a] = 1.0;
-                mask[b] = 1.0;
-                PolicyIndex::Sum(a, b)
-            }
-            ZertzMove::PlaceOnly { color, place_at } => {
-                let a = color.index() * G2 + hex_to_grid_cell(place_at);
-                mask[a] = 1.0;
-                PolicyIndex::Single(a)
-            }
-            ZertzMove::Capture { jumps, .. } => {
-                let from = jumps[0].0;
-                let to = jumps[0].2;
-                let d = capture_direction(from, to);
-                let a = (4 + d) * G2 + hex_to_grid_cell(from);
-                mask[a] = 1.0;
-                PolicyIndex::Single(a)
-            }
-            // V1 never produces half-moves or pass — legal_joint_moves only
-            // returns Place/PlaceOnly/Capture/Pass. Skip if any do slip in.
-            ZertzMove::PlaceMarbleHalf { .. }
-            | ZertzMove::RemoveRingHalf { .. }
-            | ZertzMove::Pass => continue,
-        };
-        indexed.push((pi, mv));
-    }
-
-    (mask, indexed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
