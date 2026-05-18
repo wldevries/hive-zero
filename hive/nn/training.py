@@ -510,14 +510,25 @@ class Trainer:
         spatial coordinates flow through the symmetry. This is materially
         simpler than the CNN era where cell permutations had to remap
         per-cell channels and per-cell policy targets.
+
+        Implementation note: we expand the 2×2 matmul into explicit
+        element-wise multiplies and adds rather than using
+        `torch.einsum("bij,blj->bli", mats, positions)`. The einsum
+        formulation dispatches to `baddbmm`, which has no CUDA kernel
+        for int64 — and we keep positions in int64 because the model's
+        absolute-position embedding indexes them directly.
         """
         self._init_sym_buffers()
-        mats = self._sym_mats_gpu[sym_idx]      # (B, 2, 2)
-        # positions: (B, L, 2). Apply mat per sample:
-        #   new_q = mat[0, 0]*q + mat[0, 1]*r
-        #   new_r = mat[1, 0]*q + mat[1, 1]*r
-        # einsum: "bij,blj->bli"
-        return torch.einsum("bij,blj->bli", mats, positions)
+        mats = self._sym_mats_gpu[sym_idx]                # (B, 2, 2) int64
+        q = positions[..., 0]                              # (B, L)
+        r = positions[..., 1]
+        m00 = mats[:, 0, 0].unsqueeze(1)                  # (B, 1)
+        m01 = mats[:, 0, 1].unsqueeze(1)
+        m10 = mats[:, 1, 0].unsqueeze(1)
+        m11 = mats[:, 1, 1].unsqueeze(1)
+        new_q = m00 * q + m01 * r
+        new_r = m10 * q + m11 * r
+        return torch.stack([new_q, new_r], dim=-1)        # (B, L, 2)
 
     def _compute_batch_losses(
         self, batch, value_loss_scale: float, aux_loss_scale: float
