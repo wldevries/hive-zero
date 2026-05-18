@@ -125,26 +125,52 @@ def _print_game_length_stats(results: list[GameResult]) -> None:
 
 
 def _print_sample_board(results: list[GameResult]) -> None:
-    """Render the final board of one decisive game (preferred) or the first
-    timeout game otherwise. Single board only — we want this to stay
-    compact across many generations of training output."""
+    """Render the final boards of up to 3 representative games. Prefers
+    decisive outcomes (one per side) and one draw/timeout for contrast,
+    falling back to whatever's available. Multiple samples make it
+    obvious whether self-play is actually producing varied games — when
+    all games look identical (untrained-net first-gen artifact, or a
+    bug like the move-order tie-break that converged everything to the
+    same chain), every sample renders the same."""
     if not results:
         return
-    chosen = next(
-        (r for r in results if r.outcome in ("WhiteWins", "BlackWins")),
-        None,
-    )
-    if chosen is None:
-        chosen = next(
-            (r for r in results if r.outcome in ("Draw", "DrawByRepetition")),
-            None,
-        )
-    if chosen is None:
-        chosen = results[0]  # timeout
-    label = f"{chosen.outcome} ({chosen.move_count} moves)"
-    print(f"  sample game: {label}")
-    for line in chosen.final_board_render.splitlines():
-        print(f"    {line}")
+    seen_uhps: set[str] = set()
+    picks: list[GameResult] = []
+    # Try one of each outcome class to show variety.
+    for outcome_class in (
+        ("WhiteWins",),
+        ("BlackWins",),
+        ("Draw", "DrawByRepetition"),
+        ("InProgress",),
+    ):
+        for r in results:
+            if r.outcome in outcome_class and r.final_uhp not in seen_uhps:
+                picks.append(r)
+                seen_uhps.add(r.final_uhp)
+                break
+        if len(picks) >= 3:
+            break
+    # If we still have room, fill with distinct-UHP games.
+    if len(picks) < 3:
+        for r in results:
+            if r.final_uhp in seen_uhps:
+                continue
+            picks.append(r)
+            seen_uhps.add(r.final_uhp)
+            if len(picks) >= 3:
+                break
+    if not picks:
+        picks = [results[0]]
+
+    # Count distinct game-strings so the user can see at a glance whether
+    # self-play is degenerate (all games identical).
+    distinct_uhps = len({r.final_uhp for r in results})
+    print(f"  sample games ({distinct_uhps} distinct of {len(results)}):")
+    for r in picks:
+        label = f"{r.outcome} ({r.move_count} moves)"
+        print(f"  · {label}")
+        for line in r.final_board_render.splitlines():
+            print(f"      {line}")
 
 
 def run_training(cfg: TrainConfig) -> None:

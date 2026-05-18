@@ -329,12 +329,19 @@ class HiveTransformer(nn.Module):
         # Memcpy node and breaks the all-GPU graph. By doing one
         # bool→float Cast (which IS CUDA-supported) at the entry and
         # working in float thereafter, every per-block self-attention
-        # call sees a plain float additive mask, no Cast/Where/Memcpy
-        # round-trips. We use -1e9 instead of -inf so fp16/bf16 stays
-        # well under the dtype's max representable value (softmax still
-        # treats it as zero contribution).
+        # call sees a plain float additive mask.
+        #
+        # The saturation constant is `-1e4`, NOT `-1e9` or `-inf`: in fp16
+        # exports those overflow to `-inf`, and then `0 * -inf = NaN`
+        # (IEEE 754) for the REAL token rows where (1 − mask_f) = 0 — and
+        # the NaN propagates through every downstream attention block,
+        # producing NaN priors and effectively breaking MCTS. `-1e4` fits
+        # well inside fp16's representable range (max ≈ 65504), keeps
+        # `0 · (−1e4) = 0` exact, and is still small enough that
+        # `exp(−1e4)` underflows to 0 in softmax — i.e. masked positions
+        # contribute zero weight as intended.
         mask_f = mask.to(attn_bias.dtype)                       # (B, L) 1.0 real, 0.0 pad
-        pad_bias = (1.0 - mask_f).unsqueeze(1).unsqueeze(1) * -1e9  # (B, 1, 1, L)
+        pad_bias = (1.0 - mask_f).unsqueeze(1).unsqueeze(1) * -1e4  # (B, 1, 1, L)
         attn_mask = attn_bias + pad_bias                         # (B, H, L, L)
 
         for block in self.blocks:
