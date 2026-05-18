@@ -182,9 +182,11 @@ def main():
     train_parser.add_argument(
         "--play-batch-sims",
         type=int,
-        default=1,
-        help="Rounds of sim steps to accumulate before an inference call "
-        "(batch ≈ N × active games). Default 1 = flush every round.",
+        default=8,
+        help="MCTS leaves selected and evaluated per inference call during "
+             "self-play. With virtual loss in MCTS, larger batches do more "
+             "GPU work per round-trip but mildly diverge from sequential "
+             "MCTS. 8 is a reasonable default for the token transformer.",
     )
     train_parser.add_argument(
         "--fixed-batch-size",
@@ -667,7 +669,7 @@ def main():
             generations=args.generations,
             games_per_gen=args.games,
             simulations=args.simulations,
-            play_batch=getattr(args, "play_batch_sims", 8),
+            play_batch=args.play_batch_sims,
             epochs_per_gen=args.epochs,
             training_batch_size=args.training_batch_size,
             max_moves=args.max_moves,
