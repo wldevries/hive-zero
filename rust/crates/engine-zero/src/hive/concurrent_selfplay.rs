@@ -166,6 +166,14 @@ pub fn play_games_concurrent_ort(
             if slot.sims_for_current_move >= cfg.simulations { continue; }
             let want = cfg.play_batch.min(cfg.simulations - slot.sims_for_current_move);
             let leaves = slot.search.select_leaves(want);
+            // Note: sims_for_current_move credits `want` regardless of
+            // `leaves.len()`. select_leaves can return fewer than `want`
+            // leaves when some selections hit terminal nodes inside the
+            // tree — those terminals are still real simulations (their
+            // value gets backpropped internally), they just don't need NN
+            // evaluation. Crediting `want` here keeps the per-move sim
+            // budget honest and prevents "stuck" slots when terminal-only
+            // batches occur.
             slot.sims_for_current_move += want;
             if leaves.is_empty() { continue; }
             for leaf in &leaves {
@@ -179,8 +187,33 @@ pub fn play_games_concurrent_ort(
         }
 
         if batches.is_empty() {
-            // No active games left.
-            break;
+            // No INIT or SIM batches to dispatch this round. But this DOESN'T
+            // necessarily mean we're done: a slot may have just crossed the
+            // sims_done >= simulations threshold during this round's SIM
+            // phase (e.g. via empty leaves from select_leaves on the final
+            // partial batch — every selection in that batch hit a terminal
+            // node, so leaves.len() = 0 but sims_for_current_move still
+            // incremented by `want`). Those slots are READY TO ADVANCE in
+            // the NEXT iter — we must let the loop continue rather than
+            // terminate here.
+            let any_active = slots.iter().any(|s| !s.complete);
+            if !any_active {
+                break;
+            }
+            // Otherwise fall through to round_idx++ and continue. The next
+            // iter's ADVANCE phase will pick up any slot with sims_done >=
+            // simulations, play its move, and re-INIT for the next ply —
+            // which WILL contribute a batch.
+            round_idx += 1;
+            if let Some(cb) = progress.as_mut() {
+                let snapshot: Vec<(u32, usize)> = slots.iter()
+                    .filter(|s| !s.complete)
+                    .map(|s| (s.game.move_count as u32, s.sims_for_current_move))
+                    .collect();
+                let active = snapshot.len();
+                cb(round_idx, active, 0, &snapshot);
+            }
+            continue;
         }
 
         // ---- One big inference call across all games -------------------
