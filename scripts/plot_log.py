@@ -154,6 +154,10 @@ def plot_perf_log(csv_path: Path, output: Path | None = None, rolling: int = 1) 
         ppl = pd.to_numeric(loss_df["place_policy_loss"], errors="coerce")
         if ppl.notna().any() and (ppl > 0).any():
             ax2.plot(loss_x, ppl, label="Place pol loss", color="royalblue", linewidth=1, linestyle="--")
+    if "remove_policy_loss" in loss_df.columns:
+        rpl = pd.to_numeric(loss_df["remove_policy_loss"], errors="coerce")
+        if rpl.notna().any() and (rpl > 0).any():
+            ax2.plot(loss_x, rpl, label="Remove pol loss", color="mediumpurple", linewidth=1, linestyle="--")
     if "capture_policy_loss" in loss_df.columns:
         cpl = pd.to_numeric(loss_df["capture_policy_loss"], errors="coerce")
         if cpl.notna().any() and (cpl > 0).any():

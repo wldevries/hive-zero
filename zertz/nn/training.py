@@ -544,10 +544,12 @@ class Trainer:
         total_place_value_loss = 0.0
         total_capture_value_loss = 0.0
         total_place_policy_loss = 0.0
+        total_remove_policy_loss = 0.0
         total_capture_policy_loss = 0.0
         place_value_batches = 0
         capture_value_batches = 0
         place_policy_batches = 0
+        remove_policy_batches = 0
         capture_policy_batches = 0
         num_batches = 0
 
@@ -582,32 +584,34 @@ class Trainer:
             policy_loss = torch.tensor(0.0, device=self.device)
 
             # Place turns: train place color/position (ch 0-2) and remove (ch 3) heads
+            # independently. PlaceMarbleHalf samples only carry a cp target;
+            # RemoveRingHalf samples only carry an rm target — disjoint per sample,
+            # so we log them as separate per-sample averages.
             place_active = ~cap_mask & ~vo_mask
             if place_active.any():
                 pw = policy_mask[place_active]
-                n_place = place_active.sum().item()
-                pp = torch.tensor(0.0, device=self.device)
 
-                # Color/position head (channels 0-2, flat 3*49=147)
+                # Color/position head (channels 0-2, flat 3*49=147) — marble placement
                 cp_logits = place_logits[place_active, :3 * _GS]
                 cp_target = place_cp_t[place_active]
                 has_cp = cp_target.sum(dim=1) > 0
                 if has_cp.any():
                     cp_loss = _head_ce(cp_logits[has_cp], cp_target[has_cp])
-                    policy_loss = policy_loss + (cp_loss * pw[has_cp]).mean()
-                    pp = pp + (cp_loss * pw[has_cp]).sum() / n_place
+                    weighted_cp = (cp_loss * pw[has_cp]).mean()
+                    policy_loss = policy_loss + weighted_cp
+                    total_place_policy_loss += weighted_cp.item()
+                    place_policy_batches += 1
 
-                # Remove head (channel 3, flat 49)
+                # Remove head (channel 3, flat 49) — ring removal
                 rm_logits = place_logits[place_active, 3 * _GS:]
                 rm_target = place_rm_t[place_active]
                 has_rm = rm_target.sum(dim=1) > 0
                 if has_rm.any():
                     rm_loss = _head_ce(rm_logits[has_rm], rm_target[has_rm])
-                    policy_loss = policy_loss + (rm_loss * pw[has_rm]).mean()
-                    pp = pp + (rm_loss * pw[has_rm]).sum() / n_place
-
-                total_place_policy_loss += pp.item()
-                place_policy_batches += 1
+                    weighted_rm = (rm_loss * pw[has_rm]).mean()
+                    policy_loss = policy_loss + weighted_rm
+                    total_remove_policy_loss += weighted_rm.item()
+                    remove_policy_batches += 1
 
             # Capture turns (first-hop and mid-capture): train cap_dir head uniformly
             cap_active = cap_mask & ~vo_mask
@@ -646,7 +650,8 @@ class Trainer:
         if num_batches == 0:
             return {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0,
                     "place_value_loss": 0.0, "capture_value_loss": 0.0,
-                    "place_policy_loss": 0.0, "capture_policy_loss": 0.0}
+                    "place_policy_loss": 0.0, "remove_policy_loss": 0.0,
+                    "capture_policy_loss": 0.0}
 
         return {
             "policy_loss": total_policy_loss / num_batches,
@@ -655,5 +660,6 @@ class Trainer:
             "place_value_loss": total_place_value_loss / place_value_batches if place_value_batches else 0.0,
             "capture_value_loss": total_capture_value_loss / capture_value_batches if capture_value_batches else 0.0,
             "place_policy_loss": total_place_policy_loss / place_policy_batches if place_policy_batches else 0.0,
+            "remove_policy_loss": total_remove_policy_loss / remove_policy_batches if remove_policy_batches else 0.0,
             "capture_policy_loss": total_capture_policy_loss / capture_policy_batches if capture_policy_batches else 0.0,
         }
