@@ -27,6 +27,19 @@ from ..nn.training import HiveDataset
 from .token_selfplay import GameResult
 
 
+@dataclass
+class SearchStats:
+    """Session-level MCTS stats, aggregated across every ply of every game.
+    Matches the legacy CNN-side `SelfPlayResult` field shapes so the
+    trainer's per-gen output line is identical to Zertz/Yinsh."""
+    top1_mean: float = 0.0
+    top1_std: float = 0.0
+    depth_mean: float = 0.0
+    depth_std: float = 0.0
+    valid_moves_mean: float = 0.0
+    valid_moves_std: float = 0.0
+
+
 def _outcome_white_value(outcome: str) -> Optional[float]:
     if outcome == "WhiteWins": return 1.0
     if outcome == "BlackWins": return -1.0
@@ -54,11 +67,11 @@ def play_games_concurrent(
     skip_timeout_data: bool = True,
     rng_seed: int = 0,
     progress_cb: Callable[[int, int, int, list[tuple[int, int]]], None] | None = None,
-) -> list[GameResult]:
+) -> tuple[list[GameResult], SearchStats]:
     """Drive `num_games` concurrent self-play games through the Rust ORT
-    engine and append the per-ply samples to `dataset`. Returns a list of
-    `GameResult` summaries in submission order."""
-    raw_results = play_games_concurrent_ort(
+    engine and append the per-ply samples to `dataset`. Returns
+    `(per-game results, aggregate MCTS search stats)`."""
+    raw_results, raw_stats = play_games_concurrent_ort(
         ort_session,
         num_games,
         simulations=simulations,
@@ -126,4 +139,12 @@ def play_games_concurrent(
             final_board_render=r["final_board_render"],
         ))
 
-    return out
+    stats = SearchStats(
+        top1_mean=float(raw_stats["top1_mean"]),
+        top1_std=float(raw_stats["top1_std"]),
+        depth_mean=float(raw_stats["depth_mean"]),
+        depth_std=float(raw_stats["depth_std"]),
+        valid_moves_mean=float(raw_stats["valid_moves_mean"]),
+        valid_moves_std=float(raw_stats["valid_moves_std"]),
+    )
+    return out, stats

@@ -57,6 +57,60 @@ pub struct ConcurrentGameResult {
     pub samples: Vec<PlySample>,
 }
 
+/// Session-level MCTS stats, aggregated across every ply of every game.
+/// Mirrors the legacy CNN-side `SelfPlayResult.{top1,search_depth,valid_moves}_{mean,std}`.
+#[derive(Default)]
+pub struct ConcurrentSessionStats {
+    pub top1_visit_fraction_mean: f32,
+    pub top1_visit_fraction_std: f32,
+    pub search_depth_mean: f32,
+    pub search_depth_std: f32,
+    pub valid_moves_mean: f32,
+    pub valid_moves_std: f32,
+}
+
+/// Running accumulators built up across plies; consumed once to compute
+/// the per-session mean/std at the end of the run.
+#[derive(Default)]
+struct StatsAccumulators {
+    top1_sum: f64,
+    top1_sum_sq: f64,
+    top1_count: u64,
+    depth_sum: f64,
+    depth_sum_sq: f64,
+    depth_count: u64,
+    moves_sum: f64,
+    moves_sum_sq: f64,
+    moves_count: u64,
+}
+
+fn mean_std(sum: f64, sum_sq: f64, count: u64) -> (f32, f32) {
+    if count == 0 { return (0.0, 0.0); }
+    let n = count as f64;
+    let mean = sum / n;
+    let var = (sum_sq / n) - mean * mean;
+    (mean as f32, var.max(0.0).sqrt() as f32)
+}
+
+impl StatsAccumulators {
+    fn finalize(&self) -> ConcurrentSessionStats {
+        let (top1_visit_fraction_mean, top1_visit_fraction_std) =
+            mean_std(self.top1_sum, self.top1_sum_sq, self.top1_count);
+        let (search_depth_mean, search_depth_std) =
+            mean_std(self.depth_sum, self.depth_sum_sq, self.depth_count);
+        let (valid_moves_mean, valid_moves_std) =
+            mean_std(self.moves_sum, self.moves_sum_sq, self.moves_count);
+        ConcurrentSessionStats {
+            top1_visit_fraction_mean,
+            top1_visit_fraction_std,
+            search_depth_mean,
+            search_depth_std,
+            valid_moves_mean,
+            valid_moves_std,
+        }
+    }
+}
+
 /// Self-play configuration shared across all concurrent games.
 #[derive(Clone)]
 pub struct ConcurrentSelfPlayConfig {
@@ -101,7 +155,8 @@ pub fn play_games_concurrent_ort(
     cfg: &ConcurrentSelfPlayConfig,
     engine: &mut HiveTokenOrtEngine,
     mut progress: Option<ProgressFn>,
-) -> Result<Vec<ConcurrentGameResult>, String> {
+) -> Result<(Vec<ConcurrentGameResult>, ConcurrentSessionStats), String> {
+    let mut stats = StatsAccumulators::default();
     let mut slots: Vec<GameSlot> = (0..cfg.num_games)
         .map(|i| GameSlot {
             game: if cfg.tournament_mode {
@@ -136,7 +191,7 @@ pub fn play_games_concurrent_ort(
         for slot in slots.iter_mut() {
             if slot.complete || !slot.initialised { continue; }
             if slot.sims_for_current_move < cfg.simulations { continue; }
-            advance_one(slot, cfg)?;
+            advance_one(slot, cfg, &mut stats)?;
         }
 
         // Gather inference batches.
@@ -271,7 +326,7 @@ pub fn play_games_concurrent_ort(
             samples: slot.samples,
         });
     }
-    Ok(out)
+    Ok((out, stats.finalize()))
 }
 
 enum RoutingKind {
@@ -299,12 +354,33 @@ fn build_params(cfg: &ConcurrentSelfPlayConfig) -> SearchParams {
 /// Advance one game by one ply: pick chosen move from visit distribution,
 /// save the per-ply training sample, play the move, mark complete or
 /// schedule re-init.
-fn advance_one(slot: &mut GameSlot, cfg: &ConcurrentSelfPlayConfig) -> Result<(), String> {
+fn advance_one(
+    slot: &mut GameSlot,
+    cfg: &ConcurrentSelfPlayConfig,
+    stats: &mut StatsAccumulators,
+) -> Result<(), String> {
     if !slot.initialised || slot.complete {
         return Ok(());
     }
     let mover_color = slot.game.turn_color;
     let mover_is_white = matches!(mover_color, hive_game::piece::PieceColor::White);
+
+    // ---- Record per-ply MCTS stats (top-1, search depth, root child count).
+    // Done before we re-init for the next ply so the search still has the
+    // current move's tree state. Mirrors the CNN-side accumulation in
+    // hive-game/src/search.rs.
+    let top1 = slot.search.root_top1_visit_fraction() as f64;
+    stats.top1_sum += top1;
+    stats.top1_sum_sq += top1 * top1;
+    stats.top1_count += 1;
+    let (ds, dss, dc) = slot.search.take_depth_stats();
+    stats.depth_sum += ds;
+    stats.depth_sum_sq += dss;
+    stats.depth_count += dc;
+    let moves = slot.search.root_child_count() as f64;
+    stats.moves_sum += moves;
+    stats.moves_sum_sq += moves * moves;
+    stats.moves_count += 1;
 
     // Re-tokenize the root to recover indexed_moves for the (mover, dest)
     // slot lookup, and to capture the token batch for the training sample.

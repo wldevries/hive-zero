@@ -1008,7 +1008,7 @@ fn play_games_concurrent_ort<'py>(
     tournament_mode: bool,
     rng_seed: u64,
     progress_cb: Option<&Bound<'py, PyAny>>,
-) -> PyResult<Vec<Py<PyAny>>> {
+) -> PyResult<(Vec<Py<PyAny>>, Py<PyAny>)> {
     use pyo3::types::PyDict;
 
     let cfg = ConcurrentSelfPlayConfig {
@@ -1039,7 +1039,7 @@ fn play_games_concurrent_ort<'py>(
         }) as ProgressFn<'_>
     });
 
-    let results = concurrent_selfplay::play_games_concurrent_ort(
+    let (results, session_stats) = concurrent_selfplay::play_games_concurrent_ort(
         &cfg, &mut ort_session.engine, progress.take(),
     )
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -1070,7 +1070,16 @@ fn play_games_concurrent_ort<'py>(
         dict.set_item("samples", samples)?;
         out.push(dict.into_pyobject(py)?.unbind().into());
     }
-    Ok(out)
+
+    let stats_dict = PyDict::new(py);
+    stats_dict.set_item("top1_mean", session_stats.top1_visit_fraction_mean)?;
+    stats_dict.set_item("top1_std", session_stats.top1_visit_fraction_std)?;
+    stats_dict.set_item("depth_mean", session_stats.search_depth_mean)?;
+    stats_dict.set_item("depth_std", session_stats.search_depth_std)?;
+    stats_dict.set_item("valid_moves_mean", session_stats.valid_moves_mean)?;
+    stats_dict.set_item("valid_moves_std", session_stats.valid_moves_std)?;
+
+    Ok((out, stats_dict.into_pyobject(py)?.unbind().into()))
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
