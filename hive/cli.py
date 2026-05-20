@@ -513,7 +513,8 @@ def main():
         type=str,
         nargs="?",
         default=None,
-        help="Path to second model checkpoint (omit when using --mzinga)",
+        help="Path to second model checkpoint, the literal 'alphabeta' to play "
+             "against the heuristic alpha-beta bot, or omitted when using --mzinga",
     )
     battle_parser.add_argument(
         "--mzinga",
@@ -567,6 +568,12 @@ def main():
         type=int,
         default=1,
         help="MCTS sim rounds per inference call (default: 1)",
+    )
+    battle_parser.add_argument(
+        "--bot-depth",
+        type=int,
+        default=3,
+        help="Alpha-beta search depth when model2 is 'alphabeta' (default: 3)",
     )
 
     args = parser.parse_args()
@@ -638,7 +645,7 @@ def main():
             )
         else:
             if args.model2 is None:
-                parser.error("battle requires either model2 or --mzinga")
+                parser.error("battle requires either model2 (path or 'alphabeta') or --mzinga")
             from hive.selfplay.battle import run_battle
 
             run_battle(
@@ -650,6 +657,7 @@ def main():
                 max_moves=args.max_moves,
                 c_puct=args.c_puct,
                 play_batch_size=args.play_batch_sims,
+                bot_depth=args.bot_depth,
             )
 
     elif args.command == "train":

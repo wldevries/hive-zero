@@ -19,6 +19,47 @@ from shared.console import cg as _cg, cy as _cy, cr as _cr, cc as _cc, cm as _cm
 from ..nn.model import load_checkpoint
 
 
+def _print_battle_results(
+    name1: str,
+    name2: str,
+    w1: int,
+    w2: int,
+    d: int,
+    lengths: list[int],
+    elapsed: float,
+    winner_labels: tuple[str, str] = ("Model 1", "Model 2"),
+) -> None:
+    total = w1 + w2 + d
+    score1 = (w1 + 0.5 * d) / total if total > 0 else 0.5
+
+    avg_len = sum(lengths) / len(lengths) if lengths else 0
+    med_len = int(statistics.median(lengths)) if lengths else 0
+    min_len = min(lengths) if lengths else 0
+    max_len = max(lengths) if lengths else 0
+
+    print(f"\n{'='*60}")
+    print(f"  Results ({total} games, {elapsed:.0f}s)")
+    print(f"{'='*60}")
+    print(f"  {_cc(name1)}")
+    print(f"    Wins: {_cg(str(w1))}  Draws: {_cy(str(d))}  Losses: {_cr(str(w2))}")
+    print(f"    Score: {_cg(f'{score1:.1%}')}")
+    print()
+    print(f"  {_cm(name2)}")
+    print(f"    Wins: {_cg(str(w2))}  Draws: {_cy(str(d))}  Losses: {_cr(str(w1))}")
+    print(f"    Score: {_cm(f'{1-score1:.1%}')}")
+    print()
+    print(f"  Game length: avg={avg_len:.1f}  med={med_len}  min={min_len}  max={max_len}")
+
+    label1, label2 = winner_labels
+    if score1 > 0.55:
+        print(f"\n  Winner: {_cg(label1)} ({_cc(name1)})")
+    elif score1 < 0.45:
+        print(f"\n  Winner: {_cg(label2)} ({_cm(name2)})")
+    else:
+        print(f"\n  Result: {_cy('Too close to call')}")
+    print()
+
+
 def _make_eval_fn(model, device):
     device_type = "cuda" if "cuda" in device else "cpu"
 
@@ -137,7 +178,20 @@ def run_battle(
     max_moves: int = 200,
     c_puct: float = 1.5,
     play_batch_size: int = 1,
+    bot_depth: int = 3,
 ):
+    if model2_path == "alphabeta":
+        return _run_battle_vs_bot(
+            model1_path=model1_path,
+            num_games=num_games,
+            simulations=simulations,
+            device=device,
+            max_moves=max_moves,
+            c_puct=c_puct,
+            play_batch_size=play_batch_size,
+            bot_depth=bot_depth,
+        )
+
     from engine_zero import RustSelfPlaySession
 
     model1, ckpt1 = load_checkpoint(model1_path)
@@ -208,38 +262,122 @@ def run_battle(
     pbar.update(pbar.total - pbar.n)
     pbar.close()
 
-    w1 = result.wins_model1
-    w2 = result.wins_model2
-    d = result.draws
-    total = w1 + w2 + d
-    score1 = (w1 + 0.5 * d) / total if total > 0 else 0.5
+    _print_battle_results(
+        name1,
+        name2,
+        result.wins_model1,
+        result.wins_model2,
+        result.draws,
+        list(result.game_lengths),
+        elapsed,
+    )
 
-    lengths = result.game_lengths
-    avg_len = sum(lengths) / len(lengths) if lengths else 0
-    med_len = int(statistics.median(lengths)) if lengths else 0
-    min_len = min(lengths) if lengths else 0
-    max_len = max(lengths) if lengths else 0
+
+def _run_battle_vs_bot(
+    model1_path: str,
+    num_games: int,
+    simulations: int | None,
+    device: str,
+    max_moves: int,
+    c_puct: float,
+    play_batch_size: int,
+    bot_depth: int,
+):
+    """Battle the NN model (token-transformer MCTS) against the heuristic
+    alphabeta bot, sequentially per game. Each ply on the model's side calls
+    ``HiveGame.best_move`` with the token eval_fn; bot plies call
+    ``HiveGame.best_move_alphabeta(depth)``. Half the games have the model as
+    White, the other half as Black, so the win count cancels color bias.
+    Dirichlet noise is injected at the model's MCTS root each ply: the bot
+    is deterministic, so without noise every game within a (white/black)
+    pairing bucket would replay identically and num_games would collapse to 2
+    distinct trajectories.
+
+    Unlike Yinsh/Zertz where the same path is parallelized inside Rust, the
+    Hive token transformer's per-position MCTS already runs entirely in Rust
+    (one Python callback per inference batch within a single game), and
+    Hive's token self-play parallelizes via Python multiprocessing rather
+    than batched cross-game MCTS — so the simple sequential loop here is the
+    consistent choice.
+    """
+    from engine_zero import HiveGame
+    from hive.nn.transformer import load_checkpoint as load_transformer_checkpoint
+    from hive.selfplay.token_selfplay import make_torch_eval_fn
+
+    model, ckpt = load_transformer_checkpoint(model1_path)
+    meta = ckpt.get("metadata", {})
+    iter_n = ckpt.get("generation", "?")
+    sims = simulations if simulations is not None else meta.get("simulations", 800)
+    grid_size = getattr(model, "grid_size", 23)
+
+    model.to(device).eval()
+    eval_fn = make_torch_eval_fn(model, device)
+
+    name1 = f"{model1_path} (gen {iter_n})"
+    name2 = f"alphabeta depth={bot_depth}"
 
     print(f"\n{'='*60}")
-    print(f"  Results ({total} games, {elapsed:.0f}s)")
+    print(f"  Battle: {_cc(name1)}")
+    print(f"      vs: {_cm(name2)}")
+    print(f"  Games: {num_games}  Simulations: {sims}  Max moves: {max_moves}  Bot depth: {bot_depth}")
+    print(f"  Grid size: {grid_size}")
     print(f"{'='*60}")
-    print(f"  {_cc(name1)}")
-    print(f"    Wins: {_cg(str(w1))}  Draws: {_cy(str(d))}  Losses: {_cr(str(w2))}")
-    print(f"    Score: {_cg(f'{score1:.1%}')}")
-    print()
-    print(f"  {_cm(name2)}")
-    print(f"    Wins: {_cg(str(w2))}  Draws: {_cy(str(d))}  Losses: {_cr(str(w1))}")
-    print(f"    Score: {_cm(f'{1-score1:.1%}')}")
-    print()
-    print(f"  Game length: avg={avg_len:.1f}  med={med_len}  min={min_len}  max={max_len}")
 
-    if score1 > 0.55:
-        print(f"\n  Winner: {_cg('Model 1')} ({_cc(name1)})")
-    elif score1 < 0.45:
-        print(f"\n  Winner: {_cg('Model 2')} ({_cm(name2)})")
-    else:
-        print(f"\n  Result: {_cy('Too close to call')}")
-    print()
+    w1 = w2 = d = 0
+    lengths: list[int] = []
+    start = time.time()
+
+    pbar = tqdm(range(num_games), unit="game", desc="  Battle", leave=False)
+    for g in pbar:
+        game = HiveGame(grid_size=grid_size)
+        model_is_white = (g % 2 == 0)
+        move_count = 0
+        while move_count < max_moves and not game.is_game_over:
+            turn_white = (game.turn_color == "w")
+            model_to_move = (turn_white == model_is_white)
+            if model_to_move:
+                # Dirichlet at the root diversifies games inside a color
+                # pairing bucket; without it, alphabeta's determinism +
+                # model argmax replays the same line every time.
+                move = game.best_move(
+                    eval_fn, sims, c_puct,
+                    dir_alpha=0.3, dir_epsilon=0.25,
+                    play_batch=play_batch_size,
+                )
+            else:
+                move = game.best_move_alphabeta(bot_depth)
+
+            if not move or move.startswith("err"):
+                break
+            if move.lower() == "pass":
+                game.play_pass()
+            elif not game.play_move_uhp(move):
+                break
+            move_count += 1
+
+        lengths.append(move_count)
+        state = game.state
+        if state == "WhiteWins":
+            if model_is_white:
+                w1 += 1
+            else:
+                w2 += 1
+        elif state == "BlackWins":
+            if model_is_white:
+                w2 += 1
+            else:
+                w1 += 1
+        else:
+            d += 1
+        pbar.set_postfix(W=w1, D=d, L=w2)
+    pbar.close()
+
+    elapsed = time.time() - start
+
+    _print_battle_results(
+        name1, name2, w1, w2, d, lengths, elapsed,
+        winner_labels=("Model", "Alphabeta"),
+    )
 
 
 class _MzingaProcess:
@@ -421,30 +559,7 @@ def run_battle_mzinga(
 
     elapsed = time.time() - start
 
-    total = w1 + w2 + d
-    score1 = (w1 + 0.5 * d) / total if total > 0 else 0.5
-    avg_len = sum(lengths) / len(lengths) if lengths else 0
-    med_len = int(statistics.median(lengths)) if lengths else 0
-    min_len = min(lengths) if lengths else 0
-    max_len = max(lengths) if lengths else 0
-
-    print(f"\n{'='*60}")
-    print(f"  Results ({total} games, {elapsed:.0f}s)")
-    print(f"{'='*60}")
-    print(f"  {_cc(name1)}")
-    print(f"    Wins: {_cg(str(w1))}  Draws: {_cy(str(d))}  Losses: {_cr(str(w2))}")
-    print(f"    Score: {_cg(f'{score1:.1%}')}")
-    print()
-    print(f"  {_cm(name2)}")
-    print(f"    Wins: {_cg(str(w2))}  Draws: {_cy(str(d))}  Losses: {_cr(str(w1))}")
-    print(f"    Score: {_cm(f'{1-score1:.1%}')}")
-    print()
-    print(f"  Game length: avg={avg_len:.1f}  med={med_len}  min={min_len}  max={max_len}")
-
-    if score1 > 0.55:
-        print(f"\n  Winner: {_cg('Model')} ({_cc(name1)})")
-    elif score1 < 0.45:
-        print(f"\n  Winner: {_cm('Mzinga')} ({_cm(name2)})")
-    else:
-        print(f"\n  Result: {_cy('Too close to call')}")
-    print()
+    _print_battle_results(
+        name1, name2, w1, w2, d, lengths, elapsed,
+        winner_labels=("Model", "Mzinga"),
+    )
