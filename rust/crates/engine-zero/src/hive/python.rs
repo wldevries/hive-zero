@@ -987,6 +987,7 @@ fn token_vocab() -> (usize, usize, usize) {
     grid_size = 23,
     tournament_mode = false,
     rng_seed = 0u64,
+    show_timing = false,
     progress_cb = None,
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -1007,6 +1008,7 @@ fn play_games_concurrent_ort<'py>(
     grid_size: usize,
     tournament_mode: bool,
     rng_seed: u64,
+    show_timing: bool,
     progress_cb: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<(Vec<Py<PyAny>>, Py<PyAny>)> {
     use pyo3::types::PyDict;
@@ -1026,6 +1028,7 @@ fn play_games_concurrent_ort<'py>(
         grid_size,
         tournament_mode,
         rng_seed,
+        show_timing,
     };
 
     // Optional progress callback. ProgressFn is 'a tied to the engine

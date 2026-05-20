@@ -30,6 +30,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, sync_channel};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use core_game::game::PolicyIndex;
 use core_game::mcts::arena::NodeId;
@@ -133,6 +134,9 @@ pub struct ConcurrentSelfPlayConfig {
     pub grid_size: usize,
     pub tournament_mode: bool,
     pub rng_seed: u64,
+    /// If true, print a per-phase breakdown to stderr after the session
+    /// finishes so the caller can tell whether GPU or CPU is the bottleneck.
+    pub show_timing: bool,
 }
 
 /// Per-game in-progress state during the concurrent run.
@@ -240,63 +244,28 @@ pub fn play_games_concurrent_ort(
         let mut pending: Option<(Vec<(usize, RoutingKind)>, HashMap<usize, Vec<(NodeId, Game)>>, usize)> = None;
         let mut round_idx: usize = 0;
 
+        // Per-phase wall-clock accumulators on the main thread. `t_build` is
+        // leaf selection + tokenization; `t_send` is the channel send (zero
+        // unless the worker is more than one batch behind); `t_recv` is the
+        // blocking wait for the previous batch's GPU result; `t_distribute`
+        // is expand_and_backprop_with_stash; `t_advance` is move-sampling +
+        // sample recording per ply.
+        let t_session_start = Instant::now();
+        let mut t_build = Duration::ZERO;
+        let mut t_send = Duration::ZERO;
+        let mut t_recv = Duration::ZERO;
+        let mut t_distribute = Duration::ZERO;
+        let mut t_advance = Duration::ZERO;
+
         loop {
-            // ---- Phase A: distribute the PREVIOUS batch's results --------
-            // Blocks on the worker. By the time we get here, we've already
-            // submitted the new batch (further down in the previous iter),
-            // so the GPU stays busy across this boundary.
-            if let Some((prev_routing, mut prev_stashes, _)) = pending.take() {
-                let (policies, values, draws) = resp_rx
-                    .recv()
-                    .map_err(|_| "worker thread died before responding".to_string())??;
-                let mut cursor: usize = 0;
-                for (gi, kind) in &prev_routing {
-                    let slot = &mut slots[*gi];
-                    match kind {
-                        RoutingKind::Init => {
-                            slot.search.init(&slot.game, &policies[cursor]);
-                            if let RootNoise::Dirichlet { alpha, epsilon } = search_params.root_noise {
-                                slot.search.params = search_params.clone();
-                                slot.search.apply_root_dirichlet(alpha, epsilon);
-                            } else {
-                                slot.search.params = search_params.clone();
-                            }
-                            slot.initialised = true;
-                            slot.init_in_flight = false;
-                            slot.sims_for_current_move = 0;
-                            slot.sims_in_flight = 0;
-                            cursor += 1;
-                        }
-                        RoutingKind::Sim { count } => {
-                            let pol_slice = &policies[cursor..cursor + count];
-                            let val_slice = &values[cursor..cursor + count];
-                            let draw_slice = &draws[cursor..cursor + count];
-                            let stash = prev_stashes
-                                .remove(gi)
-                                .ok_or_else(|| format!("missing stash for game {gi}"))?;
-                            slot.search.expand_and_backprop_with_stash(
-                                stash, pol_slice, val_slice, draw_slice,
-                            );
-                            slot.sims_in_flight = slot.sims_in_flight.saturating_sub(*count);
-                            cursor += count;
-                        }
-                    }
-                }
-            }
-
-            // ---- Phase B: ADVANCE slots whose sims are fully resolved ----
-            // Only fires when the slot has no SIMs in flight — otherwise the
-            // visit distribution at advance_one time would be missing the
-            // backed-up values for the not-yet-distributed leaves we already
-            // counted toward `sims_for_current_move`.
-            for slot in slots.iter_mut() {
-                if slot.complete || !slot.initialised { continue; }
-                if slot.sims_in_flight > 0 { continue; }
-                if slot.sims_for_current_move < cfg.simulations { continue; }
-                advance_one(slot, cfg, &mut stats)?;
-            }
-
-            // ---- Phase C: build INIT + SIM batches for the next round ----
+            // ---- Phase A: build INIT + SIM batches using the CURRENT --------
+            // state (which reflects distributes up through the iteration BEFORE
+            // the previous one — the previous iter's `pending` hasn't been
+            // collected yet). Virtual loss in the search arena keeps the leaves
+            // we're selecting now from colliding with the previous batch's
+            // not-yet-distributed leaves; the policy values for those will
+            // land in this iter's Phase C below.
+            let t_phase_a = Instant::now();
             let mut batches: Vec<TokenBatch> = Vec::new();
             let mut routing: Vec<(usize, RoutingKind)> = Vec::new();
             let mut new_stashes: HashMap<usize, Vec<(NodeId, Game)>> = HashMap::new();
@@ -346,7 +315,13 @@ pub fn play_games_concurrent_ort(
                 routing.push((gi, RoutingKind::Sim { count: leaf_count }));
             }
 
-            // ---- Phase D: submit the new batch (non-blocking) ------------
+            t_build += t_phase_a.elapsed();
+
+            // ---- Phase B: SUBMIT the new batch BEFORE collecting the prev.
+            // This is the actual pipelining: from here until Phase C's recv,
+            // the worker is processing this batch in parallel with the main
+            // thread's distribute + advance work.
+            let t_phase_b = Instant::now();
             let new_pending = if !batches.is_empty() {
                 // Mark init_in_flight for INIT entries so the next iter
                 // doesn't build a duplicate INIT before the result arrives.
@@ -363,8 +338,69 @@ pub fn play_games_concurrent_ort(
             } else {
                 None
             };
+            t_send += t_phase_b.elapsed();
 
-            // ---- Phase E: progress + termination check -------------------
+            // ---- Phase C: distribute the PREVIOUS batch's results -----------
+            // recv() blocks the main thread, but the worker is already busy
+            // processing the batch we just submitted in Phase B above.
+            if let Some((prev_routing, mut prev_stashes, _)) = pending.take() {
+                let t_phase_c_recv = Instant::now();
+                let (policies, values, draws) = resp_rx
+                    .recv()
+                    .map_err(|_| "worker thread died before responding".to_string())??;
+                t_recv += t_phase_c_recv.elapsed();
+                let t_phase_c_dist = Instant::now();
+                let mut cursor: usize = 0;
+                for (gi, kind) in &prev_routing {
+                    let slot = &mut slots[*gi];
+                    match kind {
+                        RoutingKind::Init => {
+                            slot.search.init(&slot.game, &policies[cursor]);
+                            if let RootNoise::Dirichlet { alpha, epsilon } = search_params.root_noise {
+                                slot.search.params = search_params.clone();
+                                slot.search.apply_root_dirichlet(alpha, epsilon);
+                            } else {
+                                slot.search.params = search_params.clone();
+                            }
+                            slot.initialised = true;
+                            slot.init_in_flight = false;
+                            slot.sims_for_current_move = 0;
+                            slot.sims_in_flight = 0;
+                            cursor += 1;
+                        }
+                        RoutingKind::Sim { count } => {
+                            let pol_slice = &policies[cursor..cursor + count];
+                            let val_slice = &values[cursor..cursor + count];
+                            let draw_slice = &draws[cursor..cursor + count];
+                            let stash = prev_stashes
+                                .remove(gi)
+                                .ok_or_else(|| format!("missing stash for game {gi}"))?;
+                            slot.search.expand_and_backprop_with_stash(
+                                stash, pol_slice, val_slice, draw_slice,
+                            );
+                            slot.sims_in_flight = slot.sims_in_flight.saturating_sub(*count);
+                            cursor += count;
+                        }
+                    }
+                }
+                t_distribute += t_phase_c_dist.elapsed();
+            }
+
+            // ---- Phase D: ADVANCE slots whose sims are fully resolved -------
+            // Only fires when the slot has no SIMs in flight — otherwise the
+            // visit distribution at advance_one time would be missing the
+            // backed-up values for the not-yet-distributed leaves we already
+            // counted toward `sims_for_current_move`.
+            let t_phase_d = Instant::now();
+            for slot in slots.iter_mut() {
+                if slot.complete || !slot.initialised { continue; }
+                if slot.sims_in_flight > 0 { continue; }
+                if slot.sims_for_current_move < cfg.simulations { continue; }
+                advance_one(slot, cfg, &mut stats)?;
+            }
+            t_advance += t_phase_d.elapsed();
+
+            // ---- Phase E: progress + termination check ----------------------
             round_idx += 1;
             if let Some(cb) = progress.as_mut() {
                 let snapshot: Vec<(u32, usize)> = slots
@@ -380,7 +416,7 @@ pub fn play_games_concurrent_ort(
             pending = new_pending;
 
             // Nothing in flight + nothing to do → we're done. (If we still
-            // had unfinished work we'd have built a batch this round and
+            // had unfinished work we'd have built a batch this iter and
             // pending would be Some.)
             if pending.is_none() && slots.iter().all(|s| s.complete) {
                 break;
@@ -389,6 +425,28 @@ pub fn play_games_concurrent_ort(
 
         // Drop sender so the worker's recv() returns Err and the thread exits.
         drop(req_tx);
+
+        if cfg.show_timing {
+            let total = t_session_start.elapsed();
+            let total_s = total.as_secs_f64();
+            let pct = |d: Duration| if total_s > 0.0 { 100.0 * d.as_secs_f64() / total_s } else { 0.0 };
+            let accounted = t_build + t_send + t_recv + t_distribute + t_advance;
+            let other = total.saturating_sub(accounted);
+            eprintln!(
+                "  [token-pipelined] total={:.2}s rounds={}  build={:.2}s ({:.0}%)  send={:.2}s ({:.0}%)  recv={:.2}s ({:.0}%)  distribute={:.2}s ({:.0}%)  advance={:.2}s ({:.0}%)  other={:.2}s ({:.0}%)",
+                total_s,
+                round_idx,
+                t_build.as_secs_f64(), pct(t_build),
+                t_send.as_secs_f64(), pct(t_send),
+                t_recv.as_secs_f64(), pct(t_recv),
+                t_distribute.as_secs_f64(), pct(t_distribute),
+                t_advance.as_secs_f64(), pct(t_advance),
+                other.as_secs_f64(), pct(other),
+            );
+            eprintln!(
+                "  [token-pipelined]   recv >> 0 ⇒ GPU was the bottleneck (good pipelining); recv ≈ 0 + build ≈ total ⇒ CPU-bound (pipelining can't help)"
+            );
+        }
 
         let mut out = Vec::with_capacity(slots.len());
         for slot in slots.drain(..) {
