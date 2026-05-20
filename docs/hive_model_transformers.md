@@ -12,12 +12,12 @@ only learn slowly.
 
 ```mermaid
 graph TD
-    CAT["Categoricals<br/>(B, L, 5) uint8<br/>kind, piece_type, color, stack_depth, count"]:::input
+    CAT["Categoricals<br/>(B, L, 5) uint8<br/>kind, piece_type, color, z, count"]:::input
     POS["Positions<br/>(B, L, 2) int8<br/>axial (q, r)"]:::input
     FLG["Flags<br/>(B, L, F=8) float<br/>pinned / top / adj-queen / dist..."]:::input
     MSK["Mask<br/>(B, L) bool<br/>True = real, False = pad"]:::input
 
-    CAT --> EMB["Sum-of-embeddings:<br/>kind_emb + piece_type_emb + color_emb<br/>+ stack_depth_emb + count_emb"]
+    CAT --> EMB["Sum-of-embeddings:<br/>kind_emb + piece_type_emb + color_emb<br/>+ z_emb (PIECE only) + count_emb"]
     POS --> APE["Absolute hex pos<br/>learned (23×23 → d_model)"]
     APE --> EMB
     FLG --> FP["Linear(F → d_model)"]
@@ -25,7 +25,9 @@ graph TD
     EMB --> X["(B, L, d_model)"]
 
     POS --> REL["Hex relative bias<br/>signed (Δq, Δr) → per-head scalar"]
-    REL --> AB["attn_bias (B, H, L, L)"]
+    CAT --> VB["Vertical bias<br/>signed Δz → per-head (PIECE pairs only)"]
+    REL --> AB["attn_bias = rel_bias + vert_bias<br/>(B, H, L, L)"]
+    VB --> AB
     MSK --> PB["pad_bias = (1 − mask) · −1e9<br/>(B, 1, 1, L)"]
     AB --> AM["attn_mask = attn_bias + pad_bias<br/>(B, H, L, L) float"]
     PB --> AM
@@ -101,10 +103,10 @@ Field vocabularies:
 | Index | Flag |
 |-------|------|
 | 0 | `pinned` — single-stack piece is an articulation point of the hive |
-| 1 | `top_of_stack` — only the top piece of a stack can move |
+| 1 | `top_of_stack` — set on the top PIECE token of each stack (z == height−1, true for solo pieces) |
 | 2 | `adj_my_queen` — token is adjacent to current player's queen |
 | 3 | `adj_opp_queen` — token is adjacent to opponent's queen |
-| 4 | `on_frontier` — `CELL` token is empty + adjacent to the hive (placement candidate) |
+| 4 | `buried` — PIECE token has at least one piece on top of it (z < height−1) |
 | 5 | `dist_my_queen` — normalised hex distance to mine, saturated at 1.0 past distance 6 |
 | 6 | `dist_opp_queen` — same, for opponent |
 | 7 | reserved (also used as "my queen placed" bit on the `GAME` token) |
@@ -113,10 +115,11 @@ Field vocabularies:
 
 ```
 x = kind_emb[kind] + piece_type_emb[piece_type] + color_emb[color]
-  + stack_depth_emb[stack_depth] + count_emb[count]
-  + abs_pos[q + 11, r + 11]   ← masked to (kind ∈ {PIECE, CELL}) so non-positional
-                                 tokens contribute zero from this term
-  + flag_proj(flags)           ← Linear(F=8 → d_model)
+  + z_emb[z] · 𝟙[kind == PIECE]   ← per-piece position in stack (0=bottom)
+  + count_emb[count]
+  + abs_pos[q + 11, r + 11]      ← masked to (kind ∈ {PIECE, CELL}) so non-positional
+                                    tokens contribute zero from this term
+  + flag_proj(flags)              ← Linear(F=8 → d_model)
 ```
 
 Sum-of-embeddings (BERT-style). Each categorical field has its own embedding

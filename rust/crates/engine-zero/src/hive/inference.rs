@@ -394,7 +394,7 @@ impl HiveTokenOrtEngine {
                 cat[cat_base + li * 5 + 0] = tok.kind[li] as i64;
                 cat[cat_base + li * 5 + 1] = tok.piece_type[li] as i64;
                 cat[cat_base + li * 5 + 2] = tok.color[li] as i64;
-                cat[cat_base + li * 5 + 3] = tok.stack_depth[li] as i64;
+                cat[cat_base + li * 5 + 3] = tok.z[li] as i64;
                 cat[cat_base + li * 5 + 4] = tok.count[li] as i64;
                 pos[pos_base + li * 2 + 0] = tok.q[li] as i64;
                 pos[pos_base + li * 2 + 1] = tok.r[li] as i64;

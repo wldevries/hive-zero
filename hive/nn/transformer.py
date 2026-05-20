@@ -44,8 +44,13 @@ F_FLAGS: int = 8
 NUM_TOKEN_KINDS: int = 5      # PAD, GAME, PIECE, RESERVE, CELL
 NUM_PIECE_TYPES: int = 6      # NONE + 5 base types
 NUM_COLORS: int = 3           # NONE, MINE, OPP
-NUM_STACK_DEPTHS: int = 8     # 0..=7
+NUM_Z_LEVELS: int = 8         # 0..=7 (per-piece position-in-stack: 0=bottom)
 NUM_COUNT_BUCKETS: int = 12   # 0..=11 (reserve counts per type)
+
+# Δz bucket range for the vertical attention bias. Signed offset in [-7, +7]
+# → 15 buckets per head. Matches Rust `MAX_STACK_DEPTH = 7`.
+Z_REL_RANGE: int = 2 * NUM_Z_LEVELS - 1
+Z_REL_OFFSET: int = NUM_Z_LEVELS - 1
 
 # Token-kind constants used to detect positional tokens in the model
 TOKEN_KIND_PAD = 0
@@ -91,6 +96,41 @@ class HexAbsolutePosition(nn.Module):
         emb = self.table(flat)                                   # (B, L, d_model)
         emb = emb * positional.unsqueeze(-1).to(emb.dtype)
         return emb
+
+
+class VerticalBias(nn.Module):
+    """Learned per-head additive attention bias keyed on signed Δz (difference
+    in stack position) between PIECE token pairs. Lets the trunk reason about
+    "this token is two layers above me" in beetle stacks. Non-PIECE pairs get
+    no contribution from this term.
+    """
+
+    def __init__(self, num_heads: int):
+        super().__init__()
+        self.num_heads = num_heads
+        self.table = nn.Parameter(torch.zeros(num_heads, Z_REL_RANGE))
+        # Zero init keeps the model identity-equivalent at start, same
+        # convention as HexRelativeBias.
+
+    def forward(self, z: torch.Tensor, piece_mask: torch.Tensor) -> torch.Tensor:
+        """
+        z:           (B, L) long — piece position in stack (0 elsewhere)
+        piece_mask:  (B, L) bool — True for PIECE tokens, False otherwise
+        returns:     (B, num_heads, L, L) additive bias tensor
+        """
+        B, L = z.shape
+        dz = z.unsqueeze(2) - z.unsqueeze(1)                  # (B, L, L)
+        idx = (dz + Z_REL_OFFSET).clamp(0, Z_REL_RANGE - 1)   # (B, L, L)
+        idx_flat = idx.reshape(B, L * L)
+        # Gather per head from (H, Z_REL_RANGE). `self.table[:, idx_flat]`
+        # yields (H, B, L*L); permute → (B, H, L*L).
+        bias = self.table[:, idx_flat].permute(1, 0, 2).view(B, self.num_heads, L, L)
+        # Mask: only PIECE-PIECE pairs see the vertical bias. Non-PIECE
+        # tokens have z=0 anyway, so the (0,0) bucket would otherwise apply
+        # everywhere — gating keeps that channel meaningful only for stacks.
+        both_pieces = piece_mask.unsqueeze(2) & piece_mask.unsqueeze(1)   # (B, L, L)
+        bias = bias * both_pieces.unsqueeze(1).to(bias.dtype)
+        return bias
 
 
 class HexRelativeBias(nn.Module):
@@ -228,10 +268,13 @@ class HiveTransformer(nn.Module):
         self.kind_emb = nn.Embedding(NUM_TOKEN_KINDS, d_model)
         self.piece_type_emb = nn.Embedding(NUM_PIECE_TYPES, d_model)
         self.color_emb = nn.Embedding(NUM_COLORS, d_model)
-        self.stack_depth_emb = nn.Embedding(NUM_STACK_DEPTHS, d_model)
+        # Per-piece vertical position in stack (0=bottom). Replaces the prior
+        # top-only `stack_depth_emb` now that buried pieces get their own
+        # tokens. Gated to zero on non-PIECE tokens in `_embed`.
+        self.z_emb = nn.Embedding(NUM_Z_LEVELS, d_model)
         self.count_emb = nn.Embedding(NUM_COUNT_BUCKETS, d_model)
         for emb in (self.kind_emb, self.piece_type_emb, self.color_emb,
-                    self.stack_depth_emb, self.count_emb):
+                    self.z_emb, self.count_emb):
             nn.init.normal_(emb.weight, std=0.02)
 
         # ---- absolute position embedding ----
@@ -243,6 +286,8 @@ class HiveTransformer(nn.Module):
         # ---- relative bias (shared across all blocks; one head bias per layer keeps
         # the trunk uniform and matches T5-style designs) ----
         self.rel_bias = HexRelativeBias(num_heads)
+        # Vertical (Δz) bias for PIECE-PIECE pairs, composed additively with rel_bias.
+        self.vert_bias = VerticalBias(num_heads)
 
         # ---- transformer trunk ----
         self.blocks = nn.ModuleList([
@@ -274,28 +319,35 @@ class HiveTransformer(nn.Module):
         categoricals: torch.Tensor,  # (B, L, 5) uint8
         positions: torch.Tensor,      # (B, L, 2) int8
         flags: torch.Tensor,          # (B, L, F_FLAGS) float
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Build the per-token embedding and a positional-token mask."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build the per-token embedding, the positional-token mask, and the
+        PIECE-token mask used for the Δz attention bias."""
         kind = categoricals[..., 0].long()
         piece_type = categoricals[..., 1].long()
         color = categoricals[..., 2].long()
-        stack_depth = categoricals[..., 3].long().clamp(0, NUM_STACK_DEPTHS - 1)
+        z = categoricals[..., 3].long().clamp(0, NUM_Z_LEVELS - 1)
         count = categoricals[..., 4].long().clamp(0, NUM_COUNT_BUCKETS - 1)
 
         q = positions[..., 0].long()
         r = positions[..., 1].long()
         positional = (kind == TOKEN_KIND_PIECE) | (kind == TOKEN_KIND_CELL)  # (B, L) bool
+        piece_mask = (kind == TOKEN_KIND_PIECE)                              # (B, L) bool
+
+        # z_emb is gated to zero on non-PIECE tokens — z=0 there is meaningless,
+        # and a constant bias on every non-PIECE token would just be absorbed
+        # into kind_emb anyway.
+        z_contribution = self.z_emb(z) * piece_mask.unsqueeze(-1).to(self.z_emb.weight.dtype)
 
         x = (
             self.kind_emb(kind)
             + self.piece_type_emb(piece_type)
             + self.color_emb(color)
-            + self.stack_depth_emb(stack_depth)
+            + z_contribution
             + self.count_emb(count)
             + self.abs_pos(q, r, positional)
             + self.flag_proj(flags)
         )
-        return x, positional
+        return x, positional, piece_mask
 
     def forward(
         self,
@@ -315,12 +367,16 @@ class HiveTransformer(nn.Module):
         # export and emits TracerWarning. The shape check happens upstream
         # (Rust tokenizer is the only producer of these tensors and always
         # emits SEQ_LEN-padded batches).
-        x, positional = self._embed(categoricals, positions, flags)
+        x, positional, piece_mask = self._embed(categoricals, positions, flags)
 
         # Compute relative bias once; reused across all blocks.
         q_pos = positions[..., 0].long()
         r_pos = positions[..., 1].long()
-        attn_bias = self.rel_bias(q_pos, r_pos, positional)   # (B, H, L, L)
+        z = categoricals[..., 3].long().clamp(0, NUM_Z_LEVELS - 1)
+        attn_bias = (
+            self.rel_bias(q_pos, r_pos, positional)           # (B, H, L, L) hex Δq,Δr
+            + self.vert_bias(z, piece_mask)                   # (B, H, L, L) Δz on PIECE pairs
+        )
 
         # Compose attn_bias + pad-key mask once at the model entry as
         # PURE FLOAT math. Bool ops (~, masked_fill, Where on bool)

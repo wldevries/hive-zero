@@ -5,8 +5,11 @@
 /// flag bundle. Token slots are assigned in this order:
 ///
 ///   [0]                : `[GAME]` token (CLS-style, reads value + aux heads)
-///   [1 .. 1+M]         : `PIECE` tokens — one per occupied board cell
-///                        (one token per top-of-stack; stack depth is a feature)
+///   [1 .. 1+M]         : `PIECE` tokens — one per piece on the board.
+///                        Stacked pieces share `(q, r)` and are distinguished
+///                        by the per-token `z` (position-in-stack: 0=bottom,
+///                        height-1=top). FLAG_TOP_OF_STACK and FLAG_BURIED
+///                        encode the top/buried split.
 ///   [1+M .. 1+M+R]     : `RESERVE` tokens — one per (color, base_type) with
 ///                        remaining count > 0 (mine first, then opponent)
 ///   [1+M+R .. used]    : `CELL` tokens — one per unique destination hex
@@ -82,10 +85,16 @@ pub const NUM_PIECE_TYPE_TOKENS: usize = 6;
 // -- per-token flag indices (into TokenBatch::flags) ------------------------
 
 pub const FLAG_PINNED: usize = 0;
+/// Set on every PIECE token where `z == height - 1` (top of its stack — true
+/// for solo pieces too). Zero on buried PIECE tokens and on every non-PIECE
+/// token. Anti-correlated with FLAG_BURIED for PIECE tokens.
 pub const FLAG_TOP_OF_STACK: usize = 1;
 pub const FLAG_ADJ_MY_QUEEN: usize = 2;
 pub const FLAG_ADJ_OPP_QUEEN: usize = 3;
-pub const FLAG_ON_FRONTIER: usize = 4;
+/// Set on PIECE tokens with at least one piece on top of them (z < height-1).
+/// Reuses the slot index that previously held `FLAG_ON_FRONTIER` (which was a
+/// perfect duplicate of `kind == CELL` and carried no information).
+pub const FLAG_BURIED: usize = 4;
 pub const FLAG_DIST_MY_QUEEN: usize = 5;
 pub const FLAG_DIST_OPP_QUEEN: usize = 6;
 pub const FLAG_RESERVED: usize = 7;
@@ -130,8 +139,10 @@ pub struct TokenBatch {
     /// Color per slot — `COLOR_MINE` / `COLOR_OPP` for piece/reserve tokens,
     /// `COLOR_NONE` otherwise.
     pub color: Vec<u8>,
-    /// Stack depth (1..=MAX_STACK_DEPTH) for PIECE tokens, 0 elsewhere.
-    pub stack_depth: Vec<u8>,
+    /// Position-in-stack (0..=MAX_STACK_DEPTH-1, 0=bottom) for PIECE tokens,
+    /// 0 elsewhere. Pieces in a stack share `(q, r)`; `z` is the per-piece
+    /// vertical coordinate that distinguishes them.
+    pub z: Vec<u8>,
     /// Remaining count (1..=N) for RESERVE tokens, 0 elsewhere.
     pub count: Vec<u8>,
     /// Axial q coordinate for positional tokens (PIECE, CELL); 0 elsewhere.
@@ -152,7 +163,7 @@ impl TokenBatch {
             kind: vec![TOKEN_KIND_PAD; SEQ_LEN],
             piece_type: vec![PIECE_TYPE_NONE; SEQ_LEN],
             color: vec![COLOR_NONE; SEQ_LEN],
-            stack_depth: vec![0u8; SEQ_LEN],
+            z: vec![0u8; SEQ_LEN],
             count: vec![0u8; SEQ_LEN],
             q: vec![0i8; SEQ_LEN],
             r: vec![0i8; SEQ_LEN],
@@ -198,54 +209,73 @@ pub fn tokenize_and_priors(game: &mut Game) -> (TokenBatch, Vec<(PolicyIndex, Mo
     slot += 1;
 
     // ---- PIECE tokens ----
-    // One token per occupied cell. Encodes the TOP piece of the stack
-    // (the only one that can move under Hive rules) plus the stack height as
-    // a feature so the model knows about buried pieces.
-    let mut hex_to_piece_slot: HashMap<Hex, usize> = HashMap::new();
+    // One token per piece on the board (not per cell). A stack of N pieces
+    // produces N tokens sharing `(q, r)` but with distinct `z` (0=bottom,
+    // height-1=top). Only the top piece of each stack is a legal movement
+    // mover, so we record only top-of-stack slots in `hex_to_top_piece_slot`.
+    let mut hex_to_top_piece_slot: HashMap<Hex, usize> = HashMap::new();
     for (pos, stack) in game.board.iter_occupied() {
-        if slot >= SEQ_LEN { break; }
-        let top = match stack.top() {
-            Some(p) => p,
-            None => continue,
-        };
         let stack_height = stack.height();
-        let stack_depth = stack_height.min(MAX_STACK_DEPTH);
-        let pt_byte = match base_piece_type_byte(top.piece_type()) {
-            Some(b) => b,
-            None => PIECE_TYPE_NONE, // expansion pieces show up as "unknown type"
+        if stack_height == 0 { continue; }
+        let is_articulation = articulation_points.contains(&pos);
+        // Queen distance / adjacency are stack-level facts; compute once.
+        let (my_q_dist_flag, my_q_adj) = match my_queen_pos {
+            Some(qp) => {
+                let d = hex_distance(pos, qp);
+                (normalize_dist(d as i32), d == 1)
+            }
+            None => (1.0, false),
+        };
+        let (opp_q_dist_flag, opp_q_adj) = match opp_queen_pos {
+            Some(qp) => {
+                let d = hex_distance(pos, qp);
+                (normalize_dist(d as i32), d == 1)
+            }
+            None => (1.0, false),
         };
 
-        tokens.kind[slot] = TOKEN_KIND_PIECE;
-        tokens.piece_type[slot] = pt_byte;
-        tokens.color[slot] = relative_color(top.color(), my_color);
-        tokens.stack_depth[slot] = stack_depth;
-        tokens.q[slot] = pos.0;
-        tokens.r[slot] = pos.1;
+        for (z, piece) in stack.iter().enumerate() {
+            if slot >= SEQ_LEN { break; }
+            let is_top = z as u8 == stack_height - 1;
+            let pt_byte = match base_piece_type_byte(piece.piece_type()) {
+                Some(b) => b,
+                None => PIECE_TYPE_NONE, // expansion pieces show up as "unknown type"
+            };
 
-        tokens.set_flag(slot, FLAG_TOP_OF_STACK, 1.0);
-        if articulation_points.contains(&pos) && stack_height == 1 {
-            // Articulation only pins single-stack pieces; beetles on top of
-            // a stack of >= 2 can always move (the buried piece remains).
-            tokens.set_flag(slot, FLAG_PINNED, 1.0);
-        }
-        if let Some(qp) = my_queen_pos {
-            let d = hex_distance(pos, qp);
-            if d == 1 { tokens.set_flag(slot, FLAG_ADJ_MY_QUEEN, 1.0); }
-            tokens.set_flag(slot, FLAG_DIST_MY_QUEEN, normalize_dist(d as i32));
-        } else {
-            tokens.set_flag(slot, FLAG_DIST_MY_QUEEN, 1.0);
-        }
-        if let Some(qp) = opp_queen_pos {
-            let d = hex_distance(pos, qp);
-            if d == 1 { tokens.set_flag(slot, FLAG_ADJ_OPP_QUEEN, 1.0); }
-            tokens.set_flag(slot, FLAG_DIST_OPP_QUEEN, normalize_dist(d as i32));
-        } else {
-            tokens.set_flag(slot, FLAG_DIST_OPP_QUEEN, 1.0);
-        }
-        tokens.mask[slot] = true;
+            tokens.kind[slot] = TOKEN_KIND_PIECE;
+            tokens.piece_type[slot] = pt_byte;
+            tokens.color[slot] = relative_color(piece.color(), my_color);
+            tokens.z[slot] = (z as u8).min(MAX_STACK_DEPTH - 1);
+            tokens.q[slot] = pos.0;
+            tokens.r[slot] = pos.1;
 
-        hex_to_piece_slot.insert(pos, slot);
-        slot += 1;
+            if is_top {
+                tokens.set_flag(slot, FLAG_TOP_OF_STACK, 1.0);
+            } else {
+                tokens.set_flag(slot, FLAG_BURIED, 1.0);
+            }
+            // PINNED only applies when the top piece sits on a height-1 stack
+            // that's an articulation point. Buried pieces can't move by
+            // definition, and beetles on a stack of >= 2 can always move.
+            if is_top && is_articulation && stack_height == 1 {
+                tokens.set_flag(slot, FLAG_PINNED, 1.0);
+            }
+            // Queen flags apply only to the top piece — the model reads
+            // "what's at this hex" through the top token's neighborhood
+            // features; buried pieces don't add queen-distance signal.
+            if is_top {
+                if my_q_adj { tokens.set_flag(slot, FLAG_ADJ_MY_QUEEN, 1.0); }
+                tokens.set_flag(slot, FLAG_DIST_MY_QUEEN, my_q_dist_flag);
+                if opp_q_adj { tokens.set_flag(slot, FLAG_ADJ_OPP_QUEEN, 1.0); }
+                tokens.set_flag(slot, FLAG_DIST_OPP_QUEEN, opp_q_dist_flag);
+            }
+            tokens.mask[slot] = true;
+
+            if is_top {
+                hex_to_top_piece_slot.insert(pos, slot);
+            }
+            slot += 1;
+        }
     }
 
     // ---- RESERVE tokens ----
@@ -310,7 +340,6 @@ pub fn tokenize_and_priors(game: &mut Game) -> (TokenBatch, Vec<(PolicyIndex, Mo
         tokens.kind[slot] = TOKEN_KIND_CELL;
         tokens.q[slot] = dest.0;
         tokens.r[slot] = dest.1;
-        tokens.set_flag(slot, FLAG_ON_FRONTIER, 1.0);
         if let Some(qp) = my_queen_pos {
             let d = hex_distance(*dest, qp);
             if d == 1 { tokens.set_flag(slot, FLAG_ADJ_MY_QUEEN, 1.0); }
@@ -348,7 +377,8 @@ pub fn tokenize_and_priors(game: &mut Game) -> (TokenBatch, Vec<(PolicyIndex, Mo
             _ => continue, // dest overflowed the cap — drop the move
         };
         let mover_slot_opt: Option<usize> = if let Some(src) = mv.from {
-            hex_to_piece_slot.get(&src).copied()
+            // Only the top of each stack is a valid movement mover.
+            hex_to_top_piece_slot.get(&src).copied()
         } else if let Some(piece) = mv.piece {
             my_reserve_slot.get(&piece.piece_type()).copied()
         } else {
@@ -454,6 +484,63 @@ mod tests {
         ).expect("wQ piece token should exist");
         assert_eq!(tb.flags[wq_slot * F_FLAGS + FLAG_PINNED], 0.0,
             "wQ at chain end should not be pinned");
+    }
+
+    #[test]
+    fn stacked_pieces_get_one_token_each_with_z_and_burial_flags() {
+        // Place wQ at (0,0), then bB1 on top of it. It's Black's turn so
+        // bB1 (top) is MINE and wQ (buried) is OPP. The stack should
+        // produce two PIECE tokens sharing (q,r)=(0,0).
+        let wq = Piece::new(PieceColor::White, PieceType::Queen, 1);
+        let bb1 = Piece::new(PieceColor::Black, PieceType::Beetle, 1);
+        let mut g = Game::test_position(
+            &[(wq, (0, 0)), (bb1, (0, 0))],
+            PieceColor::Black,
+            2,
+            23,
+        );
+
+        let (tb, indexed) = tokenize_and_priors(&mut g);
+
+        // Find the two PIECE tokens at (0,0).
+        let piece_slots: Vec<usize> = (0..tb.used)
+            .filter(|&i| tb.kind[i] == TOKEN_KIND_PIECE && tb.q[i] == 0 && tb.r[i] == 0)
+            .collect();
+        assert_eq!(piece_slots.len(), 2, "stack of 2 must produce 2 PIECE tokens");
+
+        // Identify bottom (z=0) and top (z=1) by their z field.
+        let bottom = *piece_slots.iter().find(|&&s| tb.z[s] == 0)
+            .expect("bottom z=0 token must exist");
+        let top = *piece_slots.iter().find(|&&s| tb.z[s] == 1)
+            .expect("top z=1 token must exist");
+
+        // Bottom: wQ → opp queen, BURIED set, TOP_OF_STACK clear.
+        assert_eq!(tb.piece_type[bottom], PIECE_TYPE_QUEEN);
+        assert_eq!(tb.color[bottom], COLOR_OPP);
+        assert_eq!(tb.flags[bottom * F_FLAGS + FLAG_BURIED], 1.0);
+        assert_eq!(tb.flags[bottom * F_FLAGS + FLAG_TOP_OF_STACK], 0.0);
+
+        // Top: bB1 → my beetle, TOP_OF_STACK set, BURIED clear.
+        assert_eq!(tb.piece_type[top], PIECE_TYPE_BEETLE);
+        assert_eq!(tb.color[top], COLOR_MINE);
+        assert_eq!(tb.flags[top * F_FLAGS + FLAG_TOP_OF_STACK], 1.0);
+        assert_eq!(tb.flags[top * F_FLAGS + FLAG_BURIED], 0.0);
+
+        // Movement moves should only originate from the TOP piece's slot, never
+        // from the buried wQ's slot. Walk indexed_moves looking for the bB1
+        // beetle moving (its `from` is (0,0)) and confirm mover_slot == top.
+        for (pi, mv) in &indexed {
+            if let Some(src) = mv.from {
+                if src == (0, 0) {
+                    let mover = match pi {
+                        PolicyIndex::DotProduct { src_cell, .. } => *src_cell,
+                        _ => panic!("expected DotProduct policy index"),
+                    };
+                    assert_eq!(mover, top,
+                        "movement mover slot must be the TOP piece, never the buried wQ");
+                }
+            }
+        }
     }
 
     #[test]

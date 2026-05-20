@@ -42,7 +42,7 @@ def _synthetic_sample(used_tokens: int = 14, n_legal_moves: int = 6):
         cat[1 + i, 0] = TOKEN_KIND_PIECE
         cat[1 + i, 1] = 1                  # piece_type Queen
         cat[1 + i, 2] = 1                  # COLOR_MINE
-        cat[1 + i, 3] = 1                  # stack_depth
+        cat[1 + i, 3] = 0                  # z (solo piece → bottom == top)
         pos[1 + i] = (q, r)
         msk[1 + i] = True
 

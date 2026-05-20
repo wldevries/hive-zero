@@ -59,7 +59,7 @@ fn token_batches_to_numpy<'py>(
             cat[base + li * 5 + 0] = t.kind[li];
             cat[base + li * 5 + 1] = t.piece_type[li];
             cat[base + li * 5 + 2] = t.color[li];
-            cat[base + li * 5 + 3] = t.stack_depth[li];
+            cat[base + li * 5 + 3] = t.z[li];
             cat[base + li * 5 + 4] = t.count[li];
         }
     }
@@ -267,7 +267,7 @@ fn token_batch_to_per_sample_numpy<'py>(
         cat[li * 5 + 0] = tb.kind[li];
         cat[li * 5 + 1] = tb.piece_type[li];
         cat[li * 5 + 2] = tb.color[li];
-        cat[li * 5 + 3] = tb.stack_depth[li];
+        cat[li * 5 + 3] = tb.z[li];
         cat[li * 5 + 4] = tb.count[li];
     }
     let cat_arr = numpy::ndarray::Array2::from_shape_vec((SEQ_LEN, 5), cat)

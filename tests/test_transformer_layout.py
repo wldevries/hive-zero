@@ -71,8 +71,12 @@ def test_policy_d_major_layout():
 
     with torch.no_grad():
         # Run the trunk by reusing internals, then check the policy head.
-        x, positional = m._embed(cat, pos, flg)
-        attn_bias = m.rel_bias(pos[..., 0].long(), pos[..., 1].long(), positional)
+        x, positional, piece_mask = m._embed(cat, pos, flg)
+        z = cat[..., 3].long().clamp(0, 7)
+        attn_bias = (
+            m.rel_bias(pos[..., 0].long(), pos[..., 1].long(), positional)
+            + m.vert_bias(z, piece_mask)
+        )
         mask_f = mask.to(attn_bias.dtype)
         pad_bias = (1.0 - mask_f).unsqueeze(1).unsqueeze(1) * -1e9
         attn_mask = attn_bias + pad_bias
