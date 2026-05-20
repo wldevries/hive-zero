@@ -27,7 +27,12 @@
 //! is dropped from subsequent rounds rather than backfilled (keeps the
 //! code simple, costs only the tail latency of the longest game).
 
+use std::collections::HashMap;
+use std::sync::mpsc::{channel, sync_channel};
+use std::thread;
+
 use core_game::game::PolicyIndex;
+use core_game::mcts::arena::NodeId;
 use core_game::mcts::search::{
     CpuctStrategy, ForcedExploration, MctsSearch, RootNoise, SearchParams,
 };
@@ -134,10 +139,22 @@ pub struct ConcurrentSelfPlayConfig {
 struct GameSlot {
     game: Game,
     search: MctsSearch<Game>,
-    /// Number of sims completed for the *current* move.
+    /// Number of sims credited for the *current* move (incremented at
+    /// select-leaves time, not at distribute time — keeps the sim budget
+    /// honest when some selections hit terminal nodes that get backpropped
+    /// internally and don't need NN evaluation).
     sims_for_current_move: usize,
     /// Whether the search has been initialised at the current root.
     initialised: bool,
+    /// True while an INIT batch entry for this slot is submitted but its
+    /// result hasn't been distributed yet. Prevents building a duplicate
+    /// INIT in the next pipelined round before the worker responds.
+    init_in_flight: bool,
+    /// Count of SIM leaves submitted to the worker but not yet distributed.
+    /// ADVANCE is blocked until this drains to zero so the visit
+    /// distribution at advance time reflects every sim we counted toward
+    /// the cap.
+    sims_in_flight: usize,
     samples: Vec<PlySample>,
     /// White's value once the game finishes — None until then.
     rng_state: u64,
@@ -150,12 +167,30 @@ struct GameSlot {
 pub type ProgressFn<'a> = Box<dyn FnMut(usize, usize, usize, &[(u32, usize)]) + 'a>;
 
 /// Drive `cfg.num_games` games concurrently with cross-game batching.
+///
+/// Inference is pipelined on a dedicated worker thread: each main-loop
+/// iteration submits batch N+1 to the worker (non-blocking) and then waits
+/// on + distributes batch N, so the GPU forward for the previous batch
+/// overlaps with leaf selection + encoding for the next one. Mirrors the
+/// Yinsh/Zertz/Hive-CNN self-play pipelining pattern.
+///
+/// `play_batch` is halved relative to the caller's value so per-game
+/// virtual-loss accumulation stays constant: at any time two batches are
+/// alive (one on the GPU + one being prepared), so VL builds up over
+/// `2 × play_batch` leaves per game vs. `play_batch` in the synchronous
+/// version. Halving keeps the same effective VL ceiling and avoids over-
+/// pessimistic exploration on narrow trees.
+///
 /// `progress` is invoked once per inference round if provided.
 pub fn play_games_concurrent_ort(
     cfg: &ConcurrentSelfPlayConfig,
     engine: &mut HiveTokenOrtEngine,
     mut progress: Option<ProgressFn>,
 ) -> Result<(Vec<ConcurrentGameResult>, ConcurrentSessionStats), String> {
+    // Halve play_batch so per-game in-flight VL leaves stay constant —
+    // matches Hive-CNN / Yinsh / Zertz pipelined behavior.
+    let play_batch = (cfg.play_batch / 2).max(1);
+
     let mut stats = StatsAccumulators::default();
     let mut slots: Vec<GameSlot> = (0..cfg.num_games)
         .map(|i| GameSlot {
@@ -167,6 +202,8 @@ pub fn play_games_concurrent_ort(
             search: MctsSearch::<Game>::new(cfg.simulations.saturating_add(64)),
             sims_for_current_move: 0,
             initialised: false,
+            init_in_flight: false,
+            sims_in_flight: 0,
             samples: Vec::new(),
             rng_state: cfg.rng_seed.wrapping_add(i as u64 * 0x9E37_79B9_7F4A_7C15),
             complete: false,
@@ -175,158 +212,198 @@ pub fn play_games_concurrent_ort(
 
     let search_params = build_params(cfg);
 
-    let mut round_idx: usize = 0;
-    loop {
-        // ---- Compute active games and per-slot intent ------------------
-        // Each non-complete game is either:
-        //   (a) needs INIT (initialised == false) — its root needs an
-        //       inference call to populate the policy_prior;
-        //   (b) needs SIMS (sims_for_current_move < simulations) — it
-        //       contributes `play_batch` leaves to this round;
-        //   (c) ready to ADVANCE (sims done) — it picks a move and
-        //       transitions to INIT (or complete).
-        //
-        // We do ADVANCE before the inference batch so the post-advance
-        // INIT can ride along in this round's batch.
-        for slot in slots.iter_mut() {
-            if slot.complete || !slot.initialised { continue; }
-            if slot.sims_for_current_move < cfg.simulations { continue; }
-            advance_one(slot, cfg, &mut stats)?;
-        }
+    // Worker channels: req carries owned batches, resp carries owned
+    // (policies, values, draws). Bounded request capacity = 1 (one batch
+    // queued + one being processed by the worker), matching Yinsh/Zertz.
+    type InferOk = (Vec<Vec<f32>>, Vec<f32>, Vec<f32>);
+    let (req_tx, req_rx) = sync_channel::<Vec<TokenBatch>>(1);
+    let (resp_tx, resp_rx) = channel::<Result<InferOk, String>>();
 
-        // Gather inference batches.
-        // First the INIT batches (one token batch per uninitialised game),
-        // then the SIM batches (`play_batch` per active game).
-        let mut batches: Vec<TokenBatch> = Vec::new();
-        // `routing` maps batch index → (game_idx, RoutingKind).
-        let mut routing: Vec<(usize, RoutingKind)> = Vec::new();
+    let result = thread::scope(|scope| -> Result<Vec<ConcurrentGameResult>, String> {
+        scope.spawn(move || {
+            while let Ok(batches) = req_rx.recv() {
+                let out = engine
+                    .infer_token_batches(&batches)
+                    .map_err(|e| e.to_string());
+                if resp_tx.send(out).is_err() {
+                    break;
+                }
+            }
+        });
 
-        for (gi, slot) in slots.iter_mut().enumerate() {
-            if slot.complete { continue; }
-            if !slot.initialised {
+        // Pending = (routing, per-game SIM stashes, batch_size_for_progress).
+        // routing is the same flat list of `(game_idx, RoutingKind)` the
+        // synchronous version used; stashes are keyed by game_idx since
+        // each SIM entry adds its slot's stash (caller-owned) here so the
+        // next round's select_leaves can refill the search's internal stash
+        // without clobbering this batch's leaves.
+        let mut pending: Option<(Vec<(usize, RoutingKind)>, HashMap<usize, Vec<(NodeId, Game)>>, usize)> = None;
+        let mut round_idx: usize = 0;
+
+        loop {
+            // ---- Phase A: distribute the PREVIOUS batch's results --------
+            // Blocks on the worker. By the time we get here, we've already
+            // submitted the new batch (further down in the previous iter),
+            // so the GPU stays busy across this boundary.
+            if let Some((prev_routing, mut prev_stashes, _)) = pending.take() {
+                let (policies, values, draws) = resp_rx
+                    .recv()
+                    .map_err(|_| "worker thread died before responding".to_string())??;
+                let mut cursor: usize = 0;
+                for (gi, kind) in &prev_routing {
+                    let slot = &mut slots[*gi];
+                    match kind {
+                        RoutingKind::Init => {
+                            slot.search.init(&slot.game, &policies[cursor]);
+                            if let RootNoise::Dirichlet { alpha, epsilon } = search_params.root_noise {
+                                slot.search.params = search_params.clone();
+                                slot.search.apply_root_dirichlet(alpha, epsilon);
+                            } else {
+                                slot.search.params = search_params.clone();
+                            }
+                            slot.initialised = true;
+                            slot.init_in_flight = false;
+                            slot.sims_for_current_move = 0;
+                            slot.sims_in_flight = 0;
+                            cursor += 1;
+                        }
+                        RoutingKind::Sim { count } => {
+                            let pol_slice = &policies[cursor..cursor + count];
+                            let val_slice = &values[cursor..cursor + count];
+                            let draw_slice = &draws[cursor..cursor + count];
+                            let stash = prev_stashes
+                                .remove(gi)
+                                .ok_or_else(|| format!("missing stash for game {gi}"))?;
+                            slot.search.expand_and_backprop_with_stash(
+                                stash, pol_slice, val_slice, draw_slice,
+                            );
+                            slot.sims_in_flight = slot.sims_in_flight.saturating_sub(*count);
+                            cursor += count;
+                        }
+                    }
+                }
+            }
+
+            // ---- Phase B: ADVANCE slots whose sims are fully resolved ----
+            // Only fires when the slot has no SIMs in flight — otherwise the
+            // visit distribution at advance_one time would be missing the
+            // backed-up values for the not-yet-distributed leaves we already
+            // counted toward `sims_for_current_move`.
+            for slot in slots.iter_mut() {
+                if slot.complete || !slot.initialised { continue; }
+                if slot.sims_in_flight > 0 { continue; }
+                if slot.sims_for_current_move < cfg.simulations { continue; }
+                advance_one(slot, cfg, &mut stats)?;
+            }
+
+            // ---- Phase C: build INIT + SIM batches for the next round ----
+            let mut batches: Vec<TokenBatch> = Vec::new();
+            let mut routing: Vec<(usize, RoutingKind)> = Vec::new();
+            let mut new_stashes: HashMap<usize, Vec<(NodeId, Game)>> = HashMap::new();
+
+            // INIT: any uninitialised slot without an INIT already in flight.
+            for (gi, slot) in slots.iter_mut().enumerate() {
+                if slot.complete || slot.initialised || slot.init_in_flight { continue; }
                 let mut root_game = slot.game.clone();
                 let (tb, _) = tokenize::tokenize_and_priors(&mut root_game);
                 batches.push(tb);
                 routing.push((gi, RoutingKind::Init));
             }
-        }
 
-        // SIM batches require INIT to be done first. For uninitialised
-        // games we defer SIMs to the next round (so the policy_prior is
-        // available before any leaves get expanded). This costs one round
-        // per ply per game but keeps the loop logic flat — fine because
-        // INIT and SIM rounds overlap across games anyway.
-        for (gi, slot) in slots.iter_mut().enumerate() {
-            if slot.complete || !slot.initialised { continue; }
-            if slot.sims_for_current_move >= cfg.simulations { continue; }
-            let want = cfg.play_batch.min(cfg.simulations - slot.sims_for_current_move);
-            let leaves = slot.search.select_leaves(want);
-            // Note: sims_for_current_move credits `want` regardless of
-            // `leaves.len()`. select_leaves can return fewer than `want`
-            // leaves when some selections hit terminal nodes inside the
-            // tree — those terminals are still real simulations (their
-            // value gets backpropped internally), they just don't need NN
-            // evaluation. Crediting `want` here keeps the per-move sim
-            // budget honest and prevents "stuck" slots when terminal-only
-            // batches occur.
-            slot.sims_for_current_move += want;
-            if leaves.is_empty() { continue; }
-            for leaf in &leaves {
-                let mut g = slot.search.stashed_game(*leaf)
-                    .ok_or_else(|| "stashed leaf missing".to_string())?
-                    .clone();
-                let (tb, _) = tokenize::tokenize_and_priors(&mut g);
-                batches.push(tb);
+            // SIM: initialised slots with sim budget remaining. We use the
+            // halved `play_batch` so two pipelined batches still hit the
+            // same effective per-game VL ceiling as the synchronous path.
+            for (gi, slot) in slots.iter_mut().enumerate() {
+                if slot.complete || !slot.initialised { continue; }
+                if slot.sims_for_current_move >= cfg.simulations { continue; }
+                let want = play_batch.min(cfg.simulations - slot.sims_for_current_move);
+                let leaves = slot.search.select_leaves(want);
+                // sims_for_current_move credits `want` regardless of
+                // leaves.len() — terminal selections get backpropped
+                // internally and don't need NN evaluation, but still count
+                // toward the per-move sim budget.
+                slot.sims_for_current_move += want;
+                if leaves.is_empty() { continue; }
+                for leaf in &leaves {
+                    let mut g = slot
+                        .search
+                        .stashed_game(*leaf)
+                        .ok_or_else(|| "stashed leaf missing".to_string())?
+                        .clone();
+                    let (tb, _) = tokenize::tokenize_and_priors(&mut g);
+                    batches.push(tb);
+                }
+                // Take the stash NOW (after we've finished reading via
+                // stashed_game) so the next round's select_leaves writes
+                // into a fresh internal stash and can't clobber this
+                // batch's leaves. Virtual loss remains applied to the
+                // leaves until expand_and_backprop_with_stash runs, so
+                // the next select still steers away from them.
+                let leaf_count = leaves.len();
+                let stash = slot.search.take_stash();
+                new_stashes.insert(gi, stash);
+                slot.sims_in_flight += leaf_count;
+                routing.push((gi, RoutingKind::Sim { count: leaf_count }));
             }
-            routing.push((gi, RoutingKind::Sim { count: leaves.len() }));
-        }
 
-        if batches.is_empty() {
-            // No INIT or SIM batches to dispatch this round. But this DOESN'T
-            // necessarily mean we're done: a slot may have just crossed the
-            // sims_done >= simulations threshold during this round's SIM
-            // phase (e.g. via empty leaves from select_leaves on the final
-            // partial batch — every selection in that batch hit a terminal
-            // node, so leaves.len() = 0 but sims_for_current_move still
-            // incremented by `want`). Those slots are READY TO ADVANCE in
-            // the NEXT iter — we must let the loop continue rather than
-            // terminate here.
-            let any_active = slots.iter().any(|s| !s.complete);
-            if !any_active {
-                break;
-            }
-            // Otherwise fall through to round_idx++ and continue. The next
-            // iter's ADVANCE phase will pick up any slot with sims_done >=
-            // simulations, play its move, and re-INIT for the next ply —
-            // which WILL contribute a batch.
+            // ---- Phase D: submit the new batch (non-blocking) ------------
+            let new_pending = if !batches.is_empty() {
+                // Mark init_in_flight for INIT entries so the next iter
+                // doesn't build a duplicate INIT before the result arrives.
+                for (gi, kind) in &routing {
+                    if matches!(kind, RoutingKind::Init) {
+                        slots[*gi].init_in_flight = true;
+                    }
+                }
+                let bs = batches.len();
+                req_tx
+                    .send(batches)
+                    .map_err(|_| "worker thread closed request channel".to_string())?;
+                Some((routing, new_stashes, bs))
+            } else {
+                None
+            };
+
+            // ---- Phase E: progress + termination check -------------------
             round_idx += 1;
             if let Some(cb) = progress.as_mut() {
-                let snapshot: Vec<(u32, usize)> = slots.iter()
+                let snapshot: Vec<(u32, usize)> = slots
+                    .iter()
                     .filter(|s| !s.complete)
                     .map(|s| (s.game.move_count as u32, s.sims_for_current_move))
                     .collect();
                 let active = snapshot.len();
-                cb(round_idx, active, 0, &snapshot);
+                let bs = new_pending.as_ref().map_or(0, |(_, _, b)| *b);
+                cb(round_idx, active, bs, &snapshot);
             }
-            continue;
-        }
 
-        // ---- One big inference call across all games -------------------
-        let (policies, values, draws) = engine
-            .infer_token_batches(&batches)
-            .map_err(|e| e.to_string())?;
+            pending = new_pending;
 
-        // ---- Distribute results back to each game ---------------------
-        let mut cursor: usize = 0;
-        for (gi, kind) in &routing {
-            let slot = &mut slots[*gi];
-            match kind {
-                RoutingKind::Init => {
-                    // policies[cursor] is the root policy for this game.
-                    slot.search.init(&slot.game, &policies[cursor]);
-                    if let RootNoise::Dirichlet { alpha, epsilon } = search_params.root_noise {
-                        slot.search.params = search_params.clone();
-                        slot.search.apply_root_dirichlet(alpha, epsilon);
-                    } else {
-                        slot.search.params = search_params.clone();
-                    }
-                    slot.initialised = true;
-                    slot.sims_for_current_move = 0;
-                    cursor += 1;
-                }
-                RoutingKind::Sim { count } => {
-                    let pol_slice = &policies[cursor..cursor + count];
-                    let val_slice = &values[cursor..cursor + count];
-                    let draw_slice = &draws[cursor..cursor + count];
-                    slot.search.expand_and_backprop(pol_slice, val_slice, draw_slice);
-                    cursor += count;
-                }
+            // Nothing in flight + nothing to do → we're done. (If we still
+            // had unfinished work we'd have built a batch this round and
+            // pending would be Some.)
+            if pending.is_none() && slots.iter().all(|s| s.complete) {
+                break;
             }
         }
 
-        round_idx += 1;
-        if let Some(cb) = progress.as_mut() {
-            let snapshot: Vec<(u32, usize)> = slots.iter()
-                .filter(|s| !s.complete)
-                .map(|s| (s.game.move_count as u32, s.sims_for_current_move))
-                .collect();
-            let active = snapshot.len();
-            cb(round_idx, active, batches.len(), &snapshot);
-        }
-    }
+        // Drop sender so the worker's recv() returns Err and the thread exits.
+        drop(req_tx);
 
-    // ---- Assemble final results -----------------------------------------
-    let mut out = Vec::with_capacity(slots.len());
-    for slot in slots {
-        out.push(ConcurrentGameResult {
-            outcome: slot.game.state.as_str().to_string(),
-            move_count: slot.game.move_count as u32,
-            final_uhp: slot.game.game_string(),
-            final_board_render: slot.game.board.render(None, None),
-            samples: slot.samples,
-        });
-    }
-    Ok((out, stats.finalize()))
+        let mut out = Vec::with_capacity(slots.len());
+        for slot in slots.drain(..) {
+            out.push(ConcurrentGameResult {
+                outcome: slot.game.state.as_str().to_string(),
+                move_count: slot.game.move_count as u32,
+                final_uhp: slot.game.game_string(),
+                final_board_render: slot.game.board.render(None, None),
+                samples: slot.samples,
+            });
+        }
+        Ok(out)
+    })?;
+
+    Ok((result, stats.finalize()))
 }
 
 enum RoutingKind {
