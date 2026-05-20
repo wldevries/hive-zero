@@ -21,8 +21,8 @@ from hive.nn.transformer import (
 
 
 def _synthetic_batch(B: int = 2, used: int = 14):
-    cat = torch.zeros(B, SEQ_LEN, 5, dtype=torch.int64)
-    pos = torch.zeros(B, SEQ_LEN, 2, dtype=torch.int64)
+    cat = torch.zeros(B, SEQ_LEN, 5, dtype=torch.int32)
+    pos = torch.zeros(B, SEQ_LEN, 2, dtype=torch.int32)
     flg = torch.zeros(B, SEQ_LEN, F_FLAGS, dtype=torch.float32)
     mask = torch.zeros(B, SEQ_LEN, dtype=torch.bool)
     cat[:, 0, 0] = TOKEN_KIND_GAME

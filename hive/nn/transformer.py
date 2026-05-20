@@ -4,9 +4,12 @@ This module replaces the CNN/bilinear-Q·K policy network in `hive/nn/model.py`.
 The trunk is a stack of pre-norm transformer blocks operating on the
 variable-length token sequence emitted by `rust/.../hive-game/src/tokenize.rs`.
 
-Input contract (must match `rust/crates/hive-game/src/tokenize.rs`):
-    categoricals : (B, L, 5)  uint8   — kind, piece_type, color, stack_depth, count
-    positions    : (B, L, 2)  int8    — (q, r) axial coordinates
+Input contract at the ONNX boundary (int32 indices keep the boundary buffers
+half the size of int64 and match every runtime's best-supported Gather dtype;
+the model casts to int64 once at the top of `forward()` to satisfy
+`nn.Embedding`'s long-index requirement):
+    categoricals : (B, L, 5)  int32   — kind, piece_type, color, stack_depth, count
+    positions    : (B, L, 2)  int32   — (q, r) axial coordinates
     flags        : (B, L, F)  float32 — per-token continuous/binary flag bundle
     mask         : (B, L)     bool    — True for real tokens, False for pad
 
@@ -320,20 +323,20 @@ class HiveTransformer(nn.Module):
 
     def _embed(
         self,
-        categoricals: torch.Tensor,  # (B, L, 5) uint8
-        positions: torch.Tensor,      # (B, L, 2) int8
+        categoricals: torch.Tensor,  # (B, L, 5) int64 (caller casts at forward entry)
+        positions: torch.Tensor,      # (B, L, 2) int64 (caller casts at forward entry)
         flags: torch.Tensor,          # (B, L, F_FLAGS) float
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the per-token embedding, the positional-token mask, and the
         PIECE-token mask used for the Δz attention bias."""
-        kind = categoricals[..., 0].long()
-        piece_type = categoricals[..., 1].long()
-        color = categoricals[..., 2].long()
-        z = categoricals[..., 3].long().clamp(0, NUM_Z_LEVELS - 1)
-        count = categoricals[..., 4].long().clamp(0, NUM_COUNT_BUCKETS - 1)
+        kind = categoricals[..., 0]
+        piece_type = categoricals[..., 1]
+        color = categoricals[..., 2]
+        z = categoricals[..., 3].clamp(0, NUM_Z_LEVELS - 1)
+        count = categoricals[..., 4].clamp(0, NUM_COUNT_BUCKETS - 1)
 
-        q = positions[..., 0].long()
-        r = positions[..., 1].long()
+        q = positions[..., 0]
+        r = positions[..., 1]
         positional = (kind == TOKEN_KIND_PIECE) | (kind == TOKEN_KIND_CELL)  # (B, L) bool
         piece_mask = (kind == TOKEN_KIND_PIECE)                              # (B, L) bool
 
@@ -355,8 +358,8 @@ class HiveTransformer(nn.Module):
 
     def forward(
         self,
-        categoricals: torch.Tensor,   # (B, L, 5) uint8/long
-        positions: torch.Tensor,       # (B, L, 2) int8/long
+        categoricals: torch.Tensor,   # (B, L, 5) any int dtype — cast to int64 on entry
+        positions: torch.Tensor,       # (B, L, 2) any int dtype — cast to int64 on entry
         flags: torch.Tensor,           # (B, L, F_FLAGS) float
         mask: torch.Tensor,            # (B, L) bool — real tokens
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -371,12 +374,19 @@ class HiveTransformer(nn.Module):
         # export and emits TracerWarning. The shape check happens upstream
         # (Rust tokenizer is the only producer of these tensors and always
         # emits SEQ_LEN-padded batches).
+
+        # `nn.Embedding` requires int64 indices. Cast once at the entry so the
+        # ONNX graph emits a single Cast per input tensor (instead of one per
+        # per-field slice). Identity-cost when already int64.
+        categoricals = categoricals.long()
+        positions = positions.long()
+
         x, positional, piece_mask = self._embed(categoricals, positions, flags)
 
         # Compute relative bias once; reused across all blocks.
-        q_pos = positions[..., 0].long()
-        r_pos = positions[..., 1].long()
-        z = categoricals[..., 3].long().clamp(0, NUM_Z_LEVELS - 1)
+        q_pos = positions[..., 0]
+        r_pos = positions[..., 1]
+        z = categoricals[..., 3].clamp(0, NUM_Z_LEVELS - 1)
         attn_bias = (
             self.rel_bias(q_pos, r_pos, positional)           # (B, H, L, L) hex Δq,Δr
             + self.vert_bias(z, piece_mask)                   # (B, H, L, L) Δz on PIECE pairs
@@ -503,7 +513,8 @@ class _OnnxExportWrapper(nn.Module):
     - Softmaxes WDL so ORT consumers see probabilities.
     - With `precision="fp16"` (default), runs the internal model in float16
       while keeping fp32 inputs and outputs at the ONNX boundary. Categorical
-      inputs stay int64 (embedding gather has no float16 cost) — only `flags`
+      inputs stay int32 (embedding gather has no float16 cost; the model's
+      forward casts to int64 internally for `nn.Embedding`) — only `flags`
       is cast.
     """
 
@@ -537,8 +548,8 @@ def export_onnx(model: HiveTransformer, path: str, batch_size: int | None = None
     """Export model to ONNX for Rust-native ORT inference.
 
     Inputs:
-        categoricals (B, L, 5) int64
-        positions    (B, L, 2) int64
+        categoricals (B, L, 5) int32
+        positions    (B, L, 2) int32
         flags        (B, L, F) float32 (cast to fp16 inside wrapper if requested)
         mask         (B, L)    bool
     Outputs:
@@ -550,8 +561,8 @@ def export_onnx(model: HiveTransformer, path: str, batch_size: int | None = None
     model.eval()
     device = next(model.parameters()).device
     b = batch_size or 1
-    dummy_cat = torch.zeros(b, L, 5, dtype=torch.int64, device=device)
-    dummy_pos = torch.zeros(b, L, 2, dtype=torch.int64, device=device)
+    dummy_cat = torch.zeros(b, L, 5, dtype=torch.int32, device=device)
+    dummy_pos = torch.zeros(b, L, 2, dtype=torch.int32, device=device)
     dummy_flags = torch.zeros(b, L, F_FLAGS, dtype=torch.float32, device=device)
     dummy_mask = torch.zeros(b, L, dtype=torch.bool, device=device)
     dummy_mask[:, 0] = True  # at least the GAME token is real

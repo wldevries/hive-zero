@@ -380,9 +380,13 @@ impl HiveTokenOrtEngine {
         let f = F_FLAGS;
 
         // ---- pack inputs into contiguous buffers in the right dtype --------
+        // Boundary dtype is int32: every index in the model fits in <12 bits
+        // and int32 Gather is the best-supported indexing path across ORT
+        // (CUDA / WebGPU / WASM) and tract. The model casts to int64 once
+        // at the top of `forward()` to satisfy `nn.Embedding`.
         let t0 = Instant::now();
-        let mut cat = vec![0i64; b * l * 5];
-        let mut pos = vec![0i64; b * l * 2];
+        let mut cat = vec![0i32; b * l * 5];
+        let mut pos = vec![0i32; b * l * 2];
         let mut flg = vec![0f32; b * l * f];
         let mut msk = vec![false; b * l];
         for (bi, tok) in batches.iter().enumerate() {
@@ -391,13 +395,13 @@ impl HiveTokenOrtEngine {
             let flg_base = bi * l * f;
             let msk_base = bi * l;
             for li in 0..l {
-                cat[cat_base + li * 5 + 0] = tok.kind[li] as i64;
-                cat[cat_base + li * 5 + 1] = tok.piece_type[li] as i64;
-                cat[cat_base + li * 5 + 2] = tok.color[li] as i64;
-                cat[cat_base + li * 5 + 3] = tok.z[li] as i64;
-                cat[cat_base + li * 5 + 4] = tok.count[li] as i64;
-                pos[pos_base + li * 2 + 0] = tok.q[li] as i64;
-                pos[pos_base + li * 2 + 1] = tok.r[li] as i64;
+                cat[cat_base + li * 5 + 0] = tok.kind[li] as i32;
+                cat[cat_base + li * 5 + 1] = tok.piece_type[li] as i32;
+                cat[cat_base + li * 5 + 2] = tok.color[li] as i32;
+                cat[cat_base + li * 5 + 3] = tok.z[li] as i32;
+                cat[cat_base + li * 5 + 4] = tok.count[li] as i32;
+                pos[pos_base + li * 2 + 0] = tok.q[li] as i32;
+                pos[pos_base + li * 2 + 1] = tok.r[li] as i32;
             }
             flg[flg_base..flg_base + l * f].copy_from_slice(&tok.flags);
             msk[msk_base..msk_base + l].copy_from_slice(&tok.mask);

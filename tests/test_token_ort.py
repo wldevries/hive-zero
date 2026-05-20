@@ -42,8 +42,8 @@ def test_onnxruntime_runs_exported_model(onnx_path):
     """The exported ONNX must run on the CPU provider and produce valid shapes."""
     sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     feeds = {
-        "categoricals": np.zeros((1, SEQ_LEN, 5), dtype=np.int64),
-        "positions":    np.zeros((1, SEQ_LEN, 2), dtype=np.int64),
+        "categoricals": np.zeros((1, SEQ_LEN, 5), dtype=np.int32),
+        "positions":    np.zeros((1, SEQ_LEN, 2), dtype=np.int32),
         "flags":        np.zeros((1, SEQ_LEN, F_FLAGS), dtype=np.float32),
         "mask":         np.zeros((1, SEQ_LEN), dtype=np.bool_),
     }
