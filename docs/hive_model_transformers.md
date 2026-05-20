@@ -95,7 +95,7 @@ Field vocabularies:
 | `kind` | 0=PAD, 1=GAME, 2=PIECE, 3=RESERVE, 4=CELL |
 | `piece_type` | 0=NONE, 1=Queen, 2=Spider, 3=Beetle, 4=Grasshopper, 5=Ant |
 | `color` | 0=NONE, 1=MINE, 2=OPP |
-| `stack_depth` | 1..=7 for `PIECE` tokens (height of the stack), 0 otherwise |
+| `z` | 0..=7 for `PIECE` tokens (distance from top: 0=top, height−1=bottom), 0 otherwise |
 | `count` | 1..=N reserve count for `RESERVE` tokens, 0 otherwise |
 
 ### Flag bundle (`F = 8`)
@@ -103,10 +103,10 @@ Field vocabularies:
 | Index | Flag |
 |-------|------|
 | 0 | `pinned` — single-stack piece is an articulation point of the hive |
-| 1 | `top_of_stack` — set on the top PIECE token of each stack (z == height−1, true for solo pieces) |
+| 1 | `top_of_stack` — set on the top PIECE token of each stack (z == 0, true for solo pieces) |
 | 2 | `adj_my_queen` — token is adjacent to current player's queen |
 | 3 | `adj_opp_queen` — token is adjacent to opponent's queen |
-| 4 | `buried` — PIECE token has at least one piece on top of it (z < height−1) |
+| 4 | `buried` — PIECE token has at least one piece on top of it (z > 0) |
 | 5 | `dist_my_queen` — normalised hex distance to mine, saturated at 1.0 past distance 6 |
 | 6 | `dist_opp_queen` — same, for opponent |
 | 7 | reserved (also used as "my queen placed" bit on the `GAME` token) |
@@ -115,7 +115,7 @@ Field vocabularies:
 
 ```
 x = kind_emb[kind] + piece_type_emb[piece_type] + color_emb[color]
-  + z_emb[z] · 𝟙[kind == PIECE]   ← per-piece position in stack (0=bottom)
+  + z_emb[z] · 𝟙[kind == PIECE]   ← per-piece distance from top (0=top piece)
   + count_emb[count]
   + abs_pos[q + 11, r + 11]      ← masked to (kind ∈ {PIECE, CELL}) so non-positional
                                     tokens contribute zero from this term

@@ -44,7 +44,7 @@ F_FLAGS: int = 8
 NUM_TOKEN_KINDS: int = 5      # PAD, GAME, PIECE, RESERVE, CELL
 NUM_PIECE_TYPES: int = 6      # NONE + 5 base types
 NUM_COLORS: int = 3           # NONE, MINE, OPP
-NUM_Z_LEVELS: int = 8         # 0..=7 (per-piece position-in-stack: 0=bottom)
+NUM_Z_LEVELS: int = 8         # 0..=7 (per-piece distance-from-top: 0=top piece)
 NUM_COUNT_BUCKETS: int = 12   # 0..=11 (reserve counts per type)
 
 # Δz bucket range for the vertical attention bias. Signed offset in [-7, +7]
@@ -268,9 +268,13 @@ class HiveTransformer(nn.Module):
         self.kind_emb = nn.Embedding(NUM_TOKEN_KINDS, d_model)
         self.piece_type_emb = nn.Embedding(NUM_PIECE_TYPES, d_model)
         self.color_emb = nn.Embedding(NUM_COLORS, d_model)
-        # Per-piece vertical position in stack (0=bottom). Replaces the prior
-        # top-only `stack_depth_emb` now that buried pieces get their own
-        # tokens. Gated to zero on non-PIECE tokens in `_embed`.
+        # Per-piece distance-from-top in stack (0=top piece, height-1=bottom).
+        # Anchoring z=0 to the top means solo pieces and tops-of-stacks share
+        # z_emb(0) — the model sees "I'm the visible/mobile piece" as a single
+        # signal regardless of stack height instead of having to compose
+        # FLAG_TOP_OF_STACK with a height-dependent z. Gated to zero on
+        # non-PIECE tokens in `_embed`. Replaces the prior top-only
+        # `stack_depth_emb` now that buried pieces get their own tokens.
         self.z_emb = nn.Embedding(NUM_Z_LEVELS, d_model)
         self.count_emb = nn.Embedding(NUM_COUNT_BUCKETS, d_model)
         for emb in (self.kind_emb, self.piece_type_emb, self.color_emb,

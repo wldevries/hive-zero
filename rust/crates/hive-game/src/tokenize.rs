@@ -7,8 +7,8 @@
 ///   [0]                : `[GAME]` token (CLS-style, reads value + aux heads)
 ///   [1 .. 1+M]         : `PIECE` tokens — one per piece on the board.
 ///                        Stacked pieces share `(q, r)` and are distinguished
-///                        by the per-token `z` (position-in-stack: 0=bottom,
-///                        height-1=top). FLAG_TOP_OF_STACK and FLAG_BURIED
+///                        by the per-token `z` (distance-from-top: 0=top,
+///                        height-1=bottom). FLAG_TOP_OF_STACK and FLAG_BURIED
 ///                        encode the top/buried split.
 ///   [1+M .. 1+M+R]     : `RESERVE` tokens — one per (color, base_type) with
 ///                        remaining count > 0 (mine first, then opponent)
@@ -139,9 +139,13 @@ pub struct TokenBatch {
     /// Color per slot — `COLOR_MINE` / `COLOR_OPP` for piece/reserve tokens,
     /// `COLOR_NONE` otherwise.
     pub color: Vec<u8>,
-    /// Position-in-stack (0..=MAX_STACK_DEPTH-1, 0=bottom) for PIECE tokens,
-    /// 0 elsewhere. Pieces in a stack share `(q, r)`; `z` is the per-piece
-    /// vertical coordinate that distinguishes them.
+    /// Distance from top of stack (0..=MAX_STACK_DEPTH-1, 0=top piece) for
+    /// PIECE tokens, 0 elsewhere. Pieces in a stack share `(q, r)`; `z` is
+    /// the per-piece vertical coordinate that distinguishes them. Anchoring
+    /// z=0 to the top means solo pieces and tops-of-stacks share the same
+    /// absolute embedding — the model gets "I'm the visible/mobile piece"
+    /// as a first-class signal instead of having to combine z + flags.
+    /// Δz signed differences are invariant under this convention.
     pub z: Vec<u8>,
     /// Remaining count (1..=N) for RESERVE tokens, 0 elsewhere.
     pub count: Vec<u8>,
@@ -210,8 +214,8 @@ pub fn tokenize_and_priors(game: &mut Game) -> (TokenBatch, Vec<(PolicyIndex, Mo
 
     // ---- PIECE tokens ----
     // One token per piece on the board (not per cell). A stack of N pieces
-    // produces N tokens sharing `(q, r)` but with distinct `z` (0=bottom,
-    // height-1=top). Only the top piece of each stack is a legal movement
+    // produces N tokens sharing `(q, r)` but with distinct `z` (0=top,
+    // N-1=bottom). Only the top piece of each stack is a legal movement
     // mover, so we record only top-of-stack slots in `hex_to_top_piece_slot`.
     let mut hex_to_top_piece_slot: HashMap<Hex, usize> = HashMap::new();
     for (pos, stack) in game.board.iter_occupied() {
@@ -245,7 +249,15 @@ pub fn tokenize_and_priors(game: &mut Game) -> (TokenBatch, Vec<(PolicyIndex, Mo
             tokens.kind[slot] = TOKEN_KIND_PIECE;
             tokens.piece_type[slot] = pt_byte;
             tokens.color[slot] = relative_color(piece.color(), my_color);
-            tokens.z[slot] = (z as u8).min(MAX_STACK_DEPTH - 1);
+            // z is distance-from-top, NOT position-from-bottom. The top piece
+            // of any stack — solo or 7-tall — gets z=0, so the per-piece
+            // `z_emb(0)` lookup uniformly encodes "I'm the visible piece
+            // others attend to" instead of varying with stack height. Buried
+            // pieces grow towards larger z (== levels below the top).
+            // Δz between any pair is invariant to this choice (it's a signed
+            // difference), so VerticalBias is unaffected.
+            let dist_from_top = (stack_height - 1) - z as u8;
+            tokens.z[slot] = dist_from_top.min(MAX_STACK_DEPTH - 1);
             tokens.q[slot] = pos.0;
             tokens.r[slot] = pos.1;
 
@@ -508,11 +520,13 @@ mod tests {
             .collect();
         assert_eq!(piece_slots.len(), 2, "stack of 2 must produce 2 PIECE tokens");
 
-        // Identify bottom (z=0) and top (z=1) by their z field.
-        let bottom = *piece_slots.iter().find(|&&s| tb.z[s] == 0)
-            .expect("bottom z=0 token must exist");
-        let top = *piece_slots.iter().find(|&&s| tb.z[s] == 1)
-            .expect("top z=1 token must exist");
+        // Identify top (z=0) and bottom (z=1) by their z field.
+        // z encodes distance from top: top piece always z=0, buried piece in
+        // a stack of 2 is z=1.
+        let top = *piece_slots.iter().find(|&&s| tb.z[s] == 0)
+            .expect("top z=0 token must exist");
+        let bottom = *piece_slots.iter().find(|&&s| tb.z[s] == 1)
+            .expect("bottom z=1 token must exist");
 
         // Bottom: wQ → opp queen, BURIED set, TOP_OF_STACK clear.
         assert_eq!(tb.piece_type[bottom], PIECE_TYPE_QUEEN);
