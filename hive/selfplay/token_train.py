@@ -295,28 +295,24 @@ def run_training(cfg: TrainConfig) -> None:
             # progress callback in the Rust round-loop.
             t0 = time.time()
             pbar = tqdm(
-                total=cfg.games_per_gen * cfg.max_moves,
-                desc=f"  gen {gen} selfplay",
-                unit="ply",
+                total=cfg.max_moves,
+                desc=f"  Self-play",
+                unit="turn",
                 dynamic_ncols=True,
+                leave=False,
             )
-            # Track previous total move-count snapshot so we can report
-            # ply deltas to tqdm.
-            prev_total_plies = [0]
 
             def _progress(round_idx: int, active: int, batch: int,
                           per_game: list[tuple[int, int]]):
-                total_plies = sum(m for (m, _) in per_game)
-                # `per_game` lists ACTIVE games only; finished games' ply
-                # contributions stay at their last value. Approximate by
-                # tracking the running sum we've already credited.
-                delta = total_plies - prev_total_plies[0]
-                if delta > 0:
-                    pbar.update(delta)
-                    prev_total_plies[0] = total_plies
+                # `per_game` lists ACTIVE games only. Track the furthest-
+                # ahead active game's move count vs max_moves, matching the
+                # old CNN/Yinsh "Self-play  N/max_moves [s/turn]" style.
+                max_turn = max((m for (m, _) in per_game), default=cfg.max_moves)
+                advance = max_turn - pbar.n
+                if advance > 0:
+                    pbar.update(advance)
                 pbar.set_postfix_str(
-                    f"round={round_idx} active={active}/{cfg.games_per_gen} "
-                    f"batch={batch}",
+                    f"active={active}/{cfg.games_per_gen}",
                     refresh=True,
                 )
 
@@ -339,11 +335,7 @@ def run_training(cfg: TrainConfig) -> None:
                 rng_seed=gen * 10_000,
                 progress_cb=_progress,
             )
-            # Final tick to fill the bar in case some games didn't fully
-            # update (the per-active-game snapshot drops finished games).
-            total_plies_final = sum(r.move_count for r in results)
-            if total_plies_final > prev_total_plies[0]:
-                pbar.update(total_plies_final - prev_total_plies[0])
+            pbar.update(pbar.total - pbar.n)
             pbar.close()
             t_play = time.time() - t0
             total_samples = sum(r.samples_written for r in results)
