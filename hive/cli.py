@@ -683,6 +683,7 @@ def main():
             play_batch=args.play_batch_sims,
             epochs_per_gen=args.epochs,
             training_batch_size=args.training_batch_size,
+            num_workers=args.training_num_workers,
             max_moves=args.max_moves,
             temperature_moves=getattr(args, "temp_threshold", 12),
             temperature_start=getattr(args, "temperature", 1.0),

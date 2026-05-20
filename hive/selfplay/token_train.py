@@ -49,6 +49,7 @@ class TrainConfig:
     play_batch: int = 8
     epochs_per_gen: int = 1
     training_batch_size: int = 64
+    num_workers: int = 0
     max_moves: int = 200
     temperature_moves: int = 12
     temperature_start: float = 1.0
@@ -374,6 +375,7 @@ def run_training(cfg: TrainConfig) -> None:
             for ep in range(cfg.epochs_per_gen):
                 stats = trainer.train_epoch(
                     dataset, batch_size=cfg.training_batch_size,
+                    num_workers=cfg.num_workers,
                 )
                 total_s  = f"{stats['total_loss']:.4f}"
                 policy_s = f"{stats['policy_loss']:.4f}"
