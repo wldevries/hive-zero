@@ -72,13 +72,14 @@ class TrainConfig:
     checkpoint_every: int = 1
 
 
-def _ckpt_paths(name: str) -> tuple[str, str, str]:
-    """Return (models_dir, latest_ckpt_path, replay_dir)."""
+def _ckpt_paths(name: str) -> tuple[str, str, str, str]:
+    """Return (models_dir, live_ckpt_path, replay_dir, checkpoint_dir)."""
     models_dir = os.path.join("models", name)
     os.makedirs(models_dir, exist_ok=True)
-    ckpt = os.path.join(models_dir, "latest.pt")
+    ckpt = os.path.join(models_dir, f"{name}.pt")
     replay = os.path.join(models_dir, "replay")
-    return models_dir, ckpt, replay
+    checkpoint_dir = os.path.join(models_dir, "checkpoints")
+    return models_dir, ckpt, replay, checkpoint_dir
 
 
 def _load_or_init_model(cfg: TrainConfig, ckpt_path: str) -> tuple[HiveTransformer, int]:
@@ -240,7 +241,7 @@ def _print_sample_boards(results: list[GameResult]) -> None:
 def run_training(cfg: TrainConfig) -> None:
     """Drive the play → train → export → repeat loop until `generations`
     are done or `time_limit_minutes` elapses."""
-    models_dir, ckpt_path, replay_dir = _ckpt_paths(cfg.name)
+    models_dir, ckpt_path, replay_dir, checkpoint_dir = _ckpt_paths(cfg.name)
     device = cfg.device if torch.cuda.is_available() or cfg.device == "cpu" else "cpu"
     model, gen = _load_or_init_model(cfg, ckpt_path)
     model.to(device)
@@ -392,9 +393,16 @@ def run_training(cfg: TrainConfig) -> None:
         t_train = time.time() - t0
 
         # ---- 5. Save checkpoint -----------------------------------------
+        save_checkpoint(model, ckpt_path, generation=gen)
+        print(f"  Model saved to {ckpt_path} (train={t_train:.1f}s)")
+
         if gen % cfg.checkpoint_every == 0:
-            save_checkpoint(model, ckpt_path, generation=gen)
-            print(f"  Checkpoint saved to {ckpt_path} (train={t_train:.1f}s)")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            archive_path = os.path.join(
+                checkpoint_dir, f"{cfg.name}_gen{gen:05d}.pt"
+            )
+            save_checkpoint(model, archive_path, generation=gen)
+            print(f"  Checkpoint archived to {archive_path}")
 
     dataset.close()
     save_checkpoint(model, ckpt_path, generation=gen)
