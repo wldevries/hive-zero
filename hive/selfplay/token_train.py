@@ -351,6 +351,19 @@ def run_training(cfg: TrainConfig) -> None:
                 f"(play={t_play:.1f}s, {pos_per_s:.0f} pos/s), "
                 f"buffer: {dataset.raw_size}/{dataset.max_size}"
             )
+            if dataset.raw_size > 0:
+                # Token-count distribution over the full replay buffer. Lets us
+                # see whether SEQ_LEN is under-/over-provisioned: attention is
+                # L² so a cap far above p99 costs FLOPs for nothing, and a max
+                # at the cap means tokens are being silently truncated.
+                tok_counts = dataset.tokens_mask[:dataset.raw_size].sum(axis=1)
+                p50, p95, p99 = np.percentile(tok_counts, [50, 95, 99])
+                cap = dataset.tokens_mask.shape[1]
+                print(
+                    f"  tokens/pos: mean={tok_counts.mean():.0f} "
+                    f"p50={int(p50)} p95={int(p95)} p99={int(p99)} "
+                    f"max={int(tok_counts.max())} (cap={cap})"
+                )
             _print_sample_boards(results)
         finally:
             try:
