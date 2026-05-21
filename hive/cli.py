@@ -9,13 +9,14 @@ from shared.optimizer_defaults import resolve_optimizer_defaults as _resolve_opt
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_HERE)
-_DEFAULT_MODEL_CONFIG_PATH = os.path.join(_REPO_ROOT, "configs", "hive", "medium.json")
+_DEFAULT_MODEL_CONFIG_PATH = os.path.join(_REPO_ROOT, "configs", "hive", "transformer-medium.json")
 
 _FALLBACK_MODEL_CONFIG = {
-    "channels": 64,
-    "grid_size": 17,
-    "trunk": [{"type": "res", "count": 6}],
-    "bilinear_dim": 32,
+    "arch": "transformer",
+    "d_model": 128,
+    "num_heads": 4,
+    "n_blocks": 8,
+    "ffn_mult": 4,
 }
 
 

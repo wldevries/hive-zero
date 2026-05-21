@@ -1,0 +1,7 @@
+{
+  "arch": "transformer",
+  "d_model": 192,
+  "num_heads": 6,
+  "n_blocks": 8,
+  "ffn_mult": 4
+}
