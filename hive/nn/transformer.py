@@ -35,8 +35,8 @@ import torch.nn.functional as F
 
 # ---------- vocabulary (mirror rust/crates/hive-game/src/tokenize.rs) ----------
 
-SEQ_LEN: int = 128
-"""Padded token sequence length."""
+SEQ_LEN: int = 96
+"""Padded token sequence length. Must match Rust `tokenize::SEQ_LEN`."""
 
 BILINEAR_DIM: int = 64
 """Bilinear Q/K embedding dim (D). Matches Rust `BILINEAR_DIM`."""

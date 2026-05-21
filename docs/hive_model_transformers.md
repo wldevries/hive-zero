@@ -56,7 +56,7 @@ graph TD
 ## Input
 
 A Hive position is encoded as a **variable-length token sequence** padded to
-`L = SEQ_LEN = 128`. Each token is one of four kinds; `kind=0` (`PAD`) means
+`L = SEQ_LEN = 96`. Each token is one of four kinds; `kind=0` (`PAD`) means
 the slot is unused and attention masks it out. Token feature constants live
 in [`rust/crates/hive-game/src/tokenize.rs`](../rust/crates/hive-game/src/tokenize.rs)
 and are mirrored in [`hive/nn/transformer.py`](../hive/nn/transformer.py).

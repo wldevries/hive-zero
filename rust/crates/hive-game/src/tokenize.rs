@@ -44,10 +44,10 @@ use crate::piece::{Piece, PieceColor, PieceType, ALL_PIECE_TYPES, PIECE_COUNTS};
 
 // -- vocabulary sizes -------------------------------------------------------
 
-/// Padded token sequence length. Mid-game positions typically use 40–80
-/// slots; the cap accommodates the (extremely rare) case of every ant being
-/// unpinned with a wide frontier.
-pub const SEQ_LEN: usize = 128;
+/// Padded token sequence length. Empirically (v2 replay buffer, 120k positions)
+/// counts are mean≈45, p99≈66, max≈71; SEQ_LEN=96 leaves ~35% headroom over the
+/// observed max and avoids the wasted L² attention cost of the original 128.
+pub const SEQ_LEN: usize = 96;
 
 /// Bilinear embedding dimension for the Q·K policy head. See plan: chosen to
 /// match transformer head-dim convention rather than the CNN-era D=32.
