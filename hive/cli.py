@@ -711,7 +711,7 @@ def main():
         onnx_path = getattr(args, "onnx_model", None)
 
         if onnx_path is None and hasattr(args, "model") and args.model is not None:
-            from hive.nn.model import load_checkpoint
+            from hive.nn.transformer import load_checkpoint
 
             device = _resolve_device(getattr(args, "device", "cuda"))
             model, _ = load_checkpoint(args.model)
