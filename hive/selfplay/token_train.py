@@ -81,6 +81,10 @@ class TrainConfig:
     model_config: dict = field(default_factory=dict)
     time_limit_minutes: Optional[float] = None
     checkpoint_every: int = 1
+    playout_cap_p: float = 0.0
+    fast_cap: int = 20
+    random_opening_moves_min: int = 0
+    random_opening_moves_max: int = 0
 
 
 def _ckpt_paths(name: str) -> tuple[str, str, str]:
@@ -271,13 +275,24 @@ def run_training(cfg: TrainConfig) -> None:
 
     t_started = time.time()
 
+    cap_str = (
+        f"  playout_cap_p={cfg.playout_cap_p}  fast_cap={cfg.fast_cap}\n"
+        if cfg.playout_cap_p > 0 else ""
+    )
+    opening_str = (
+        f"  random_opening_moves={cfg.random_opening_moves_min}-{cfg.random_opening_moves_max}\n"
+        if cfg.random_opening_moves_max > 0 else ""
+    )
     print(
         f"Token self-play training started:\n"
         f"  name={_cc(cfg.name)}  device={device}  grid_size={cfg.grid_size}\n"
         f"  games/gen={cfg.games_per_gen}  sims={cfg.simulations}  "
         f"batch={cfg.training_batch_size}  epochs={cfg.epochs_per_gen}\n"
-        f"  augment_symmetry={cfg.augment_symmetry}  buffer={cfg.buffer_size}"
+        f"  augment_symmetry={cfg.augment_symmetry}  buffer={cfg.buffer_size}\n"
+        f"{cap_str}{opening_str}",
+        end="",
     )
+    print()
 
     while True:
         gen += 1
@@ -351,6 +366,10 @@ def run_training(cfg: TrainConfig) -> None:
                 skip_timeout_data=cfg.skip_timeout_data,
                 rng_seed=gen * 10_000,
                 progress_cb=_progress,
+                playout_cap_p=cfg.playout_cap_p,
+                fast_cap=cfg.fast_cap,
+                random_opening_moves_min=cfg.random_opening_moves_min,
+                random_opening_moves_max=cfg.random_opening_moves_max,
             )
             pbar.update(pbar.total - pbar.n)
             pbar.close()
@@ -361,10 +380,14 @@ def run_training(cfg: TrainConfig) -> None:
             _print_game_length_stats(results)
             _print_mcts_stats(search_stats)
             pos_per_s = total_samples / t_play if t_play > 0 else 0
+            fast_str = (
+                f" [cap_p={cfg.playout_cap_p}, fast={cfg.fast_cap}]"
+                if cfg.playout_cap_p > 0 else ""
+            )
             # Buffer writes happen inline in play_games_concurrent, so we
             # don't break them out here — `play` already includes them.
             print(
-                f"  {cfg.games_per_gen} games: {total_samples} new positions "
+                f"  {cfg.games_per_gen} games: {total_samples} new positions{fast_str} "
                 f"(play={t_play:.1f}s, {pos_per_s:.0f} pos/s), "
                 f"buffer: {dataset.raw_size}/{dataset.max_size}"
             )

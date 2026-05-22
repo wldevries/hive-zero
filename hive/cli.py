@@ -676,6 +676,12 @@ def main():
                 parser.error(f"--model-config {args.model_config!r} not found")
         grid_size = int(model_cfg.get("grid_size", 23))
 
+        opening_arg = getattr(args, "random_opening_moves", 0)
+        if isinstance(opening_arg, tuple):
+            opening_min, opening_max = opening_arg
+        else:
+            opening_min = opening_max = int(opening_arg)
+
         cfg = TrainConfig(
             name=args.name,
             generations=args.generations,
@@ -700,6 +706,10 @@ def main():
             time_limit_minutes=args.time_limit,
             checkpoint_every=args.checkpoint_every,
             skip_timeout_data=not args.keep_timeout_data,
+            playout_cap_p=getattr(args, "playout_cap_p", 0.0),
+            fast_cap=getattr(args, "fast_cap", 20),
+            random_opening_moves_min=opening_min,
+            random_opening_moves_max=opening_max,
         )
         run_training(cfg)
     else:

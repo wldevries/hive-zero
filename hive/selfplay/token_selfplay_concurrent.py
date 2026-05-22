@@ -67,6 +67,10 @@ def play_games_concurrent(
     skip_timeout_data: bool = True,
     rng_seed: int = 0,
     progress_cb: Callable[[int, int, int, list[tuple[int, int]]], None] | None = None,
+    playout_cap_p: float = 0.0,
+    fast_cap: int = 20,
+    random_opening_moves_min: int = 0,
+    random_opening_moves_max: int = 0,
 ) -> tuple[list[GameResult], SearchStats]:
     """Drive `num_games` concurrent self-play games through the Rust ORT
     engine and append the per-ply samples to `dataset`. Returns
@@ -88,6 +92,10 @@ def play_games_concurrent(
         tournament_mode=tournament_mode,
         rng_seed=int(rng_seed),
         progress_cb=progress_cb,
+        playout_cap_p=playout_cap_p,
+        fast_cap=fast_cap,
+        random_opening_moves_min=random_opening_moves_min,
+        random_opening_moves_max=random_opening_moves_max,
     )
 
     out: list[GameResult] = []
@@ -126,7 +134,7 @@ def play_games_concurrent(
                 move_probs=np.asarray(s["move_probs"]),
                 value_target=float(z),
                 root_q_target=float(s["root_q"]),
-                value_only=False,
+                value_only=bool(s.get("value_only", False)),
                 policy_only=False,
             )
             samples_written += 1

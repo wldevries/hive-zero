@@ -989,6 +989,10 @@ fn token_vocab() -> (usize, usize, usize) {
     rng_seed = 0u64,
     show_timing = false,
     progress_cb = None,
+    playout_cap_p = 0.0f32,
+    fast_cap = 20usize,
+    random_opening_moves_min = 0u32,
+    random_opening_moves_max = 0u32,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn play_games_concurrent_ort<'py>(
@@ -1010,6 +1014,10 @@ fn play_games_concurrent_ort<'py>(
     rng_seed: u64,
     show_timing: bool,
     progress_cb: Option<&Bound<'py, PyAny>>,
+    playout_cap_p: f32,
+    fast_cap: usize,
+    random_opening_moves_min: u32,
+    random_opening_moves_max: u32,
 ) -> PyResult<(Vec<Py<PyAny>>, Py<PyAny>)> {
     use pyo3::types::PyDict;
 
@@ -1029,6 +1037,10 @@ fn play_games_concurrent_ort<'py>(
         tournament_mode,
         rng_seed,
         show_timing,
+        playout_cap_p,
+        fast_cap,
+        random_opening_moves_min,
+        random_opening_moves_max,
     };
 
     // Optional progress callback. ProgressFn is 'a tied to the engine
@@ -1068,6 +1080,7 @@ fn play_games_concurrent_ort<'py>(
             sd.set_item("move_probs", make_array1(py, s.move_probs))?;
             sd.set_item("root_q", s.root_q)?;
             sd.set_item("mover_is_white", s.mover_is_white)?;
+            sd.set_item("value_only", s.value_only)?;
             samples.push(sd.into_pyobject(py)?.unbind().into());
         }
         dict.set_item("samples", samples)?;

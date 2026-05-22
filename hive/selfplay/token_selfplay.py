@@ -51,6 +51,7 @@ class PlySample:
     move_probs: np.ndarray             # (K,)   float32
     root_q: float                      # search-improved Q from this ply's mover POV
     mover_is_white: bool               # for sign-flipping the value target
+    value_only: bool = False           # fast-cap turn: mask policy loss
 
 
 @dataclass
@@ -123,6 +124,10 @@ def play_one_game(
     skip_timeout_data: bool = True,
     rng_seed: int | None = None,
     on_move: Callable[[int, str, float], None] | None = None,
+    playout_cap_p: float = 0.0,
+    fast_cap: int = 20,
+    random_opening_moves_min: int = 0,
+    random_opening_moves_max: int = 0,
 ) -> GameResult:
     """Play one self-play game and append the per-ply samples to `dataset`.
 
@@ -133,6 +138,9 @@ def play_one_game(
     - Timeout games (hit `max_moves` without a decisive outcome) are dropped
       from the replay buffer when `skip_timeout_data=True` — matches the
       `TimeoutTarget::Skip` strategy from the CNN era.
+    - `playout_cap_p` > 0 enables KataGo-style playout cap randomization:
+      each ply is full search with prob p, else `fast_cap` sims (value-only).
+    - `random_opening_moves_min/max` play uniform-random moves at game start.
 
     Returns a `GameResult` summary for the caller's logging.
     """
@@ -143,30 +151,52 @@ def play_one_game(
     game = HiveGame(tournament_mode=tournament_mode, grid_size=grid_size)
     samples: list[PlySample] = []
 
+    # Random opening moves: play uniformly at random before MCTS takes over.
+    # valid_moves() returns (piece_str, from_pos, to_pos) tuples; use play_move().
+    if random_opening_moves_max > 0:
+        n_opening = rng.randint(random_opening_moves_min, random_opening_moves_max)
+        for _ in range(n_opening):
+            if game.is_game_over or game.move_count >= max_moves:
+                break
+            valid = game.valid_moves()
+            if not valid:
+                break
+            piece_str, from_pos, to_pos = rng.choice(valid)
+            game.play_move(piece_str, from_pos, to_pos)
+
     while not game.is_game_over and game.move_count < max_moves:
         # Empty valid_moves → forced pass (rare in Hive); skip the sample.
         if not game.valid_moves():
             game.play_pass()
             continue
 
+        # Playout cap randomization: fast turns use fewer sims and no Dirichlet.
+        if playout_cap_p > 0.0:
+            is_fast = rng.random() >= playout_cap_p
+        else:
+            is_fast = False
+        sims_this_ply = fast_cap if is_fast else simulations
+        eff_dir_alpha = 0.0 if is_fast else dir_alpha
+        eff_dir_epsilon = 0.0 if is_fast else dir_epsilon
+
         if ort_session is not None:
             cat, pos, flg, msk, msrc, mdst, mprob, root_q, _best_uhp = game.mcts_run_ort(
                 ort_session,
-                simulations=simulations,
+                simulations=sims_this_ply,
                 c_puct=c_puct,
                 draw_contempt=draw_contempt,
-                dir_alpha=dir_alpha,
-                dir_epsilon=dir_epsilon,
+                dir_alpha=eff_dir_alpha,
+                dir_epsilon=eff_dir_epsilon,
                 play_batch=play_batch,
             )
         else:
             cat, pos, flg, msk, msrc, mdst, mprob, root_q, _best_uhp = game.mcts_run(
                 eval_fn,
-                simulations=simulations,
+                simulations=sims_this_ply,
                 c_puct=c_puct,
                 draw_contempt=draw_contempt,
-                dir_alpha=dir_alpha,
-                dir_epsilon=dir_epsilon,
+                dir_alpha=eff_dir_alpha,
+                dir_epsilon=eff_dir_epsilon,
                 play_batch=play_batch,
             )
         cat = np.asarray(cat); pos = np.asarray(pos)
@@ -184,18 +214,21 @@ def play_one_game(
             move_probs=mprob,
             root_q=float(root_q),
             mover_is_white=mover_is_white,
+            value_only=is_fast,
         ))
 
-        # Temperature schedule: linear interp from start → end over the
-        # first `temperature_moves` plies.
-        ply = game.move_count
-        if temperature_moves <= 0:
-            t = temperature_end
-        elif ply >= temperature_moves:
-            t = temperature_end
+        # Fast turns: argmax (no temperature). Full turns: temperature schedule.
+        if is_fast:
+            t = 0.0
         else:
-            frac = ply / max(1, temperature_moves)
-            t = temperature_start + frac * (temperature_end - temperature_start)
+            ply = game.move_count
+            if temperature_moves <= 0:
+                t = temperature_end
+            elif ply >= temperature_moves:
+                t = temperature_end
+            else:
+                frac = ply / max(1, temperature_moves)
+                t = temperature_start + frac * (temperature_end - temperature_start)
         chosen_idx = _sample_move_index(mprob, t, rng)
         # Need the UHP string for the chosen move. mcts_run only returned
         # `best_uhp` for the argmax; reconstruct chosen move's UHP via the
@@ -256,7 +289,7 @@ def play_one_game(
             move_probs=s.move_probs,
             value_target=float(z),
             root_q_target=float(s.root_q),
-            value_only=False,
+            value_only=s.value_only,
             policy_only=False,
         )
         written += 1

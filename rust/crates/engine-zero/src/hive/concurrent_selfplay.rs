@@ -52,6 +52,8 @@ pub struct PlySample {
     pub move_probs: Vec<f32>,
     pub root_q: f32,
     pub mover_is_white: bool,
+    /// True for fast-cap turns (fewer sims, no Dirichlet): policy loss is masked.
+    pub value_only: bool,
 }
 
 /// Per-game outcome plus training samples.
@@ -137,6 +139,16 @@ pub struct ConcurrentSelfPlayConfig {
     /// If true, print a per-phase breakdown to stderr after the session
     /// finishes so the caller can tell whether GPU or CPU is the bottleneck.
     pub show_timing: bool,
+    /// KataGo-style playout cap: probability [0,1] of doing a FULL search.
+    /// The remaining (1-p) fraction use `fast_cap` sims (value-only training).
+    /// 0.0 disables fast-cap entirely.
+    pub playout_cap_p: f32,
+    /// Simulations per fast-cap turn (used when the coin flip selects fast search).
+    pub fast_cap: usize,
+    /// Random opening moves: sample N ~ Uniform[min, max] per game, play them
+    /// uniformly at random before MCTS takes over. 0/0 disables.
+    pub random_opening_moves_min: u32,
+    pub random_opening_moves_max: u32,
 }
 
 /// Per-game in-progress state during the concurrent run.
@@ -148,6 +160,11 @@ struct GameSlot {
     /// honest when some selections hit terminal nodes that get backpropped
     /// internally and don't need NN evaluation).
     sims_for_current_move: usize,
+    /// Sim budget for the current move — either `cfg.simulations` (full) or
+    /// `cfg.fast_cap` (fast). Decided at INIT time.
+    sims_target: usize,
+    /// True when the current move is a fast-cap turn (value-only training).
+    is_fast: bool,
     /// Whether the search has been initialised at the current root.
     initialised: bool,
     /// True while an INIT batch entry for this slot is submitted but its
@@ -160,10 +177,11 @@ struct GameSlot {
     /// the cap.
     sims_in_flight: usize,
     samples: Vec<PlySample>,
-    /// White's value once the game finishes — None until then.
     rng_state: u64,
     /// Whether this game has finished (game over or hit max_moves).
     complete: bool,
+    /// Random opening moves remaining before MCTS takes over.
+    opening_moves_remaining: u32,
 }
 
 /// Progress callback fired once per SIM round.
@@ -197,20 +215,33 @@ pub fn play_games_concurrent_ort(
 
     let mut stats = StatsAccumulators::default();
     let mut slots: Vec<GameSlot> = (0..cfg.num_games)
-        .map(|i| GameSlot {
-            game: if cfg.tournament_mode {
-                Game::new_tournament_with_grid_size(cfg.grid_size)
+        .map(|i| {
+            let mut rng_state = cfg.rng_seed.wrapping_add(i as u64 * 0x9E37_79B9_7F4A_7C15);
+            let opening_count = if cfg.random_opening_moves_max > 0 {
+                let r = next_unit_f32(&mut rng_state);
+                let range = (cfg.random_opening_moves_max - cfg.random_opening_moves_min + 1) as f32;
+                cfg.random_opening_moves_min + (r * range) as u32
             } else {
-                Game::new_with_grid_size(cfg.grid_size)
-            },
-            search: MctsSearch::<Game>::new(cfg.simulations.saturating_add(64)),
-            sims_for_current_move: 0,
-            initialised: false,
-            init_in_flight: false,
-            sims_in_flight: 0,
-            samples: Vec::new(),
-            rng_state: cfg.rng_seed.wrapping_add(i as u64 * 0x9E37_79B9_7F4A_7C15),
-            complete: false,
+                0
+            };
+            GameSlot {
+                game: if cfg.tournament_mode {
+                    Game::new_tournament_with_grid_size(cfg.grid_size)
+                } else {
+                    Game::new_with_grid_size(cfg.grid_size)
+                },
+                search: MctsSearch::<Game>::new(cfg.simulations.saturating_add(64)),
+                sims_for_current_move: 0,
+                sims_target: cfg.simulations,
+                is_fast: false,
+                initialised: false,
+                init_in_flight: false,
+                sims_in_flight: 0,
+                samples: Vec::new(),
+                rng_state,
+                complete: false,
+                opening_moves_remaining: opening_count,
+            }
         })
         .collect();
 
@@ -258,6 +289,30 @@ pub fn play_games_concurrent_ort(
         let mut t_advance = Duration::ZERO;
 
         loop {
+            // ---- Phase 0: random opening moves (runs until exhausted, then ----
+            // stops; slots with remaining opening moves are excluded from INIT).
+            for slot in slots.iter_mut() {
+                if slot.complete || slot.opening_moves_remaining == 0 { continue; }
+                while slot.opening_moves_remaining > 0 {
+                    let valid = slot.game.valid_moves();
+                    if valid.is_empty() {
+                        slot.opening_moves_remaining = 0;
+                        break;
+                    }
+                    let r = next_unit_f32(&mut slot.rng_state);
+                    let idx = ((r * valid.len() as f32) as usize).min(valid.len() - 1);
+                    if let Err(e) = slot.game.play_move(&valid[idx]) {
+                        return Err(e);
+                    }
+                    slot.opening_moves_remaining -= 1;
+                    if slot.game.is_game_over() || slot.game.move_count as u32 >= cfg.max_moves {
+                        slot.complete = true;
+                        slot.opening_moves_remaining = 0;
+                        break;
+                    }
+                }
+            }
+
             // ---- Phase A: build INIT + SIM batches using the CURRENT --------
             // state (which reflects distributes up through the iteration BEFORE
             // the previous one — the previous iter's `pending` hasn't been
@@ -270,9 +325,11 @@ pub fn play_games_concurrent_ort(
             let mut routing: Vec<(usize, RoutingKind)> = Vec::new();
             let mut new_stashes: HashMap<usize, Vec<(NodeId, Game)>> = HashMap::new();
 
-            // INIT: any uninitialised slot without an INIT already in flight.
+            // INIT: any uninitialised slot without an INIT already in flight
+            // and whose opening moves are done.
             for (gi, slot) in slots.iter_mut().enumerate() {
                 if slot.complete || slot.initialised || slot.init_in_flight { continue; }
+                if slot.opening_moves_remaining > 0 { continue; }
                 let mut root_game = slot.game.clone();
                 let (tb, _) = tokenize::tokenize_and_priors(&mut root_game);
                 batches.push(tb);
@@ -284,8 +341,8 @@ pub fn play_games_concurrent_ort(
             // same effective per-game VL ceiling as the synchronous path.
             for (gi, slot) in slots.iter_mut().enumerate() {
                 if slot.complete || !slot.initialised { continue; }
-                if slot.sims_for_current_move >= cfg.simulations { continue; }
-                let want = play_batch.min(cfg.simulations - slot.sims_for_current_move);
+                if slot.sims_for_current_move >= slot.sims_target { continue; }
+                let want = play_batch.min(slot.sims_target - slot.sims_for_current_move);
                 let leaves = slot.search.select_leaves(want);
                 // sims_for_current_move credits `want` regardless of
                 // leaves.len() — terminal selections get backpropped
@@ -356,9 +413,20 @@ pub fn play_games_concurrent_ort(
                     match kind {
                         RoutingKind::Init => {
                             slot.search.init(&slot.game, &policies[cursor]);
+                            // Decide fast vs full for this move.
+                            let is_fast = if cfg.playout_cap_p > 0.0 {
+                                // is_fast when coin flip >= p (full-search prob)
+                                next_unit_f32(&mut slot.rng_state) >= cfg.playout_cap_p
+                            } else {
+                                false
+                            };
+                            slot.is_fast = is_fast;
+                            slot.sims_target = if is_fast { cfg.fast_cap.max(1) } else { cfg.simulations };
                             if let RootNoise::Dirichlet { alpha, epsilon } = search_params.root_noise {
                                 slot.search.params = search_params.clone();
-                                slot.search.apply_root_dirichlet(alpha, epsilon);
+                                if !is_fast {
+                                    slot.search.apply_root_dirichlet(alpha, epsilon);
+                                }
                             } else {
                                 slot.search.params = search_params.clone();
                             }
@@ -395,7 +463,7 @@ pub fn play_games_concurrent_ort(
             for slot in slots.iter_mut() {
                 if slot.complete || !slot.initialised { continue; }
                 if slot.sims_in_flight > 0 { continue; }
-                if slot.sims_for_current_move < cfg.simulations { continue; }
+                if slot.sims_for_current_move < slot.sims_target { continue; }
                 advance_one(slot, cfg, &mut stats)?;
             }
             t_advance += t_phase_d.elapsed();
@@ -550,10 +618,17 @@ fn advance_one(
         move_probs: move_probs.clone(),
         root_q,
         mover_is_white,
+        value_only: slot.is_fast,
     });
 
-    // Pick chosen move via temperature-aware sampling on the visit dist.
-    let chosen_mv = sample_chosen_move(slot, &visits, cfg)?;
+    // Fast turns: argmax (no temperature). Full turns: temperature schedule.
+    let chosen_mv = if slot.is_fast {
+        visits.iter().max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(mv, _)| *mv)
+            .ok_or_else(|| "empty visit distribution for fast move".to_string())?
+    } else {
+        sample_chosen_move(slot, &visits, cfg)?
+    };
     slot.game.play_move(&chosen_mv).map_err(|e| e)?;
 
     // Decide what's next for this game.
