@@ -39,6 +39,17 @@ from ..nn.transformer import (
 from .token_selfplay import GameResult, play_one_game
 from .token_selfplay_concurrent import play_games_concurrent, SearchStats
 
+# Same column layout as hive/selfplay/selfplay.py's CNN trainer so
+# scripts/plot_log.py works on either log without changes.
+_LOG_HEADER = (
+    "iter,mode,simulations,wins_w,wins_b,"
+    "draws,draws_repetition,draws_timeout,draws_real,"
+    "resignations,positions,buffer,"
+    "loss,policy_loss,value_loss,qd_loss,lr,duration_s,comment,qe_loss,mob_loss,"
+    "avg_game_len,med_game_len,avg_decisive_len,med_decisive_len,"
+    "mcts_top1_mean,mcts_top1_std,mcts_depth_mean,mcts_depth_std,mcts_moves_mean,mcts_moves_std\n"
+)
+
 
 @dataclass
 class TrainConfig:
@@ -72,14 +83,14 @@ class TrainConfig:
     checkpoint_every: int = 1
 
 
-def _ckpt_paths(name: str) -> tuple[str, str, str, str]:
-    """Return (models_dir, live_ckpt_path, replay_dir, checkpoint_dir)."""
+def _ckpt_paths(name: str) -> tuple[str, str, str]:
+    """Return (models_dir, live_ckpt_path, checkpoint_dir).
+    `replay.h5` lives directly in `models_dir`, matching Zertz/Yinsh."""
     models_dir = os.path.join("models", name)
     os.makedirs(models_dir, exist_ok=True)
     ckpt = os.path.join(models_dir, f"{name}.pt")
-    replay = os.path.join(models_dir, "replay")
     checkpoint_dir = os.path.join(models_dir, "checkpoints")
-    return models_dir, ckpt, replay, checkpoint_dir
+    return models_dir, ckpt, checkpoint_dir
 
 
 def _load_or_init_model(cfg: TrainConfig, ckpt_path: str) -> tuple[HiveTransformer, int]:
@@ -241,7 +252,7 @@ def _print_sample_boards(results: list[GameResult]) -> None:
 def run_training(cfg: TrainConfig) -> None:
     """Drive the play → train → export → repeat loop until `generations`
     are done or `time_limit_minutes` elapses."""
-    models_dir, ckpt_path, replay_dir, checkpoint_dir = _ckpt_paths(cfg.name)
+    models_dir, ckpt_path, checkpoint_dir = _ckpt_paths(cfg.name)
     device = cfg.device if torch.cuda.is_available() or cfg.device == "cpu" else "cpu"
     model, gen = _load_or_init_model(cfg, ckpt_path)
     model.to(device)
@@ -250,8 +261,13 @@ def run_training(cfg: TrainConfig) -> None:
         lr=cfg.lr, weight_decay=cfg.weight_decay,
         grad_clip=cfg.grad_clip, optimizer=cfg.optimizer,
     )
-    dataset = HiveDataset(max_size=cfg.buffer_size, buf_dir=replay_dir)
+    dataset = HiveDataset(max_size=cfg.buffer_size, buf_dir=models_dir)
     dataset.augment_symmetry = cfg.augment_symmetry
+
+    log_path = os.path.join(models_dir, f"{cfg.name}_log.csv")
+    if not os.path.exists(log_path):
+        with open(log_path, "w") as f:
+            f.write(_LOG_HEADER)
 
     t_started = time.time()
 
@@ -294,6 +310,7 @@ def run_training(cfg: TrainConfig) -> None:
             # to K * play_batch). One ply-level tqdm bar updated from a
             # progress callback in the Rust round-loop.
             t0 = time.time()
+            prev_count = dataset._count
             pbar = tqdm(
                 total=cfg.max_moves,
                 desc=f"  Self-play",
@@ -351,18 +368,32 @@ def run_training(cfg: TrainConfig) -> None:
                 f"(play={t_play:.1f}s, {pos_per_s:.0f} pos/s), "
                 f"buffer: {dataset.raw_size}/{dataset.max_size}"
             )
-            if dataset.raw_size > 0:
-                # Token-count distribution over the full replay buffer. Lets us
-                # see whether SEQ_LEN is under-/over-provisioned: attention is
-                # L² so a cap far above p99 costs FLOPs for nothing, and a max
-                # at the cap means tokens are being silently truncated.
-                tok_counts = dataset.tokens_mask[:dataset.raw_size].sum(axis=1)
-                p50, p95, p99 = np.percentile(tok_counts, [50, 95, 99])
+            n_new = min(dataset._count - prev_count, dataset.max_size)
+            if n_new > 0:
+                # Token-count distribution over THIS generation's new samples
+                # only (not the whole replay buffer — that would average over
+                # many gens of stale data and barely move). Lets us see whether
+                # SEQ_LEN is under-/over-provisioned: attention is L² so a cap
+                # far above p99 wastes FLOPs, and max==cap means tokens are
+                # being silently truncated.
+                end = dataset._count % dataset.max_size
+                start = (dataset._count - n_new) % dataset.max_size
+                if end == 0:
+                    gen_mask = dataset.tokens_mask[start:dataset.max_size]
+                elif start < end:
+                    gen_mask = dataset.tokens_mask[start:end]
+                else:
+                    gen_mask = np.concatenate([
+                        dataset.tokens_mask[start:dataset.max_size],
+                        dataset.tokens_mask[:end],
+                    ])
+                gen_counts = gen_mask.sum(axis=1)
+                p50, p95, p99 = np.percentile(gen_counts, [50, 95, 99])
                 cap = dataset.tokens_mask.shape[1]
                 print(
-                    f"  tokens/pos: mean={tok_counts.mean():.0f} "
+                    f"  tokens/pos: mean={gen_counts.mean():.0f} "
                     f"p50={int(p50)} p95={int(p95)} p99={int(p99)} "
-                    f"max={int(tok_counts.max())} (cap={cap})"
+                    f"max={int(gen_counts.max())} (cap={cap})"
                 )
             _print_sample_boards(results)
         finally:
@@ -397,7 +428,41 @@ def run_training(cfg: TrainConfig) -> None:
                 )
         t_train = time.time() - t0
 
-        # ---- 5. Save checkpoint -----------------------------------------
+        # ---- 5. Append CSV log row (one per generation) ------------------
+        wins_w = sum(1 for r in results if r.outcome == "WhiteWins")
+        wins_b = sum(1 for r in results if r.outcome == "BlackWins")
+        draws_real = sum(1 for r in results if r.outcome == "Draw")
+        draws_rep  = sum(1 for r in results if r.outcome == "DrawByRepetition")
+        draws_to   = sum(1 for r in results if r.outcome == "InProgress")
+        draws_tot  = draws_real + draws_rep + draws_to
+        lengths = sorted(r.move_count for r in results)
+        decisive = sorted(
+            r.move_count for r in results
+            if r.outcome in ("WhiteWins", "BlackWins")
+        )
+        avg_gl = sum(lengths) / len(lengths) if lengths else 0
+        med_gl = lengths[len(lengths) // 2] if lengths else 0
+        avg_dl = sum(decisive) / len(decisive) if decisive else 0
+        med_dl = decisive[len(decisive) // 2] if decisive else 0
+        with open(log_path, "a") as f:
+            f.write(
+                f"{gen},MCTS,{cfg.simulations},"
+                f"{wins_w},{wins_b},"
+                f"{draws_tot},{draws_rep},{draws_to},{draws_real},"
+                f"0,{total_samples},{dataset.raw_size},"
+                f"{stats.get('total_loss', 0):.6f},"
+                f"{stats.get('policy_loss', 0):.6f},"
+                f"{stats.get('value_loss', 0):.6f},"
+                f"{stats.get('qd_loss', 0):.6f},"
+                f"{lr_v:.8f},{t_play + t_train:.1f},,"
+                f"{stats.get('qe_loss', 0):.6f},{stats.get('mob_loss', 0):.6f},"
+                f"{avg_gl:.1f},{med_gl},{avg_dl:.1f},{med_dl},"
+                f"{search_stats.top1_mean:.4f},{search_stats.top1_std:.4f},"
+                f"{search_stats.depth_mean:.2f},{search_stats.depth_std:.2f},"
+                f"{search_stats.valid_moves_mean:.1f},{search_stats.valid_moves_std:.1f}\n"
+            )
+
+        # ---- 6. Save checkpoint -----------------------------------------
         save_checkpoint(model, ckpt_path, generation=gen)
         print(f"  Model saved to {ckpt_path} (train={t_train:.1f}s)")
 
